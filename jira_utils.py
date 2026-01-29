@@ -1,0 +1,2932 @@
+##########################################################################################
+#
+# Script name: jira_utils.py
+#
+# Description: Jira utilities for interacting with Cornelis Networks Jira instance.
+#
+# Author: John Macdonald
+#
+# Credentials:
+#   This script uses Jira API tokens for authentication. To set up:
+#   1. Generate an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+#   2. Set environment variables:
+#      export JIRA_EMAIL="your.email@cornelisnetworks.com"
+#      export JIRA_API_TOKEN="your_api_token_here"
+#   
+#   NEVER commit credentials to version control.
+#
+##########################################################################################
+
+import argparse
+import logging
+import sys
+import os
+import time
+import json
+import csv
+from datetime import date, datetime, timedelta
+import re
+import requests
+
+try:
+    from jira import JIRA
+except ImportError:
+    print('Error: jira package not installed. Run: pip install jira')
+    sys.exit(1)
+
+# ****************************************************************************************
+# Global data and configuration
+# ****************************************************************************************
+# Set global variables here and log.debug them below
+
+# Jira configuration
+JIRA_URL = 'https://cornelisnetworks.atlassian.net'
+
+# Logging config
+log = logging.getLogger(os.path.basename(sys.argv[0]))
+log.setLevel(logging.DEBUG)
+
+# File handler for logging
+fh = logging.FileHandler('jira_utils.log', mode='w')
+fh.setLevel(logging.DEBUG)
+formatter = logging.Formatter(
+    '%(asctime)-15s [%(funcName)25s:%(lineno)-5s] %(levelname)-8s %(message)s')
+fh.setFormatter(formatter)
+log.addHandler(fh)  # Add file handler to logger                
+
+log.debug(f'Global data and configuration for this script...')
+log.debug(f'JIRA_URL: {JIRA_URL}')
+
+# Output control - set by handle_args()
+_quiet_mode = False
+_show_jql = False
+
+def output(message=''):
+    '''
+    Print user-facing output, respecting quiet mode.
+    Always logs to file regardless of quiet mode.
+    
+    For tables and user-facing output:
+    - stdout: Clean output without logger prefix (via print)
+    - log file: Full logger format with timestamps (written directly to file handler)
+    
+    Input:
+        message: String to output (default empty for blank line).
+    
+    Output:
+        None; prints to stdout unless in quiet mode.
+    
+    Side Effects:
+        Always logs message to log file at INFO level.
+    '''
+    # Log to file only (bypass stdout handler by writing directly to file handler)
+    if message:
+        record = logging.LogRecord(
+            name=log.name,
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=0,
+            msg=f'OUTPUT: {message}',
+            args=(),
+            exc_info=None,
+            func='output'
+        )
+        fh.emit(record)
+    
+    # Only print to stdout if not in quiet mode (clean output)
+    if not _quiet_mode:
+        print(message)
+
+
+def print_ticket_table_header():
+    '''Print the header row for ticket tables.'''
+    output('-' * 170)
+    output(f'{"Key":<15} {"Type":<12} {"Status":<12} {"Priority":<10} {"Created":<12} {"Updated":<12} {"Fix Version":<15} {"Assignee":<18} {"Summary":<30}')
+    output('-' * 170)
+
+
+def print_ticket_row(issue):
+    '''
+    Print a single ticket row in the standard table format.
+    
+    Input:
+        issue: Issue dict from Jira API.
+    '''
+    key = issue.get('key', 'N/A')
+    fields = issue.get('fields', {})
+    
+    issue_type = fields.get('issuetype', {}).get('name', 'N/A') if fields.get('issuetype') else 'N/A'
+    status = fields.get('status', {}).get('name', 'N/A') if fields.get('status') else 'N/A'
+    priority = fields.get('priority', {}).get('name', 'N/A') if fields.get('priority') else 'N/A'
+    
+    created = fields.get('created', 'N/A')
+    if created and created != 'N/A':
+        try:
+            created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            created = created_dt.strftime('%Y-%m-%d')
+        except:
+            created = created[:10] if len(created) >= 10 else created
+    
+    updated = fields.get('updated', 'N/A')
+    if updated and updated != 'N/A':
+        try:
+            updated_dt = datetime.fromisoformat(updated.replace('Z', '+00:00'))
+            updated = updated_dt.strftime('%Y-%m-%d')
+        except:
+            updated = updated[:10] if len(updated) >= 10 else updated
+    
+    fix_versions = fields.get('fixVersions', [])
+    fix_version = ', '.join([v.get('name', '') for v in fix_versions]) if fix_versions else 'N/A'
+    
+    assignee = fields.get('assignee', {})
+    assignee_name = assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'
+    summary = fields.get('summary', 'N/A') or 'N/A'
+    
+    # Truncate for display
+    if len(issue_type) > 10:
+        issue_type = issue_type[:10] + '..'
+    if len(status) > 10:
+        status = status[:10] + '..'
+    if len(priority) > 8:
+        priority = priority[:8] + '..'
+    if len(fix_version) > 13:
+        fix_version = fix_version[:13] + '..'
+    if len(assignee_name) > 16:
+        assignee_name = assignee_name[:16] + '..'
+    if len(summary) > 28:
+        summary = summary[:28] + '..'
+    
+    output(f'{key:<15} {issue_type:<12} {status:<12} {priority:<10} {created:<12} {updated:<12} {fix_version:<15} {assignee_name:<18} {summary:<30}')
+
+
+def print_ticket_table_footer(count):
+    '''Print the footer row for ticket tables.'''
+    output('=' * 170)
+    output(f'Total: {count} tickets')
+    output('')
+
+
+# Store the last JQL query for display at end of operation
+_last_jql = None
+
+def show_jql(jql):
+    '''
+    Store the JQL query for display at end of operation if --show-jql flag is set.
+    
+    Input:
+        jql: The JQL query string to store.
+    
+    Output:
+        None; stores JQL for later display.
+    '''
+    global _last_jql
+    if _show_jql:
+        _last_jql = jql
+        log.debug(f'Stored JQL for end-of-operation display: {jql}')
+
+
+def display_jql():
+    '''
+    Display the stored JQL query at end of operation and write to jql.txt.
+    Called from main() before "Operation complete" message.
+    
+    Output:
+        None; prints JQL to stdout and writes to jql.txt if _show_jql is True.
+    '''
+    global _last_jql
+    if _show_jql and _last_jql:
+        log.info(f'JQL: {_last_jql}')
+        output('')
+        output('=' * 80)
+        output('Equivalent JQL Query:')
+        output('=' * 80)
+        output(_last_jql)
+        output('=' * 80)
+        output('')
+        
+        # Write to jql.txt
+        try:
+            with open('jql.txt', 'w') as f:
+                f.write(_last_jql)
+            log.info('Wrote JQL to jql.txt')
+        except Exception as e:
+            log.warning(f'Failed to write jql.txt: {e}')
+
+
+# ****************************************************************************************
+# Exceptions
+# ****************************************************************************************
+
+class Error(Exception):
+    '''
+    Base class for exceptions in this module.
+    '''
+    pass
+
+class JiraConnectionError(Error):
+    '''
+    Exception raised when Jira connection fails.
+    '''
+    def __init__(self, message):
+        self.message = f'Jira connection failed: {message}'
+        super().__init__(self.message)
+
+class JiraCredentialsError(Error):
+    '''
+    Exception raised when Jira credentials are missing or invalid.
+    '''
+    def __init__(self, message):
+        self.message = f'Jira credentials error: {message}'
+        super().__init__(self.message)
+
+class JiraProjectError(Error):
+    '''
+    Exception raised when Jira project operations fail.
+    '''
+    def __init__(self, message):
+        self.message = f'Jira project error: {message}'
+        super().__init__(self.message)
+
+
+# ****************************************************************************************
+# Functions
+# ****************************************************************************************
+
+def get_jira_credentials():
+    '''
+    Retrieve Jira credentials from environment variables.
+
+    Input:
+        None directly; reads from environment variables JIRA_EMAIL and JIRA_API_TOKEN.
+
+    Output:
+        Tuple of (email, api_token) strings.
+
+    Raises:
+        JiraCredentialsError: If required environment variables are not set.
+    '''
+    log.debug('Entering get_jira_credentials()')
+    email = os.environ.get('JIRA_EMAIL')
+    api_token = os.environ.get('JIRA_API_TOKEN')
+    
+    if not email:
+        raise JiraCredentialsError('JIRA_EMAIL environment variable not set')
+    if not api_token:
+        raise JiraCredentialsError('JIRA_API_TOKEN environment variable not set')
+    
+    log.debug(f'Retrieved credentials for: {email}')
+    return email, api_token
+
+
+def connect_to_jira():
+    '''
+    Establish connection to Jira instance using API token authentication.
+
+    Input:
+        None directly; uses credentials from environment variables.
+
+    Output:
+        JIRA object connected to the Cornelis Networks Jira instance.
+
+    Raises:
+        JiraConnectionError: If connection to Jira fails.
+        JiraCredentialsError: If credentials are missing.
+    '''
+    log.debug('Entering connect_to_jira()')
+    email, api_token = get_jira_credentials()
+    
+    log.info(f'Connecting to Jira at {JIRA_URL}...')
+    try:
+        jira = JIRA(
+            server=JIRA_URL,
+            basic_auth=(email, api_token),
+            options={'rest_api_version': '3'}
+        )
+        log.info('Successfully connected to Jira')
+        return jira
+    except Exception as e:
+        raise JiraConnectionError(str(e))
+
+
+def list_projects(jira):
+    '''
+    List all available Jira projects.
+
+    Input:
+        jira: JIRA object with active connection.
+
+    Output:
+        None; prints project list to stdout.
+
+    Side Effects:
+        Logs project information and prints formatted project list.
+    '''
+    log.debug('Entering list_projects()')
+    
+    try:
+        projects = jira.projects()
+        log.debug(f'Found {len(projects)} projects')
+        
+        output('')
+        output('=' * 80)
+        output(f'{"Key":<15} {"Name":<40} {"Lead":<20}')
+        output('=' * 80)
+        
+        for project in sorted(projects, key=lambda p: p.key):
+            lead = getattr(project, 'lead', None)
+            lead_name = lead.displayName if lead else 'N/A'
+            output(f'{project.key:<15} {project.name:<40} {lead_name:<20}')
+        
+        output('=' * 80)
+        output(f'Total projects: {len(projects)}')
+        output('')
+        
+    except Exception as e:
+        log.error(f'Failed to list projects: {e}')
+        raise
+
+
+def validate_project(jira, project_key):
+    '''
+    Validate that a project exists and return the project object.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+
+    Output:
+        Project object if found.
+
+    Raises:
+        JiraProjectError: If project does not exist or cannot be accessed.
+    '''
+    log.debug(f'Entering validate_project(project_key={project_key})')
+    try:
+        project = jira.project(project_key)
+        log.debug(f'Project validated: {project.name}')
+        return project
+    except Exception as e:
+        raise JiraProjectError(f'Project "{project_key}" not found or not accessible: {e}')
+
+
+def get_project_workflows(jira, project_key):
+    '''
+    Get and display the status workflow for a project.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+
+    Output:
+        None; prints workflow statuses to stdout.
+
+    Side Effects:
+        Logs workflow information and prints formatted status list.
+    '''
+    log.debug(f'Entering get_project_workflows(project_key={project_key})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        # Get all statuses available in the project
+        statuses = jira.statuses()
+        log.debug(f'Found {len(statuses)} total statuses')
+        
+        # Get issue types for the project to find relevant workflows
+        issue_types = jira.project(project_key).issueTypes
+        
+        output('')
+        output('=' * 80)
+        output(f'Workflow Statuses for Project: {project_key} ({project.name})')
+        output('=' * 80)
+        
+        # Group statuses by category
+        status_categories = {}
+        for status in statuses:
+            category = status.statusCategory.name
+            if category not in status_categories:
+                status_categories[category] = []
+            status_categories[category].append(status)
+        
+        for category in sorted(status_categories.keys()):
+            output(f'\n{category}:')
+            output('-' * 40)
+            for status in sorted(status_categories[category], key=lambda s: s.name):
+                output(f'  {status.name:<30} (ID: {status.id})')
+        
+        output('')
+        output('=' * 80)
+        output(f'Total statuses: {len(statuses)}')
+        output('')
+        
+    except JiraProjectError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to get workflows: {e}')
+        raise
+
+
+def get_project_issue_types(jira, project_key):
+    '''
+    Get and display the issue types (ticket types) for a project.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+
+    Output:
+        None; prints issue types to stdout.
+
+    Side Effects:
+        Logs issue type information and prints formatted list.
+    '''
+    log.debug(f'Entering get_project_issue_types(project_key={project_key})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        issue_types = project.issueTypes
+        log.debug(f'Found {len(issue_types)} issue types')
+        
+        output('')
+        output('=' * 80)
+        output(f'Issue Types for Project: {project_key} ({project.name})')
+        output('=' * 80)
+        output(f'{"Name":<25} {"ID":<12} {"Subtask":<10} {"Description":<30}')
+        output('-' * 80)
+        
+        for issue_type in sorted(issue_types, key=lambda t: t.name):
+            is_subtask = getattr(issue_type, 'subtask', False)
+            description = getattr(issue_type, 'description', 'N/A') or 'N/A'
+            # Truncate description if too long
+            if len(description) > 27:
+                description = description[:27] + '...'
+            output(f'{issue_type.name:<25} {issue_type.id:<12} {str(is_subtask):<10} {description:<30}')
+        
+        output('=' * 80)
+        output(f'Total issue types: {len(issue_types)}')
+        output('')
+        
+    except JiraProjectError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to get issue types: {e}')
+        raise
+
+
+def get_project_fields(jira, project_key, issue_type_names=None):
+    '''
+    Get and display create, edit, and transition fields for issue types in a project.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        issue_type_names: List of issue type names to show, or None/empty for all.
+
+    Output:
+        None; prints fields per issue type to stdout.
+
+    Side Effects:
+        Logs field information and prints formatted field list.
+    '''
+    log.debug(f'Entering get_project_fields(project_key={project_key}, issue_type_names={issue_type_names})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        # Get all issue types for the project
+        all_issue_types = {it.name: it for it in project.issueTypes}
+        log.debug(f'Found {len(all_issue_types)} issue types in project')
+        
+        # Determine which issue types to process (case-insensitive)
+        if issue_type_names:
+            # Normalize issue types using case-insensitive matching
+            types_to_process = normalize_issue_types(jira, project_key, issue_type_names)
+        else:
+            types_to_process = sorted(all_issue_types.keys())
+        
+        log.debug(f'Processing issue types: {types_to_process}')
+        
+        # Get create metadata for all issue types
+        create_meta = jira.createmeta(
+            projectKeys=project_key,
+            expand='projects.issuetypes.fields'
+        )
+        
+        # Build lookup for create fields by issue type name
+        create_fields_by_type = {}
+        if create_meta['projects']:
+            project_meta = create_meta['projects'][0]
+            for it in project_meta['issuetypes']:
+                create_fields_by_type[it['name']] = it.get('fields', {})
+        
+        # For edit and transition fields, we need to find an existing issue of each type
+        # or use the editmeta endpoint with a sample issue
+        for issue_type_name in types_to_process:
+            output('')
+            output('=' * 100)
+            output(f'Issue Type: {issue_type_name}')
+            output(f'Project: {project_key} ({project.name})')
+            output('=' * 100)
+            
+            # === CREATE SCREEN FIELDS ===
+            output(f'\n  CREATE SCREEN FIELDS:')
+            output(f'  ' + '-' * 90)
+            output(f'    {"Field Name":<30} {"Field Key":<25} {"Required":<10} {"Type":<15}')
+            output(f'    {"-" * 30} {"-" * 25} {"-" * 10} {"-" * 15}')
+            
+            create_fields = create_fields_by_type.get(issue_type_name, {})
+            if create_fields:
+                sorted_fields = sorted(
+                    create_fields.items(),
+                    key=lambda x: (not x[1].get('required', False), x[1].get('name', x[0]))
+                )
+                for field_key, field_info in sorted_fields:
+                    _print_field_row(field_key, field_info)
+            else:
+                output(f'    No create fields found.')
+            
+            # === EDIT SCREEN FIELDS ===
+            output(f'\n  EDIT SCREEN FIELDS:')
+            output(f'  ' + '-' * 90)
+            
+            # Find an existing issue of this type to get edit metadata
+            sample_issue = _find_sample_issue(jira, project_key, issue_type_name)
+            if sample_issue:
+                log.debug(f'Found sample issue {sample_issue.key} for edit metadata')
+                edit_meta = jira.editmeta(sample_issue.key)
+                edit_fields = edit_meta.get('fields', {})
+                
+                output(f'    {"Field Name":<30} {"Field Key":<25} {"Required":<10} {"Type":<15}')
+                output(f'    {"-" * 30} {"-" * 25} {"-" * 10} {"-" * 15}')
+                
+                sorted_fields = sorted(
+                    edit_fields.items(),
+                    key=lambda x: (not x[1].get('required', False), x[1].get('name', x[0]))
+                )
+                for field_key, field_info in sorted_fields:
+                    _print_field_row(field_key, field_info)
+            else:
+                output(f'    No existing {issue_type_name} issues found to retrieve edit fields.')
+                output(f'    Create an issue of this type to see edit screen fields.')
+            
+            # === TRANSITION FIELDS ===
+            output(f'\n  TRANSITIONS (Status Changes):')
+            output(f'  ' + '-' * 90)
+            
+            if sample_issue:
+                transitions = jira.transitions(sample_issue.key, expand='transitions.fields')
+                if transitions:
+                    for transition in transitions:
+                        trans_name = transition['name']
+                        trans_id = transition['id']
+                        trans_to = transition.get('to', {}).get('name', 'Unknown')
+                        output(f'\n    Transition: "{trans_name}" (ID: {trans_id}) -> {trans_to}')
+                        
+                        trans_fields = transition.get('fields', {})
+                        if trans_fields:
+                            output(f'      {"Field Name":<28} {"Field Key":<23} {"Required":<10} {"Type":<15}')
+                            output(f'      {"-" * 28} {"-" * 23} {"-" * 10} {"-" * 15}')
+                            sorted_fields = sorted(
+                                trans_fields.items(),
+                                key=lambda x: (not x[1].get('required', False), x[1].get('name', x[0]))
+                            )
+                            for field_key, field_info in sorted_fields:
+                                _print_field_row(field_key, field_info, indent=6)
+                        else:
+                            output(f'      (No additional fields required)')
+                else:
+                    output(f'    No transitions available from current status.')
+            else:
+                output(f'    No existing {issue_type_name} issues found to retrieve transitions.')
+            
+            output('')
+        
+        output('=' * 100)
+        output('')
+        
+    except JiraProjectError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to get fields: {e}')
+        raise
+
+
+def normalize_issue_types(jira, project_key, issue_type_names):
+    '''
+    Normalize issue type names to match Jira's case (case-insensitive matching).
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project.
+        issue_type_names: List of issue type names (case-insensitive).
+
+    Output:
+        List of issue type names with correct case as defined in Jira.
+
+    Raises:
+        JiraProjectError: If an issue type is not found.
+    '''
+    log.debug(f'Entering normalize_issue_types(project_key={project_key}, issue_type_names={issue_type_names})')
+    if not issue_type_names:
+        log.debug('No issue type names provided, returning None')
+        return None
+    
+    project = jira.project(project_key)
+    # Build case-insensitive lookup
+    type_lookup = {it.name.lower(): it.name for it in project.issueTypes}
+    log.debug(f'Available issue types: {list(type_lookup.values())}')
+    
+    normalized = []
+    for name in issue_type_names:
+        name_lower = name.lower()
+        if name_lower in type_lookup:
+            normalized.append(type_lookup[name_lower])
+            log.debug(f'Normalized issue type "{name}" -> "{type_lookup[name_lower]}"')
+        else:
+            available = ', '.join(sorted(type_lookup.values()))
+            log.error(f'Issue type "{name}" not found')
+            raise JiraProjectError(f'Issue type "{name}" not found. Available: {available}')
+    
+    log.debug(f'Normalized issue types: {normalized}')
+    return normalized
+
+
+def normalize_statuses(jira, status_names):
+    '''
+    Normalize status names to match Jira's case (case-insensitive matching).
+
+    Input:
+        jira: JIRA object with active connection.
+        status_names: List of status names (case-insensitive).
+
+    Output:
+        List of status names with correct case as defined in Jira.
+
+    Raises:
+        JiraProjectError: If a status is not found.
+    '''
+    log.debug(f'Entering normalize_statuses(status_names={status_names})')
+    if not status_names:
+        log.debug('No status names provided, returning None')
+        return None
+    
+    # Get all statuses from Jira
+    statuses = jira.statuses()
+    log.debug(f'Retrieved {len(statuses)} statuses from Jira')
+    # Build case-insensitive lookup
+    status_lookup = {s.name.lower(): s.name for s in statuses}
+    
+    normalized = []
+    for name in status_names:
+        name_lower = name.lower()
+        if name_lower in status_lookup:
+            normalized.append(status_lookup[name_lower])
+            log.debug(f'Normalized status "{name}" -> "{status_lookup[name_lower]}"')
+        else:
+            available = ', '.join(sorted(status_lookup.values()))
+            log.error(f'Status "{name}" not found')
+            raise JiraProjectError(f'Status "{name}" not found. Available: {available}')
+    
+    log.debug(f'Normalized statuses: {normalized}')
+    return normalized
+
+
+def normalize_release(jira, project_key, release_name):
+    '''
+    Normalize a release/version name to match Jira's case (case-insensitive matching).
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project.
+        release_name: Release/version name (case-insensitive).
+
+    Output:
+        Release name with correct case as defined in Jira.
+
+    Raises:
+        JiraProjectError: If the release is not found.
+    '''
+    log.debug(f'Entering normalize_release(project_key={project_key}, release_name={release_name})')
+    if not release_name:
+        log.debug('No release name provided, returning None')
+        return None
+    
+    # Get all versions for the project
+    versions = jira.project_versions(project_key)
+    log.debug(f'Retrieved {len(versions)} versions from project {project_key}')
+    # Build case-insensitive lookup
+    version_lookup = {v.name.lower(): v.name for v in versions}
+    
+    name_lower = release_name.lower()
+    if name_lower in version_lookup:
+        normalized = version_lookup[name_lower]
+        log.debug(f'Normalized release "{release_name}" -> "{normalized}"')
+        return normalized
+    else:
+        available = ', '.join(sorted(version_lookup.values()))
+        log.error(f'Release "{release_name}" not found')
+        raise JiraProjectError(f'Release "{release_name}" not found. Available: {available}')
+
+
+def parse_date_filter(date_arg):
+    '''
+    Parse the date filter argument and return a JQL date clause.
+
+    Input:
+        date_arg: String date filter. Options:
+            - 'today': Issues created today
+            - 'week': Issues created in the last 7 days
+            - 'month': Issues created in the last 30 days
+            - 'year': Issues created in the last 365 days
+            - 'all': No date filter
+            - 'MM-DD-YYYY:MM-DD-YYYY': Date range (start:end)
+
+    Output:
+        JQL date clause string, or empty string for 'all'.
+
+    Raises:
+        ValueError: If date format is invalid.
+    '''
+    log.debug(f'Entering parse_date_filter(date_arg={date_arg})')
+    if not date_arg or date_arg.lower() == 'all':
+        log.debug('No date filter or "all" specified, returning empty string')
+        return ''
+    
+    date_arg_lower = date_arg.lower()
+    
+    if date_arg_lower == 'today':
+        clause = 'AND created >= startOfDay()'
+        log.debug(f'Date filter "today" -> {clause}')
+        return clause
+    elif date_arg_lower == 'week':
+        clause = 'AND created >= -7d'
+        log.debug(f'Date filter "week" -> {clause}')
+        return clause
+    elif date_arg_lower == 'month':
+        clause = 'AND created >= -30d'
+        log.debug(f'Date filter "month" -> {clause}')
+        return clause
+    elif date_arg_lower == 'year':
+        clause = 'AND created >= -365d'
+        log.debug(f'Date filter "year" -> {clause}')
+        return clause
+    elif ':' in date_arg:
+        # Date range format: MM-DD-YYYY:MM-DD-YYYY
+        log.debug(f'Parsing date range: {date_arg}')
+        try:
+            parts = date_arg.split(':')
+            if len(parts) != 2:
+                raise ValueError(f'Invalid date range format: {date_arg}')
+            
+            start_str, end_str = parts
+            
+            # Parse start date
+            start_date = datetime.strptime(start_str.strip(), '%m-%d-%Y')
+            # Parse end date
+            end_date = datetime.strptime(end_str.strip(), '%m-%d-%Y')
+            
+            # Format for JQL (YYYY-MM-DD)
+            start_jql = start_date.strftime('%Y-%m-%d')
+            end_jql = end_date.strftime('%Y-%m-%d')
+            
+            clause = f'AND created >= "{start_jql}" AND created <= "{end_jql}"'
+            log.debug(f'Date range parsed: {start_jql} to {end_jql} -> {clause}')
+            return clause
+        except ValueError as e:
+            log.error(f'Invalid date range format: {date_arg}')
+            raise ValueError(f'Invalid date range format: {date_arg}. Expected MM-DD-YYYY:MM-DD-YYYY. Error: {e}')
+    else:
+        log.error(f'Invalid date filter: {date_arg}')
+        raise ValueError(f'Invalid date filter: {date_arg}. Use: today, week, month, year, all, or MM-DD-YYYY:MM-DD-YYYY')
+
+
+def _find_sample_issue(jira, project_key, issue_type_name):
+    '''
+    Find a sample issue of the given type in the project.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project.
+        issue_type_name: Name of the issue type to find.
+
+    Output:
+        Issue object if found, None otherwise.
+    '''
+    log.debug(f'Entering _find_sample_issue(project_key={project_key}, issue_type_name={issue_type_name})')
+    try:
+        jql = f'project = "{project_key}" AND issuetype = "{issue_type_name}" ORDER BY created DESC'
+        log.debug(f'Sample issue JQL: {jql}')
+        issues = jira.search_issues(jql, maxResults=1)
+        return issues[0] if issues else None
+    except Exception as e:
+        log.debug(f'Could not find sample issue: {e}')
+        return None
+
+
+def _print_field_row(field_key, field_info, indent=4):
+    '''
+    Print a formatted field row.
+
+    Input:
+        field_key: The field key/ID.
+        field_info: Dict containing field metadata.
+        indent: Number of spaces to indent.
+    '''
+    log.debug(f'Entering _print_field_row(field_key={field_key}, indent={indent})')
+    field_name = field_info.get('name', field_key)
+    required = 'Yes' if field_info.get('required', False) else 'No'
+    schema = field_info.get('schema', {})
+    field_type = schema.get('type', 'unknown')
+    
+    # Truncate if too long
+    if len(field_name) > 28:
+        field_name = field_name[:28] + '..'
+    if len(field_key) > 23:
+        field_key_display = field_key[:23] + '..'
+    else:
+        field_key_display = field_key
+    
+    prefix = ' ' * indent
+    output(f'{prefix}{field_name:<30} {field_key_display:<25} {required:<10} {field_type:<15}')
+
+
+def get_project_versions(jira, project_key):
+    '''
+    Get and display the versions (releases) for a project.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+
+    Output:
+        None; prints versions/releases to stdout.
+
+    Side Effects:
+        Logs version information and prints formatted version list.
+    '''
+    log.debug(f'Entering get_project_versions(project_key={project_key})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        versions = jira.project_versions(project_key)
+        log.debug(f'Found {len(versions)} versions')
+        
+        output('')
+        output('=' * 100)
+        output(f'Versions (Releases) for Project: {project_key} ({project.name})')
+        output('=' * 100)
+        output(f'{"Name":<30} {"ID":<12} {"Released":<10} {"Archived":<10} {"Release Date":<15} {"Description":<20}')
+        output('-' * 100)
+        
+        if not versions:
+            output('  No versions defined for this project.')
+        else:
+            # Sort by release date (unreleased last), then by name
+            sorted_versions = sorted(
+                versions,
+                key=lambda v: (
+                    not getattr(v, 'released', False),
+                    getattr(v, 'releaseDate', '9999-99-99') or '9999-99-99',
+                    v.name
+                )
+            )
+            
+            for version in sorted_versions:
+                name = version.name
+                vid = version.id
+                released = 'Yes' if getattr(version, 'released', False) else 'No'
+                archived = 'Yes' if getattr(version, 'archived', False) else 'No'
+                release_date = getattr(version, 'releaseDate', 'N/A') or 'N/A'
+                description = getattr(version, 'description', '') or ''
+                
+                # Truncate if too long
+                if len(name) > 28:
+                    name = name[:28] + '..'
+                if len(description) > 18:
+                    description = description[:18] + '..'
+                
+                output(f'{name:<30} {vid:<12} {released:<10} {archived:<10} {release_date:<15} {description:<20}')
+        
+        output('=' * 100)
+        output(f'Total versions: {len(versions)}')
+        output('')
+        
+    except JiraProjectError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to get versions: {e}')
+        raise
+
+
+def get_project_components(jira, project_key, date_filter=None, dump_file=None, dump_format='csv'):
+    '''
+    Get and display the components for a project.
+    If date_filter is specified, only shows components with tickets created in that date range.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        date_filter: Date filter string to show only active components, or None for all.
+        dump_file: Output filename for dumping components, or None to skip.
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints components to stdout.
+
+    Side Effects:
+        Logs component information and prints formatted component list.
+    '''
+    log.debug(f'Entering get_project_components(project_key={project_key}, date_filter={date_filter}, dump_file={dump_file}, dump_format={dump_format})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        components = jira.project_components(project_key)
+        log.debug(f'Found {len(components)} components')
+        
+        # If date filter specified, find components with recent tickets
+        if date_filter:
+            active_components = _get_active_components(jira, project_key, date_filter)
+            filtered_components = [c for c in components if c.name in active_components]
+            log.debug(f'Filtered to {len(filtered_components)} components with activity in date range')
+        else:
+            filtered_components = components
+        
+        output('')
+        output('=' * 110)
+        output(f'Components for Project: {project_key} ({project.name})')
+        if date_filter:
+            output(f'Showing only components with tickets created: {date_filter}')
+        output('=' * 110)
+        output(f'{"Name":<30} {"ID":<12} {"Lead":<25} {"Ticket Count":<15} {"Description":<25}')
+        output('-' * 110)
+        
+        if not filtered_components:
+            if date_filter:
+                output(f'  No components with tickets in the specified date range.')
+            else:
+                output('  No components defined for this project.')
+        else:
+            # Sort by name
+            sorted_components = sorted(filtered_components, key=lambda c: c.name.lower())
+            
+            # Get ticket counts if date filter is active
+            ticket_counts = {}
+            if date_filter:
+                ticket_counts = _get_active_components(jira, project_key, date_filter)
+            
+            for component in sorted_components:
+                name = component.name
+                cid = component.id
+                lead = getattr(component, 'lead', None)
+                lead_name = lead.displayName if lead else 'Unassigned'
+                description = getattr(component, 'description', '') or ''
+                count = ticket_counts.get(name, '-') if date_filter else '-'
+                
+                # Truncate for display
+                display_name = name[:28] + '..' if len(name) > 28 else name
+                display_lead = lead_name[:23] + '..' if len(lead_name) > 23 else lead_name
+                display_desc = description[:23] + '..' if len(description) > 23 else description
+                
+                output(f'{display_name:<30} {cid:<12} {display_lead:<25} {str(count):<15} {display_desc:<25}')
+        
+        output('=' * 110)
+        output(f'Total components: {len(filtered_components)}')
+        output('')
+        
+        # Dump to file if requested
+        if dump_file and filtered_components:
+            sorted_components = sorted(filtered_components, key=lambda c: c.name.lower())
+            ticket_counts = _get_active_components(jira, project_key, date_filter) if date_filter else {}
+            _dump_components_to_file(sorted_components, dump_file, dump_format, ticket_counts)
+        
+    except JiraProjectError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to get components: {e}')
+        raise
+
+
+def _get_active_components(jira, project_key, date_filter):
+    '''
+    Get components that have tickets created in the specified date range.
+    
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project.
+        date_filter: Date filter string.
+    
+    Output:
+        Dict mapping component name to ticket count.
+    '''
+    log.debug(f'Getting active components for {project_key} with date filter {date_filter}')
+    
+    # Parse date filter
+    date_clause = parse_date_filter(date_filter) if date_filter else ''
+    
+    # Build JQL to get all tickets with components in date range
+    jql = f'project = "{project_key}" AND component is not EMPTY'
+    if date_clause:
+        jql = f'{jql} {date_clause}'
+    
+    log.debug(f'Active components JQL: {jql}')
+    
+    # Fetch tickets
+    email, api_token = get_jira_credentials()
+    
+    component_counts = {}
+    next_page_token = None
+    batch_size = 100
+    max_retries = 5
+    
+    while True:
+        payload = {
+            'jql': jql,
+            'maxResults': batch_size,
+            'fields': ['components']
+        }
+        if next_page_token:
+            payload['nextPageToken'] = next_page_token
+        
+        for retry in range(max_retries):
+            response = requests.post(
+                f'{JIRA_URL}/rest/api/3/search/jql',
+                auth=(email, api_token),
+                headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                json=payload
+            )
+            
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 5))
+                log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                time.sleep(retry_after)
+                continue
+            break
+        
+        if response.status_code != 200:
+            log.error(f'API request failed: {response.status_code} - {response.text}')
+            raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+        
+        data = response.json()
+        issues = data.get('issues', [])
+        
+        for issue in issues:
+            components = issue.get('fields', {}).get('components', [])
+            for comp in components:
+                comp_name = comp.get('name', '')
+                if comp_name:
+                    component_counts[comp_name] = component_counts.get(comp_name, 0) + 1
+        
+        next_page_token = data.get('nextPageToken')
+        if not next_page_token:
+            break
+    
+    log.debug(f'Found {len(component_counts)} active components')
+    return component_counts
+
+
+def _dump_components_to_file(components, dump_file, dump_format='csv', ticket_counts=None):
+    '''
+    Dump components to a file in CSV or JSON format.
+    
+    Input:
+        components: List of component objects.
+        dump_file: Output filename (extension added if not present).
+        dump_format: Output format ('csv' or 'json').
+        ticket_counts: Optional dict mapping component name to ticket count.
+    '''
+    # Add extension if not present
+    if not dump_file.endswith(f'.{dump_format}'):
+        output_path = f'{dump_file}.{dump_format}'
+    else:
+        output_path = dump_file
+    
+    log.debug(f'Writing {len(components)} components to {output_path}')
+    
+    rows = []
+    for component in components:
+        lead = getattr(component, 'lead', None)
+        row = {
+            'name': component.name,
+            'id': component.id,
+            'lead': lead.displayName if lead else '',
+            'lead_email': lead.emailAddress if lead and hasattr(lead, 'emailAddress') else '',
+            'description': getattr(component, 'description', '') or ''
+        }
+        if ticket_counts:
+            row['ticket_count'] = ticket_counts.get(component.name, 0)
+        rows.append(row)
+    
+    fieldnames = ['name', 'id', 'lead', 'lead_email', 'description']
+    if ticket_counts:
+        fieldnames.append('ticket_count')
+    
+    if dump_format == 'json':
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(rows, f, indent=2, default=str)
+    else:  # csv
+        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    
+    log.info(f'Wrote {len(rows)} components to: {output_path}')
+
+
+def match_pattern_with_exclusions(name, pattern):
+    '''
+    Match a name against a pattern that may include exclusions.
+    
+    Pattern syntax:
+        - Simple glob: "12.*" matches names starting with "12."
+        - With exclusions: "12.*,^*Samples*" matches 12.* but excludes names containing "Samples"
+        - Multiple exclusions: "12.*,^*Samples*,^*Test*"
+        - Multiple includes: "12.*,13.*" matches either pattern
+        - Combined: "12.*,13.*,^*Samples*" matches 12.* or 13.* but excludes Samples
+    
+    Input:
+        name: String name to match.
+        pattern: Pattern string with optional comma-separated parts and ^ exclusions.
+    
+    Output:
+        True if name matches the pattern (and doesn't match any exclusions), False otherwise.
+    '''
+    import fnmatch
+    
+    if not pattern or pattern == '*':
+        return True
+    
+    # Split pattern by comma
+    parts = [p.strip() for p in pattern.split(',')]
+    
+    # Separate includes and excludes (^ prefix for exclusions)
+    includes = [p for p in parts if not p.startswith('^')]
+    excludes = [p[1:] for p in parts if p.startswith('^')]  # Remove the ^ prefix
+    
+    # If no includes specified, default to match all
+    if not includes:
+        includes = ['*']
+    
+    # Check if name matches any include pattern
+    matched = any(fnmatch.fnmatch(name, inc) for inc in includes)
+    
+    if not matched:
+        return False
+    
+    # Check if name matches any exclude pattern
+    excluded = any(fnmatch.fnmatch(name, exc) for exc in excludes)
+    
+    return not excluded
+
+
+def get_releases(jira, project_key, pattern=None, dump_file=None, dump_format='csv'):
+    '''
+    Get and display the releases (versions) for a project.
+    This is an alias for get_project_versions with simpler output.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        pattern: Optional glob pattern to filter releases (e.g., '12.*', '12.*,^*Samples*').
+        dump_file: Output filename for dumping releases, or None to skip.
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints releases to stdout.
+    '''
+    log.debug(f'Entering get_releases(project_key={project_key}, pattern={pattern}, dump_file={dump_file}, dump_format={dump_format})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        versions = jira.project_versions(project_key)
+        log.debug(f'Found {len(versions)} releases')
+        
+        output('')
+        output('=' * 80)
+        output(f'Releases for Project: {project_key} ({project.name})')
+        output('=' * 80)
+        output(f'{"Release Name":<40} {"Released":<12} {"Release Date":<15}')
+        output('-' * 80)
+        
+        # Filter by pattern if specified (supports exclusions with ^ prefix)
+        if pattern and pattern != '*':
+            filtered_versions = [v for v in versions if match_pattern_with_exclusions(v.name, pattern)]
+            log.debug(f'Filtered to {len(filtered_versions)} releases matching pattern "{pattern}"')
+        else:
+            filtered_versions = versions
+        
+        if not filtered_versions:
+            if pattern and pattern != '*':
+                output(f'  No releases matching pattern "{pattern}".')
+            else:
+                output('  No releases defined for this project.')
+        else:
+            # Sort by release date (unreleased last), then by name
+            sorted_versions = sorted(
+                filtered_versions,
+                key=lambda v: (
+                    not getattr(v, 'released', False),
+                    getattr(v, 'releaseDate', '9999-99-99') or '9999-99-99',
+                    v.name
+                )
+            )
+            
+            for version in sorted_versions:
+                name = version.name
+                released = 'Yes' if getattr(version, 'released', False) else 'No'
+                release_date = getattr(version, 'releaseDate', 'N/A') or 'N/A'
+                
+                # Truncate for display
+                display_name = name[:38] + '..' if len(name) > 38 else name
+                
+                output(f'{display_name:<40} {released:<12} {release_date:<15}')
+        
+        output('=' * 80)
+        if pattern and pattern != '*':
+            output(f'Total releases matching "{pattern}": {len(filtered_versions)}')
+        else:
+            output(f'Total releases: {len(filtered_versions)}')
+        output('')
+        
+        # Dump to file if requested
+        if dump_file and filtered_versions:
+            _dump_releases_to_file(sorted_versions, dump_file, dump_format)
+        
+    except JiraProjectError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to get releases: {e}')
+
+
+def _dump_releases_to_file(versions, dump_file, dump_format='csv'):
+    '''
+    Dump releases to a file in CSV or JSON format.
+    
+    Input:
+        versions: List of version objects.
+        dump_file: Output filename (extension added if not present).
+        dump_format: Output format ('csv' or 'json').
+    '''
+    # Add extension if not present
+    if not dump_file.endswith(f'.{dump_format}'):
+        output_path = f'{dump_file}.{dump_format}'
+    else:
+        output_path = dump_file
+    
+    log.debug(f'Writing {len(versions)} releases to {output_path}')
+    
+    rows = []
+    for version in versions:
+        rows.append({
+            'name': version.name,
+            'id': version.id,
+            'released': 'Yes' if getattr(version, 'released', False) else 'No',
+            'archived': 'Yes' if getattr(version, 'archived', False) else 'No',
+            'release_date': getattr(version, 'releaseDate', '') or '',
+            'description': getattr(version, 'description', '') or ''
+        })
+    
+    if dump_format == 'json':
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(rows, f, indent=2, default=str)
+    else:  # csv
+        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=['name', 'id', 'released', 'archived', 'release_date', 'description'])
+            writer.writeheader()
+            writer.writerows(rows)
+    
+    log.info(f'Wrote {len(rows)} releases to: {output_path}')
+
+
+def get_release_tickets(jira, project_key, release_name, issue_types=None, statuses=None, date_filter=None, limit=None, dump_file=None, dump_format='csv'):
+    '''
+    Get and display tickets associated with a specific release.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        release_name: Name of the release/version (case-insensitive).
+        issue_types: List of issue type names to filter by, or None/empty for all.
+        statuses: List of status names to filter by, or None/empty for all.
+        date_filter: Date filter string.
+        limit: Maximum number of tickets to retrieve, or None for all.
+        dump_file: Output filename for dumping tickets, or None to skip.
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints ticket list to stdout.
+    '''
+    log.debug(f'Entering get_release_tickets(project_key={project_key}, release_name={release_name}, issue_types={issue_types}, statuses={statuses}, date_filter={date_filter}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        # Normalize release name (case-insensitive)
+        normalized_release = normalize_release(jira, project_key, release_name)
+        log.debug(f'Normalized release name: {normalized_release}')
+        
+        # Normalize issue types and statuses
+        normalized_types = normalize_issue_types(jira, project_key, issue_types) if issue_types else None
+        normalized_statuses = normalize_statuses(jira, statuses) if statuses else None
+        
+        # Parse date filter
+        date_clause = parse_date_filter(date_filter) if date_filter else ''
+        
+        # Build JQL query
+        jql_parts = [f'project = "{project_key}"', f'fixVersion = "{normalized_release}"']
+        
+        if normalized_types:
+            type_list = ', '.join([f'"{t}"' for t in normalized_types])
+            jql_parts.append(f'issuetype IN ({type_list})')
+        
+        if normalized_statuses:
+            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
+            jql_parts.append(f'status IN ({status_list})')
+        
+        jql = ' AND '.join(jql_parts)
+        if date_clause:
+            jql = f'{jql} {date_clause}'
+        jql = f'{jql} ORDER BY created DESC'
+        
+        log.debug(f'JQL query: {jql}')
+        show_jql(jql)
+        
+        # Fetch tickets using the search API
+        email, api_token = get_jira_credentials()
+        
+        all_issues = []
+        next_page_token = None
+        batch_size = min(100, limit) if limit else 100
+        max_retries = 5
+        
+        while True:
+            if limit and len(all_issues) >= limit:
+                break
+            
+            if limit:
+                remaining = limit - len(all_issues)
+                current_batch = min(batch_size, remaining)
+            else:
+                current_batch = batch_size
+            
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            if dump_file:
+                fields_to_fetch.extend(['reporter', 'resolutiondate'])
+            
+            payload = {
+                'jql': jql,
+                'maxResults': current_batch,
+                'fields': fields_to_fetch
+            }
+            if next_page_token:
+                payload['nextPageToken'] = next_page_token
+            
+            for retry in range(max_retries):
+                response = requests.post(
+                    f'{JIRA_URL}/rest/api/3/search/jql',
+                    auth=(email, api_token),
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    json=payload
+                )
+                
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+            
+            if response.status_code != 200:
+                log.error(f'API request failed: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+            
+            data = response.json()
+            issues = data.get('issues', [])
+            all_issues.extend(issues)
+            
+            next_page_token = data.get('nextPageToken')
+            log.debug(f'Retrieved {len(all_issues)} issues so far...')
+            
+            if not next_page_token:
+                break
+            if limit and len(all_issues) >= limit:
+                break
+        
+        if limit and len(all_issues) > limit:
+            all_issues = all_issues[:limit]
+        
+        log.debug(f'Retrieved {len(all_issues)} issues total')
+        
+        # Print results
+        output('')
+        output('=' * 120)
+        output(f'Tickets for Release: {normalized_release}')
+        output(f'Project: {project_key} ({project.name})')
+        output('=' * 120)
+        
+        if normalized_types:
+            output(f'Issue types: {", ".join(normalized_types)}')
+        if normalized_statuses:
+            output(f'Statuses: {", ".join(normalized_statuses)}')
+        if date_filter and date_filter.lower() != 'all':
+            output(f'Date filter: {date_filter}')
+        if limit:
+            output(f'Limit: {limit}')
+        
+        print_ticket_table_header()
+        
+        for issue in all_issues:
+            print_ticket_row(issue)
+        
+        print_ticket_table_footer(len(all_issues))
+        
+        if dump_file:
+            dump_tickets_to_file(all_issues, dump_file, dump_format)
+        
+    except JiraProjectError:
+        raise
+    except ValueError as e:
+        log.error(f'Invalid parameter: {e}')
+        raise
+    except Exception as e:
+        log.error(f'Failed to get release tickets: {e}')
+        raise
+
+
+def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, statuses=None, date_filter=None, limit=None, dump_file=None, dump_format='csv'):
+    '''
+    Get and display tickets associated with releases matching a glob pattern.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        release_pattern: Glob pattern to match releases (e.g., '12.*').
+        issue_types: List of issue type names to filter by, or None/empty for all.
+        statuses: List of status names to filter by, or None/empty for all.
+        date_filter: Date filter string.
+        limit: Maximum number of tickets to retrieve, or None for all.
+        dump_file: Output filename for dumping tickets, or None to skip.
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints ticket list to stdout.
+    '''
+    log.debug(f'Entering get_releases_tickets(project_key={project_key}, release_pattern={release_pattern}, issue_types={issue_types}, statuses={statuses}, date_filter={date_filter}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        # Get all versions and filter by pattern (supports exclusions with ! prefix)
+        versions = jira.project_versions(project_key)
+        if release_pattern and release_pattern != '*':
+            matching_releases = [v.name for v in versions if match_pattern_with_exclusions(v.name, release_pattern)]
+        else:
+            matching_releases = [v.name for v in versions]
+        
+        if not matching_releases:
+            output('')
+            output(f'No releases matching pattern "{release_pattern}" found in project {project_key}.')
+            output('')
+            return
+        
+        log.info(f'Found {len(matching_releases)} releases matching pattern "{release_pattern}": {matching_releases}')
+        
+        # Normalize issue types and statuses
+        normalized_types = normalize_issue_types(jira, project_key, issue_types) if issue_types else None
+        normalized_statuses = normalize_statuses(jira, statuses) if statuses else None
+        
+        # Parse date filter
+        date_clause = parse_date_filter(date_filter) if date_filter else ''
+        
+        # Build JQL query with all matching releases
+        release_list = ', '.join([f'"{r}"' for r in matching_releases])
+        jql_parts = [f'project = "{project_key}"', f'fixVersion IN ({release_list})']
+        
+        if normalized_types:
+            type_list = ', '.join([f'"{t}"' for t in normalized_types])
+            jql_parts.append(f'issuetype IN ({type_list})')
+        
+        if normalized_statuses:
+            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
+            jql_parts.append(f'status IN ({status_list})')
+        
+        jql = ' AND '.join(jql_parts)
+        if date_clause:
+            jql = f'{jql} {date_clause}'
+        jql = f'{jql} ORDER BY fixVersion DESC, created DESC'
+        
+        log.debug(f'JQL query: {jql}')
+        show_jql(jql)
+        
+        # Fetch tickets using the search API
+        email, api_token = get_jira_credentials()
+        
+        all_issues = []
+        next_page_token = None
+        batch_size = min(100, limit) if limit else 100
+        max_retries = 5
+        
+        while True:
+            if limit and len(all_issues) >= limit:
+                break
+            
+            if limit:
+                remaining = limit - len(all_issues)
+                current_batch = min(batch_size, remaining)
+            else:
+                current_batch = batch_size
+            
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            if dump_file:
+                fields_to_fetch.extend(['reporter', 'resolutiondate'])
+            
+            payload = {
+                'jql': jql,
+                'maxResults': current_batch,
+                'fields': fields_to_fetch
+            }
+            if next_page_token:
+                payload['nextPageToken'] = next_page_token
+            
+            for retry in range(max_retries):
+                response = requests.post(
+                    f'{JIRA_URL}/rest/api/3/search/jql',
+                    auth=(email, api_token),
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    json=payload
+                )
+                
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+            
+            if response.status_code != 200:
+                log.error(f'API request failed: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+            
+            data = response.json()
+            issues = data.get('issues', [])
+            all_issues.extend(issues)
+            
+            next_page_token = data.get('nextPageToken')
+            log.debug(f'Retrieved {len(all_issues)} issues so far...')
+            
+            if not next_page_token:
+                break
+            if limit and len(all_issues) >= limit:
+                break
+        
+        if limit and len(all_issues) > limit:
+            all_issues = all_issues[:limit]
+        
+        # Display results
+        output('')
+        output('=' * 130)
+        output(f'Tickets for Releases matching "{release_pattern}" in Project: {project_key} ({project.name})')
+        output('=' * 130)
+        output(f'Matching releases: {len(matching_releases)}')
+        if normalized_types:
+            output(f'Issue types: {", ".join(normalized_types)}')
+        if normalized_statuses:
+            output(f'Statuses: {", ".join(normalized_statuses)}')
+        if date_filter:
+            output(f'Date filter: {date_filter}')
+        if limit:
+            output(f'Limit: {limit}')
+        print_ticket_table_header()
+        
+        for issue in all_issues:
+            print_ticket_row(issue)
+        
+        print_ticket_table_footer(len(all_issues))
+        
+        # Dump to file if requested
+        if dump_file and all_issues:
+            dump_tickets_to_file(all_issues, dump_file, dump_format)
+        
+    except JiraProjectError:
+        raise
+    except ValueError as e:
+        log.error(f'Invalid parameter: {e}')
+        raise
+    except Exception as e:
+        log.error(f'Failed to get releases tickets: {e}')
+        raise
+
+
+def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=None, limit=None, dump_file=None, dump_format='csv'):
+    '''
+    Get and display tickets that have no release/fixVersion assigned.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        issue_types: List of issue type names to filter by, or None/empty for all.
+        statuses: List of status names to filter by, or None/empty for all.
+        date_filter: Date filter string.
+        limit: Maximum number of tickets to retrieve, or None for all.
+        dump_file: Output filename for dumping tickets, or None to skip.
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints ticket list to stdout.
+    '''
+    log.debug(f'Entering get_no_release_tickets(project_key={project_key}, issue_types={issue_types}, statuses={statuses}, date_filter={date_filter}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        # Normalize issue types and statuses
+        normalized_types = normalize_issue_types(jira, project_key, issue_types) if issue_types else None
+        normalized_statuses = normalize_statuses(jira, statuses) if statuses else None
+        
+        # Parse date filter
+        date_clause = parse_date_filter(date_filter) if date_filter else ''
+        
+        # Build JQL query - fixVersion is EMPTY means no release assigned
+        jql_parts = [f'project = "{project_key}"', 'fixVersion is EMPTY']
+        
+        if normalized_types:
+            type_list = ', '.join([f'"{t}"' for t in normalized_types])
+            jql_parts.append(f'issuetype IN ({type_list})')
+        
+        if normalized_statuses:
+            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
+            jql_parts.append(f'status IN ({status_list})')
+        
+        jql = ' AND '.join(jql_parts)
+        if date_clause:
+            jql = f'{jql} {date_clause}'
+        jql = f'{jql} ORDER BY created DESC'
+        
+        log.debug(f'JQL query: {jql}')
+        show_jql(jql)
+        
+        # Fetch tickets using the search API
+        email, api_token = get_jira_credentials()
+        
+        all_issues = []
+        next_page_token = None
+        batch_size = min(100, limit) if limit else 100
+        max_retries = 5
+        
+        while True:
+            if limit and len(all_issues) >= limit:
+                break
+            
+            if limit:
+                remaining = limit - len(all_issues)
+                current_batch = min(batch_size, remaining)
+            else:
+                current_batch = batch_size
+            
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            if dump_file:
+                fields_to_fetch.extend(['reporter', 'resolutiondate'])
+            
+            payload = {
+                'jql': jql,
+                'maxResults': current_batch,
+                'fields': fields_to_fetch
+            }
+            if next_page_token:
+                payload['nextPageToken'] = next_page_token
+            
+            for retry in range(max_retries):
+                response = requests.post(
+                    f'{JIRA_URL}/rest/api/3/search/jql',
+                    auth=(email, api_token),
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    json=payload
+                )
+                
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+            
+            if response.status_code != 200:
+                log.error(f'API request failed: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+            
+            data = response.json()
+            issues = data.get('issues', [])
+            all_issues.extend(issues)
+            
+            next_page_token = data.get('nextPageToken')
+            log.debug(f'Retrieved {len(all_issues)} issues so far...')
+            
+            if not next_page_token:
+                break
+            if limit and len(all_issues) >= limit:
+                break
+        
+        if limit and len(all_issues) > limit:
+            all_issues = all_issues[:limit]
+        
+        log.debug(f'Retrieved {len(all_issues)} issues total')
+        
+        # Print results
+        output('')
+        output('=' * 120)
+        output(f'Tickets with No Release Assigned')
+        output(f'Project: {project_key} ({project.name})')
+        output('=' * 120)
+        
+        if normalized_types:
+            output(f'Issue types: {", ".join(normalized_types)}')
+        if normalized_statuses:
+            output(f'Statuses: {", ".join(normalized_statuses)}')
+        if date_filter and date_filter.lower() != 'all':
+            output(f'Date filter: {date_filter}')
+        if limit:
+            output(f'Limit: {limit}')
+        
+        print_ticket_table_header()
+        
+        for issue in all_issues:
+            print_ticket_row(issue)
+        
+        print_ticket_table_footer(len(all_issues))
+        
+        if dump_file:
+            dump_tickets_to_file(all_issues, dump_file, dump_format)
+        
+    except JiraProjectError:
+        raise
+    except ValueError as e:
+        log.error(f'Invalid parameter: {e}')
+        raise
+    except Exception as e:
+        log.error(f'Failed to get no-release tickets: {e}')
+        raise
+
+
+def get_ticket_totals(jira, project_key, issue_types=None, statuses=None, date_filter=None):
+    '''
+    Get and display ticket counts for a project.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        issue_types: List of issue type names to filter by, or None/empty for all (case-insensitive).
+        statuses: List of status names to filter by, or None/empty for all (case-insensitive).
+        date_filter: Date filter string (today, week, month, year, all, or range).
+
+    Output:
+        None; prints ticket counts to stdout.
+
+    Side Effects:
+        Logs ticket count information and prints formatted totals.
+    '''
+    log.debug(f'Entering get_ticket_totals(project_key={project_key}, issue_types={issue_types}, statuses={statuses}, date_filter={date_filter})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        # Normalize issue types (case-insensitive)
+        normalized_types = normalize_issue_types(jira, project_key, issue_types) if issue_types else None
+        
+        # Normalize statuses (case-insensitive)
+        normalized_statuses = normalize_statuses(jira, statuses) if statuses else None
+        
+        # Parse date filter
+        date_clause = parse_date_filter(date_filter) if date_filter else ''
+        
+        # Build base JQL query
+        jql_parts = [f'project = "{project_key}"']
+        
+        if normalized_types:
+            type_list = ', '.join([f'"{t}"' for t in normalized_types])
+            jql_parts.append(f'issuetype IN ({type_list})')
+        
+        if normalized_statuses:
+            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
+            jql_parts.append(f'status IN ({status_list})')
+        
+        jql = ' AND '.join(jql_parts)
+        if date_clause:
+            jql = f'{jql} {date_clause}'
+        
+        jql = jql.strip()
+        log.debug(f'JQL query: {jql}')
+        show_jql(jql)
+        
+        # Use the count API endpoint for efficiency
+        email, api_token = get_jira_credentials()
+        
+        response = requests.post(
+            f'{JIRA_URL}/rest/api/3/search/approximate-count',
+            auth=(email, api_token),
+            headers={
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            json={'jql': jql}
+        )
+        
+        if response.status_code != 200:
+            log.error(f'Count API request failed: {response.status_code} - {response.text}')
+            raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+        
+        data = response.json()
+        total_count = data.get('count', 0)
+        
+        # Print results
+        output('')
+        output('=' * 60)
+        output(f'Ticket Count for Project: {project_key} ({project.name})')
+        output('=' * 60)
+        
+        if normalized_types:
+            output(f'Issue types: {", ".join(normalized_types)}')
+        if normalized_statuses:
+            output(f'Statuses: {", ".join(normalized_statuses)}')
+        if date_filter and date_filter.lower() != 'all':
+            output(f'Date filter: {date_filter}')
+        
+        output('-' * 60)
+        output(f'Total tickets: {total_count}')
+        output('=' * 60)
+        output('')
+        
+    except JiraProjectError:
+        raise
+    except ValueError as e:
+        log.error(f'Invalid date filter: {e}')
+        raise
+    except Exception as e:
+        log.error(f'Failed to get ticket totals: {e}')
+        raise
+
+
+def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=None, limit=None, dump_file=None, dump_format='csv'):
+    '''
+    Get and display tickets for a project.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: String key of the project (e.g., 'PROJ').
+        issue_types: List of issue type names to filter by, or None/empty for all (case-insensitive).
+        statuses: List of status names to filter by, or None/empty for all (case-insensitive).
+        date_filter: Date filter string (today, week, month, year, all, or range).
+        limit: Maximum number of tickets to retrieve, or None for all.
+        dump_file: Output filename for dumping tickets, or None to skip.
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints ticket list to stdout and optionally writes to file.
+
+    Side Effects:
+        Logs ticket information and prints formatted ticket list.
+        If dump_file is specified, writes tickets to file.
+    '''
+    log.debug(f'Entering get_tickets(project_key={project_key}, issue_types={issue_types}, statuses={statuses}, date_filter={date_filter}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+    
+    project = validate_project(jira, project_key)
+    
+    try:
+        # Normalize issue types (case-insensitive)
+        normalized_types = normalize_issue_types(jira, project_key, issue_types) if issue_types else None
+        
+        # Normalize statuses (case-insensitive)
+        normalized_statuses = normalize_statuses(jira, statuses) if statuses else None
+        
+        # Parse date filter
+        date_clause = parse_date_filter(date_filter) if date_filter else ''
+        
+        # Build JQL query
+        jql_parts = [f'project = "{project_key}"']
+        
+        if normalized_types:
+            type_list = ', '.join([f'"{t}"' for t in normalized_types])
+            jql_parts.append(f'issuetype IN ({type_list})')
+        
+        if normalized_statuses:
+            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
+            jql_parts.append(f'status IN ({status_list})')
+        
+        jql = ' AND '.join(jql_parts)
+        if date_clause:
+            jql = f'{jql} {date_clause}'
+        jql = f'{jql} ORDER BY created DESC'
+        
+        jql = jql.strip()
+        log.debug(f'JQL query: {jql}')
+        show_jql(jql)
+        
+        # Use the new /rest/api/3/search/jql endpoint directly
+        email, api_token = get_jira_credentials()
+        
+        all_issues = []
+        next_page_token = None
+        batch_size = min(100, limit) if limit else 100
+        max_retries = 5
+        
+        while True:
+            # Check if we've reached the limit
+            if limit and len(all_issues) >= limit:
+                break
+            
+            # Adjust batch size if near limit
+            if limit:
+                remaining = limit - len(all_issues)
+                current_batch = min(batch_size, remaining)
+            else:
+                current_batch = batch_size
+            
+            # Build request payload - include extra fields if dumping
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            if dump_file:
+                fields_to_fetch.extend(['reporter', 'resolutiondate'])
+            
+            payload = {
+                'jql': jql,
+                'maxResults': current_batch,
+                'fields': fields_to_fetch
+            }
+            if next_page_token:
+                payload['nextPageToken'] = next_page_token
+            
+            # Retry logic for rate limiting
+            for retry in range(max_retries):
+                response = requests.post(
+                    f'{JIRA_URL}/rest/api/3/search/jql',
+                    auth=(email, api_token),
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    json=payload
+                )
+                
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+            
+            if response.status_code != 200:
+                log.error(f'API request failed: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+            
+            data = response.json()
+            issues = data.get('issues', [])
+            all_issues.extend(issues)
+            
+            next_page_token = data.get('nextPageToken')
+            log.debug(f'Retrieved {len(all_issues)} issues so far...')
+            
+            # Check for next page token or limit reached
+            if not next_page_token:
+                break
+            if limit and len(all_issues) >= limit:
+                break
+        
+        # Trim to limit if we went over
+        if limit and len(all_issues) > limit:
+            all_issues = all_issues[:limit]
+        
+        log.debug(f'Retrieved {len(all_issues)} issues total')
+        
+        # Print results
+        output('')
+        output('=' * 120)
+        output(f'Tickets for Project: {project_key} ({project.name})')
+        output('=' * 120)
+        
+        if normalized_types:
+            output(f'Issue types: {", ".join(normalized_types)}')
+        if normalized_statuses:
+            output(f'Statuses: {", ".join(normalized_statuses)}')
+        if date_filter and date_filter.lower() != 'all':
+            output(f'Date filter: {date_filter}')
+        if limit:
+            output(f'Limit: {limit}')
+        
+        print_ticket_table_header()
+        
+        for issue in all_issues:
+            print_ticket_row(issue)
+        
+        print_ticket_table_footer(len(all_issues))
+        
+        # Dump to file if requested
+        if dump_file:
+            dump_tickets_to_file(all_issues, dump_file, dump_format)
+        
+    except JiraProjectError:
+        raise
+    except ValueError as e:
+        log.error(f'Invalid parameter: {e}')
+        raise
+    except Exception as e:
+        log.error(f'Failed to get tickets: {e}')
+        raise
+
+
+def dump_tickets_to_file(issues, dump_file, dump_format):
+    '''
+    Write tickets to a file in the specified format.
+
+    Input:
+        issues: List of issue dicts from Jira API.
+        dump_file: Output filename (without extension).
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; writes to file.
+
+    Side Effects:
+        Creates or overwrites the output file.
+    '''
+    log.debug(f'Entering dump_tickets_to_file(issues_count={len(issues)}, dump_file={dump_file}, dump_format={dump_format})')
+    # Add extension if not present
+    if not dump_file.endswith(f'.{dump_format}'):
+        output_path = f'{dump_file}.{dump_format}'
+    else:
+        output_path = dump_file
+    
+    log.debug(f'Writing {len(issues)} tickets to {output_path}')
+    
+    # Extract and flatten issue data
+    rows = []
+    for issue in issues:
+        fields = issue.get('fields', {})
+        
+        # Extract fix versions
+        fix_versions = fields.get('fixVersions', [])
+        fix_version_str = ', '.join([v.get('name', '') for v in fix_versions]) if fix_versions else ''
+        
+        # Extract affects versions (for bugs)
+        affects_versions = fields.get('versions', [])
+        affects_version_str = ', '.join([v.get('name', '') for v in affects_versions]) if affects_versions else ''
+        
+        # Extract common fields
+        row = {
+            'key': issue.get('key', ''),
+            'project': fields.get('project', {}).get('key', '') if fields.get('project') else '',
+            'issue_type': fields.get('issuetype', {}).get('name', '') if fields.get('issuetype') else '',
+            'status': fields.get('status', {}).get('name', '') if fields.get('status') else '',
+            'priority': fields.get('priority', {}).get('name', '') if fields.get('priority') else '',
+            'summary': fields.get('summary', '') or '',
+            'assignee': fields.get('assignee', {}).get('displayName', '') if fields.get('assignee') else '',
+            'reporter': fields.get('reporter', {}).get('displayName', '') if fields.get('reporter') else '',
+            'created': '',
+            'updated': '',
+            'resolved': '',
+            'fix_version': fix_version_str,
+            'affects_version': affects_version_str,
+        }
+        
+        # Format dates
+        for date_field in ['created', 'updated', 'resolutiondate']:
+            date_val = fields.get(date_field)
+            if date_val:
+                try:
+                    dt = datetime.fromisoformat(date_val.replace('Z', '+00:00'))
+                    if date_field == 'resolutiondate':
+                        row['resolved'] = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        row[date_field] = dt.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    if date_field == 'resolutiondate':
+                        row['resolved'] = date_val
+                    else:
+                        row[date_field] = date_val
+        
+        rows.append(row)
+    
+    if dump_format == 'json':
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False)
+    elif dump_format == 'csv':
+        if rows:
+            fieldnames = ['key', 'project', 'issue_type', 'status', 'priority', 'summary', 
+                         'assignee', 'reporter', 'created', 'updated', 'resolved',
+                         'fix_version', 'affects_version']
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+        else:
+            # Write empty file with headers
+            with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['key', 'project', 'issue_type', 'status', 'priority', 'summary',
+                               'assignee', 'reporter', 'created', 'updated', 'resolved',
+                               'fix_version', 'affects_version'])
+    
+    log.info(f'Wrote {len(rows)} tickets to: {output_path}')
+
+
+def load_tickets_from_csv(input_file):
+    '''
+    Load tickets from a CSV file into a list of dictionaries.
+
+    Input:
+        input_file: Path to the CSV file.
+
+    Output:
+        List of dictionaries, each containing ticket data with 'key' and other fields.
+
+    Raises:
+        FileNotFoundError: If the input file doesn't exist.
+        ValueError: If the CSV doesn't have a 'key' column.
+    '''
+    log.debug(f'Entering load_tickets_from_csv(input_file={input_file})')
+    if not os.path.exists(input_file):
+        # Try adding .csv extension if not present
+        if not input_file.endswith('.csv') and os.path.exists(f'{input_file}.csv'):
+            input_file = f'{input_file}.csv'
+            log.debug(f'Added .csv extension: {input_file}')
+        else:
+            raise FileNotFoundError(f'Input file not found: {input_file}')
+    
+    tickets = []
+    with open(input_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        
+        # Verify 'key' column exists
+        if 'key' not in reader.fieldnames:
+            raise ValueError(f'CSV file must have a "key" column. Found columns: {reader.fieldnames}')
+        
+        for row in reader:
+            # Create dict with all columns as key:value pairs
+            ticket = {k: v for k, v in row.items()}
+            tickets.append(ticket)
+    
+    log.debug(f'Loaded {len(tickets)} tickets from CSV')
+    return tickets
+
+
+def bulk_update_tickets(jira, input_file, set_release=None, remove_release=False, 
+                        transition=None, assign=None, dry_run=True, max_updates=None):
+    '''
+    Perform bulk updates on tickets loaded from a CSV file.
+
+    Input:
+        jira: JIRA object with active connection.
+        input_file: Path to the CSV file containing ticket keys.
+        set_release: Release/version name to set on tickets, or None.
+        remove_release: If True, remove all releases from tickets.
+        transition: Status name to transition tickets to, or None.
+        assign: Username or email to assign tickets to, or None.
+        dry_run: If True, only preview changes without applying them.
+        max_updates: Maximum number of tickets to update, or None for all.
+
+    Output:
+        None; prints results to stdout.
+
+    Side Effects:
+        If not dry_run, modifies tickets in Jira.
+    '''
+    log.debug(f'Entering bulk_update_tickets(input_file={input_file}, set_release={set_release}, remove_release={remove_release}, transition={transition}, assign={assign}, dry_run={dry_run}, max_updates={max_updates})')
+    
+    # Load tickets from CSV
+    tickets = load_tickets_from_csv(input_file)
+    
+    if not tickets:
+        output('No tickets found in input file.')
+        return
+    
+    # Apply max_updates limit
+    if max_updates and len(tickets) > max_updates:
+        log.debug(f'Limiting updates to {max_updates} tickets (out of {len(tickets)})')
+        tickets = tickets[:max_updates]
+    
+    # Determine what operations to perform
+    operations = []
+    if set_release:
+        operations.append(f'Set release to: {set_release}')
+    if remove_release:
+        operations.append('Remove release')
+    if transition:
+        operations.append(f'Transition to: {transition}')
+    if assign:
+        operations.append(f'Assign to: {assign}')
+    
+    if not operations:
+        output('ERROR: No update operations specified.')
+        output('Use --set-release, --remove-release, --transition, or --assign')
+        return
+    
+    # Print summary
+    output()
+    output('=' * 80)
+    if dry_run:
+        output('BULK UPDATE - DRY RUN (no changes will be made)')
+    else:
+        output('BULK UPDATE - EXECUTING CHANGES')
+    output('=' * 80)
+    output(f'Input file: {input_file}')
+    output(f'Tickets to update: {len(tickets)}')
+    output(f'Operations:')
+    for op in operations:
+        output(f'  - {op}')
+    output('-' * 80)
+    
+    # Process each ticket
+    log.debug(f'Starting to process {len(tickets)} tickets')
+    success_count = 0
+    error_count = 0
+    errors = []
+    
+    for i, ticket in enumerate(tickets, 1):
+        ticket_key = ticket.get('key')
+        log.debug(f'Processing ticket {i}/{len(tickets)}: {ticket_key}')
+        log.debug(f'Ticket data: {ticket}')
+        
+        if not ticket_key:
+            log.warning(f'Skipping row {i}: no key found')
+            error_count += 1
+            errors.append((f'Row {i}', 'No key found'))
+            continue
+        
+        # Show progress
+        status_str = f'[{i}/{len(tickets)}] {ticket_key}'
+        
+        if dry_run:
+            # Dry run - just show what would happen
+            log.debug(f'{ticket_key}: Dry run - would apply operations')
+            output(f'{status_str}: Would apply: {", ".join(operations)}')
+            success_count += 1
+        else:
+            # Execute the updates
+            try:
+                log.debug(f'{ticket_key}: Fetching issue from Jira')
+                issue = jira.issue(ticket_key)
+                
+                # Set release
+                if set_release:
+                    issue.update(fields={'fixVersions': [{'name': set_release}]})
+                    log.debug(f'{ticket_key}: Set release to {set_release}')
+                
+                # Remove release
+                if remove_release:
+                    issue.update(fields={'fixVersions': []})
+                    log.debug(f'{ticket_key}: Removed release')
+                
+                # Transition
+                if transition:
+                    # Find the transition ID
+                    transitions = jira.transitions(issue)
+                    trans_id = None
+                    for t in transitions:
+                        if t['name'].lower() == transition.lower():
+                            trans_id = t['id']
+                            break
+                    
+                    if trans_id:
+                        jira.transition_issue(issue, trans_id)
+                        log.debug(f'{ticket_key}: Transitioned to {transition}')
+                    else:
+                        available = [t['name'] for t in transitions]
+                        raise Exception(f'Transition "{transition}" not available. Available: {available}')
+                
+                # Assign
+                if assign:
+                    # Handle special case of unassign
+                    if assign.lower() in ['none', 'unassigned', '']:
+                        jira.assign_issue(issue, None)
+                    else:
+                        jira.assign_issue(issue, assign)
+                    log.debug(f'{ticket_key}: Assigned to {assign}')
+                
+                output(f'{status_str}: SUCCESS')
+                success_count += 1
+                
+            except Exception as e:
+                log.error(f'{ticket_key}: Failed - {e}')
+                output(f'{status_str}: FAILED - {e}')
+                error_count += 1
+                errors.append((ticket_key, str(e)))
+    
+    # Print summary
+    output('-' * 80)
+    output(f'Completed: {success_count} successful, {error_count} failed')
+    
+    if errors and not dry_run:
+        output()
+        output('Errors:')
+        for key, error in errors[:10]:  # Show first 10 errors
+            output(f'  {key}: {error}')
+        if len(errors) > 10:
+            output(f'  ... and {len(errors) - 10} more errors')
+    
+    if dry_run:
+        output()
+        output('This was a DRY RUN. To execute changes, add --execute flag.')
+    
+    output('=' * 80)
+    output()
+
+
+def run_jql_query(jira, jql_query, limit=None, dump_file=None, dump_format='csv'):
+    '''
+    Run a generic JQL query and display results.
+
+    Input:
+        jira: JIRA object with active connection.
+        jql_query: JQL query string.
+        limit: Maximum number of tickets to retrieve, or None for all.
+        dump_file: Output filename for dumping tickets, or None to skip.
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints ticket list to stdout and optionally writes to file.
+
+    Side Effects:
+        Logs query information and prints formatted ticket list.
+        If dump_file is specified, writes tickets to file.
+    '''
+    log.debug(f'Entering run_jql_query(jql_query={jql_query}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+    
+    try:
+        show_jql(jql_query)
+        
+        # Use the new /rest/api/3/search/jql endpoint directly
+        email, api_token = get_jira_credentials()
+        
+        all_issues = []
+        next_page_token = None
+        batch_size = min(100, limit) if limit else 100
+        max_retries = 5
+        
+        while True:
+            # Check if we've reached the limit
+            if limit and len(all_issues) >= limit:
+                break
+            
+            # Adjust batch size if near limit
+            if limit:
+                remaining = limit - len(all_issues)
+                current_batch = min(batch_size, remaining)
+            else:
+                current_batch = batch_size
+            
+            # Build request payload - include extra fields if dumping
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            if dump_file:
+                fields_to_fetch.extend(['reporter', 'resolutiondate'])
+            
+            payload = {
+                'jql': jql_query,
+                'maxResults': current_batch,
+                'fields': fields_to_fetch
+            }
+            if next_page_token:
+                payload['nextPageToken'] = next_page_token
+            
+            # Retry logic for rate limiting
+            for retry in range(max_retries):
+                response = requests.post(
+                    f'{JIRA_URL}/rest/api/3/search/jql',
+                    auth=(email, api_token),
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    json=payload
+                )
+                
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+            
+            if response.status_code != 200:
+                log.error(f'API request failed: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+            
+            data = response.json()
+            issues = data.get('issues', [])
+            all_issues.extend(issues)
+            
+            next_page_token = data.get('nextPageToken')
+            log.debug(f'Retrieved {len(all_issues)} issues so far...')
+            
+            # Check for next page token or limit reached
+            if not next_page_token:
+                break
+            if limit and len(all_issues) >= limit:
+                break
+        
+        # Trim to limit if we went over
+        if limit and len(all_issues) > limit:
+            all_issues = all_issues[:limit]
+        
+        log.debug(f'Retrieved {len(all_issues)} issues total')
+        
+        # Print results
+        output('')
+        output('=' * 130)
+        output(f'JQL Query Results')
+        output('=' * 130)
+        output(f'Query: {jql_query}')
+        if limit:
+            output(f'Limit: {limit}')
+        print_ticket_table_header()
+        
+        for issue in all_issues:
+            print_ticket_row(issue)
+        
+        print_ticket_table_footer(len(all_issues))
+        
+        # Dump to file if requested
+        if dump_file:
+            dump_tickets_to_file(all_issues, dump_file, dump_format)
+        
+    except Exception as e:
+        log.error(f'Failed to run JQL query: {e}')
+        raise
+
+
+# ****************************************************************************************
+# Handle the arguments
+# ****************************************************************************************
+def handle_args():
+    '''
+    Parse CLI arguments and configure console logging handlers.
+
+    Input:
+        None directly; reads flags from sys.argv.
+
+    Output:
+        argparse.Namespace containing parsed arguments.
+
+    Side Effects:
+        Attaches a stream handler to the module logger with formatting and
+        level derived from the parsed arguments.
+    '''
+    log.debug('Entering handle_args()')
+    
+    parser = argparse.ArgumentParser(
+        description='Jira utilities for Cornelis Networks',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Credentials Setup:
+  Set the following environment variables before running:
+    export JIRA_EMAIL="your.email@cornelisnetworks.com"
+    export JIRA_API_TOKEN="your_api_token_here"
+  
+  Generate an API token at:
+    https://id.atlassian.com/manage-profile/security/api-tokens
+
+Examples:
+  %(prog)s --list                              List all Jira projects
+  %(prog)s --project PROJ --workflow           Show workflow statuses for PROJ
+  %(prog)s --project PROJ --issue-types        Show issue types for PROJ
+  %(prog)s --project PROJ --fields             Show create/edit/transition fields for all types
+  %(prog)s --project PROJ --fields Bug Task    Show fields for Bug and Task only
+  %(prog)s --project PROJ --versions           Show versions/releases for PROJ
+  %(prog)s --project PROJ --total              Show total ticket count for PROJ
+  %(prog)s --project PROJ --total Bug Task     Show count for specific issue types
+  %(prog)s --project PROJ --total --status Open
+                                               Show count for Open tickets
+  %(prog)s --project PROJ --total Bug --status Open "In Progress"
+                                               Show count for Open/In Progress Bugs
+  %(prog)s --project PROJ --total --date week  Show count for tickets created this week
+  %(prog)s --project PROJ --get-tickets        Get all tickets for PROJ
+  %(prog)s --project PROJ --get-tickets Bug --status Open --limit 50
+                                               Get up to 50 Open Bugs
+  %(prog)s --project PROJ --get-tickets --status Closed --date month
+                                               Get Closed tickets from this month
+  %(prog)s --project PROJ --get-tickets --date 01-01-2024:12-31-2024
+                                               Get tickets created in date range
+  %(prog)s --project PROJ --workflow --issue-types --fields --versions
+                                               Show all info for PROJ
+  %(prog)s --jql "project = PROJ AND status = Open"
+                                               Run a custom JQL query
+  %(prog)s --jql "assignee = currentUser() AND status != Done" --limit 20
+                                               Run JQL with limit
+  %(prog)s --project PROJ --get-tickets --dump-file tickets
+                                               Dump all tickets to tickets.csv
+  %(prog)s --project PROJ --get-tickets Bug --status Open --dump-file bugs --dump-format json
+                                               Dump Open Bugs to bugs.json
+  %(prog)s --jql "project = PROJ" --dump-file results --dump-format csv
+                                               Dump JQL results to results.csv
+  %(prog)s --project PROJ --releases           List all releases for PROJ
+  %(prog)s --project PROJ --releases "12.*"    List releases matching pattern
+  %(prog)s --project PROJ --releases "12.*" --get-tickets
+                                               Get tickets for all releases matching "12.*"
+  %(prog)s --project PROJ --releases "12.*" --get-tickets --status Open --dump-file 12x_tickets
+                                               Get Open tickets for 12.x releases, dump to file
+  %(prog)s --project PROJ --release-tickets "v1.0"
+                                               Get all tickets for release v1.0
+  %(prog)s --project PROJ --release-tickets "v1.0" --status Open --limit 50
+                                               Get Open tickets for release v1.0
+  %(prog)s --project PROJ --no-release         Get tickets with no release assigned
+  %(prog)s --project PROJ --no-release Bug --status Open
+                                               Get Open Bugs with no release
+
+Bulk Update Examples:
+  # Step 1: Find tickets and dump to CSV
+  %(prog)s --jql "project = PROJ AND fixVersion is EMPTY" --dump-file orphans
+  
+  # Step 2: Preview bulk update (dry-run is default)
+  %(prog)s --bulk-update --input-file orphans.csv --set-release "12.1.1.x"
+  
+  # Step 3: Execute bulk update
+  %(prog)s --bulk-update --input-file orphans.csv --set-release "12.1.1.x" --execute
+  
+  # Other bulk operations:
+  %(prog)s --bulk-update --input-file tickets.csv --transition "Closed" --execute
+  %(prog)s --bulk-update --input-file tickets.csv --assign "user@email.com" --execute
+  %(prog)s --bulk-update --input-file tickets.csv --remove-release --execute
+  %(prog)s --bulk-update --input-file tickets.csv --set-release "v2.0" --max-updates 10 --execute
+
+Date Filters:
+  today                    Tickets created today
+  week                     Tickets created in the last 7 days
+  month                    Tickets created in the last 30 days
+  year                     Tickets created in the last 365 days
+  all                      All tickets (no date filter)
+  MM-DD-YYYY:MM-DD-YYYY    Tickets created within date range
+        ''')
+    parser.add_argument(
+        '-v',
+        '--verbose',
+        action='store_true',
+        help='Enable verbose output to stdout.')
+    parser.add_argument(
+        '-q',
+        '--quiet',
+        action='store_true',
+        help='Minimal stdout.')
+    parser.add_argument(
+        '--list',
+        action='store_true',
+        dest='list_projects',
+        help='List all available Jira projects.')
+    parser.add_argument(
+        '--project',
+        type=str,
+        metavar='KEY',
+        help='Project key to operate on (e.g., PROJ).')
+    parser.add_argument(
+        '--workflow',
+        action='store_true',
+        help='Dump the status workflow for the specified project.')
+    parser.add_argument(
+        '--issue-types',
+        action='store_true',
+        dest='issue_types',
+        help='Dump the issue types for the specified project.')
+    parser.add_argument(
+        '--fields',
+        nargs='*',
+        metavar='TYPE',
+        help='Dump create/edit/transition fields for specified ticket types (or all if none specified).')
+    parser.add_argument(
+        '--versions',
+        action='store_true',
+        help='Dump the versions (releases) for the specified project.')
+    parser.add_argument(
+        '--components',
+        action='store_true',
+        help='List all components for the specified project.')
+    parser.add_argument(
+        '--releases',
+        nargs='?',
+        const='*',
+        default=None,
+        metavar='PATTERN',
+        help='List releases for the specified project. Optional glob pattern with exclusions using ^ (e.g., "12.*" or "12.*,^*Samples*").')
+    parser.add_argument(
+        '--release-tickets',
+        type=str,
+        metavar='RELEASE',
+        dest='release_tickets',
+        help='Get tickets associated with a specific release (case-insensitive).')
+    parser.add_argument(
+        '--no-release',
+        nargs='*',
+        metavar='TYPE',
+        dest='no_release',
+        help='Get tickets with no release assigned. Optionally filter by issue types.')
+    parser.add_argument(
+        '--total',
+        nargs='*',
+        metavar='TYPE',
+        help='Show ticket count. Optionally filter by specific issue types.')
+    parser.add_argument(
+        '--get-tickets',
+        nargs='*',
+        metavar='TYPE',
+        dest='get_tickets',
+        help='Get tickets. Optionally filter by specific issue types.')
+    parser.add_argument(
+        '--status',
+        nargs='+',
+        metavar='STATUS',
+        help='Filter by status (case-insensitive). Can specify multiple statuses.')
+    parser.add_argument(
+        '--date',
+        type=str,
+        metavar='FILTER',
+        help='Date filter: today, week, month, year, all, or MM-DD-YYYY:MM-DD-YYYY range.')
+    parser.add_argument(
+        '--limit',
+        type=int,
+        metavar='N',
+        help='Limit the number of tickets to retrieve.')
+    parser.add_argument(
+        '--jql',
+        type=str,
+        metavar='QUERY',
+        help='Run a custom JQL query and display results.')
+    parser.add_argument(
+        '--dump-file',
+        type=str,
+        metavar='FILE',
+        dest='dump_file',
+        help='Output filename for dumping tickets (default: "out" with appropriate extension).')
+    parser.add_argument(
+        '--dump-format',
+        type=str,
+        choices=['csv', 'json'],
+        default='csv',
+        dest='dump_format',
+        metavar='FORMAT',
+        help='Output format for dump: csv or json (default: csv).')
+    
+    # Bulk update arguments
+    parser.add_argument(
+        '--bulk-update',
+        action='store_true',
+        dest='bulk_update',
+        help='Perform bulk update on tickets from input file.')
+    parser.add_argument(
+        '--input-file',
+        type=str,
+        metavar='FILE',
+        dest='input_file',
+        help='Input CSV file containing ticket keys for bulk update.')
+    parser.add_argument(
+        '--set-release',
+        type=str,
+        metavar='RELEASE',
+        dest='set_release',
+        help='Set the release/fixVersion on tickets.')
+    parser.add_argument(
+        '--remove-release',
+        action='store_true',
+        dest='remove_release',
+        help='Remove all releases from tickets.')
+    parser.add_argument(
+        '--transition',
+        type=str,
+        metavar='STATUS',
+        help='Transition tickets to the specified status.')
+    parser.add_argument(
+        '--assign',
+        type=str,
+        metavar='USER',
+        help='Assign tickets to the specified user (email or "unassigned").')
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        dest='dry_run',
+        default=True,
+        help='Preview changes without applying them (default: True).')
+    parser.add_argument(
+        '--execute',
+        action='store_true',
+        help='Execute the bulk update (disables dry-run).')
+    parser.add_argument(
+        '--max-updates',
+        type=int,
+        metavar='N',
+        dest='max_updates',
+        help='Maximum number of tickets to update in bulk operation.')
+    parser.add_argument(
+        '--show-jql',
+        action='store_true',
+        dest='show_jql',
+        help='Print the equivalent JQL statement for the operation.')
+    args = parser.parse_args()
+
+    # Configure stdout logging based on arguments
+    ch = logging.StreamHandler(sys.stdout)
+    if args.verbose:
+        ch.setLevel(logging.DEBUG)
+    elif args.quiet:
+        ch.setLevel(logging.ERROR)
+    else:
+        ch.setLevel(logging.INFO)
+    ch.setFormatter(formatter)
+    log.addHandler(ch)
+    
+    # Set quiet mode for output function
+    global _quiet_mode
+    _quiet_mode = args.quiet
+    
+    # Set show_jql mode
+    global _show_jql
+    _show_jql = args.show_jql
+    
+    log.debug(f'Checking script requirements...')
+    # Check requirements to execute the script here
+    if not args.verbose and not args.quiet:
+        log.debug('No output level specified. Defaulting to INFO.')
+    
+    # Validate argument combinations
+    # args.fields is None if not specified, [] if specified with no args, or a list if specified with args
+    fields_specified = args.fields is not None
+    total_specified = args.total is not None
+    get_tickets_specified = args.get_tickets is not None
+    jql_specified = args.jql is not None
+    release_tickets_specified = args.release_tickets is not None
+    no_release_specified = args.no_release is not None
+    
+    project_actions = [args.workflow, args.issue_types, fields_specified, args.versions, args.components, args.releases,
+                       total_specified, get_tickets_specified, release_tickets_specified, no_release_specified]
+    if any(project_actions) and not args.project:
+        parser.error('--project is required when using --workflow, --issue-types, --fields, --versions, --components, --releases, --total, --get-tickets, --release-tickets, or --no-release')
+    
+    # Validate --status is only used with appropriate commands
+    if args.status and not (total_specified or get_tickets_specified or release_tickets_specified or no_release_specified):
+        parser.error('--status requires --total, --get-tickets, --release-tickets, or --no-release')
+    
+    # Validate --date and --limit usage
+    if args.date and not (total_specified or get_tickets_specified or release_tickets_specified or no_release_specified or args.components):
+        parser.error('--date requires --total, --get-tickets, --release-tickets, --no-release, or --components')
+    if args.limit and not (get_tickets_specified or jql_specified or release_tickets_specified or no_release_specified):
+        parser.error('--limit requires --get-tickets, --jql, --release-tickets, or --no-release')
+    
+    # Validate --dump-file and --dump-format usage
+    # Allow dump-file with any command that produces tabular/list data
+    dump_compatible = (get_tickets_specified or jql_specified or release_tickets_specified or 
+                       no_release_specified or args.releases or args.versions or args.components)
+    if (args.dump_file or args.dump_format != 'csv') and not dump_compatible:
+        parser.error('--dump-file and --dump-format require a command that produces data (e.g., --get-tickets, --jql, --releases, --versions, --components)')
+    
+    # Validate bulk update arguments
+    if args.bulk_update:
+        if not args.input_file:
+            parser.error('--bulk-update requires --input-file')
+        if not any([args.set_release, args.remove_release, args.transition, args.assign]):
+            parser.error('--bulk-update requires at least one operation: --set-release, --remove-release, --transition, or --assign')
+    
+    # Validate bulk update operation args are only used with --bulk-update
+    bulk_ops = [args.set_release, args.remove_release, args.transition, args.assign]
+    if any(bulk_ops) and not args.bulk_update:
+        parser.error('--set-release, --remove-release, --transition, and --assign require --bulk-update')
+    
+    if args.input_file and not args.bulk_update:
+        parser.error('--input-file requires --bulk-update')
+    
+    if args.execute and not args.bulk_update:
+        parser.error('--execute requires --bulk-update')
+    
+    if args.max_updates and not args.bulk_update:
+        parser.error('--max-updates requires --bulk-update')
+    
+    # If --execute is specified, disable dry_run
+    if args.execute:
+        args.dry_run = False
+    
+    # Validate that at least one action is specified
+    if not args.list_projects and not any(project_actions) and not jql_specified and not args.bulk_update:
+        parser.print_help()
+        sys.exit(1)
+    
+    # Store whether fields/total/get_tickets/jql was specified for easier checking
+    args.fields_specified = fields_specified
+    args.total_specified = total_specified
+    args.get_tickets_specified = get_tickets_specified
+    args.jql_specified = jql_specified
+    args.release_tickets_specified = release_tickets_specified
+    args.no_release_specified = no_release_specified
+
+    log.info('++++++++++++++++++++++++++++++++++++++++++++++')
+    log.info(f'+  {os.path.basename(sys.argv[0])}')
+    log.info(f'+  Python Version: {sys.version.split()[0]}')
+    log.info(f'+  Today is: {date.today()}')
+    log.info(f'+  Jira URL: {JIRA_URL}')
+    if args.project:
+        log.info(f'+  Project: {args.project}')
+    log.info('++++++++++++++++++++++++++++++++++++++++++++++')        
+
+    return args
+
+
+# ****************************************************************************************
+# Main
+# ****************************************************************************************
+def main():
+    '''
+    Entrypoint that wires together dependencies and launches the CLI.
+
+    Sequence:
+        1. Parse command line arguments
+        2. Connect to Jira
+        3. Execute requested action(s)
+
+    Output:
+        Exit code 0 on success, 1 on failure.
+    '''
+    args = handle_args()
+    log.debug('Entering main()')
+    
+    try:
+        jira = connect_to_jira()
+        
+        if args.list_projects:
+            list_projects(jira)
+        
+        if args.workflow:
+            get_project_workflows(jira, args.project)
+        
+        if args.issue_types:
+            get_project_issue_types(jira, args.project)
+        
+        if args.fields_specified:
+            get_project_fields(jira, args.project, args.fields)
+        
+        if args.versions:
+            get_project_versions(jira, args.project)
+        
+        if args.components:
+            get_project_components(jira, args.project, args.date, args.dump_file, args.dump_format)
+        
+        if args.releases:
+            if args.get_tickets_specified:
+                # Get tickets for all releases matching the pattern
+                get_releases_tickets(jira, args.project, args.releases, args.get_tickets,
+                                    args.status, args.date, args.limit, args.dump_file, args.dump_format)
+            else:
+                # Just list the releases
+                get_releases(jira, args.project, args.releases, args.dump_file, args.dump_format)
+        
+        if args.release_tickets_specified:
+            get_release_tickets(jira, args.project, args.release_tickets, args.total if args.total_specified else None,
+                               args.status, args.date, args.limit, args.dump_file, args.dump_format)
+        
+        if args.no_release_specified:
+            get_no_release_tickets(jira, args.project, args.no_release, args.status, args.date, args.limit,
+                                  args.dump_file, args.dump_format)
+        
+        if args.total_specified:
+            get_ticket_totals(jira, args.project, args.total, args.status, args.date)
+        
+        if args.get_tickets_specified and not args.releases:
+            # Only run standalone get_tickets if --releases is not specified
+            # (when --releases is specified with --get-tickets, it's handled above)
+            get_tickets(jira, args.project, args.get_tickets, args.status, args.date, args.limit, 
+                       args.dump_file, args.dump_format)
+        
+        if args.jql_specified:
+            run_jql_query(jira, args.jql, args.limit, args.dump_file, args.dump_format)
+        
+        if args.bulk_update:
+            bulk_update_tickets(jira, args.input_file, args.set_release, args.remove_release,
+                               args.transition, args.assign, args.dry_run, args.max_updates)
+            
+    except JiraCredentialsError as e:
+        log.error(e.message)
+        output('')
+        output('ERROR: ' + e.message)
+        output('')
+        output('Please set the required environment variables:')
+        output('  export JIRA_EMAIL="your.email@cornelisnetworks.com"')
+        output('  export JIRA_API_TOKEN="your_api_token_here"')
+        output('')
+        sys.exit(1)
+    except JiraConnectionError as e:
+        log.error(e.message)
+        output('')
+        output('ERROR: ' + e.message)
+        output('')
+        sys.exit(1)
+    except JiraProjectError as e:
+        log.error(e.message)
+        output('')
+        output('ERROR: ' + e.message)
+        output('')
+        sys.exit(1)
+    except Exception as e:
+        log.error(f'Unexpected error: {e}')
+        output(f'ERROR: {e}')
+        sys.exit(1)
+    
+    # Display JQL if --show-jql was specified
+    display_jql()
+    
+    log.info('Operation complete.')
+
+
+if __name__ == '__main__':
+    main()
