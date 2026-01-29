@@ -75,3 +75,7 @@ dmypy.json
 
 # Ruff
 .ruff_cache/
+
+# User-specific files (removed from tracking)
+jql.txt
+template.py
