@@ -1469,12 +1469,12 @@ def _dump_releases_to_file(versions, dump_file, dump_format='csv'):
 
 def get_release_tickets(jira, project_key, release_name, issue_types=None, statuses=None, date_filter=None, limit=None, dump_file=None, dump_format='csv'):
     '''
-    Get and display tickets associated with a specific release.
+    Get and display tickets associated with a specific release or releases matching a pattern.
 
     Input:
         jira: JIRA object with active connection.
         project_key: String key of the project (e.g., 'PROJ').
-        release_name: Name of the release/version (case-insensitive).
+        release_name: Name of the release/version (case-insensitive), or a glob pattern (e.g., '12.1*').
         issue_types: List of issue type names to filter by, or None/empty for all.
         statuses: List of status names to filter by, or None/empty for all.
         date_filter: Date filter string.
@@ -1490,7 +1490,15 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
     project = validate_project(jira, project_key)
     
     try:
-        # Normalize release name (case-insensitive)
+        # Check if release_name contains wildcard characters - if so, treat as pattern
+        # and delegate to get_releases_tickets for multi-release handling
+        if '*' in release_name or '?' in release_name:
+            log.debug(f'Release name "{release_name}" contains wildcards, treating as pattern')
+            # Delegate to get_releases_tickets which handles patterns
+            return get_releases_tickets(jira, project_key, release_name, issue_types, statuses,
+                                        date_filter, limit, dump_file, dump_format)
+        
+        # Normalize release name (case-insensitive exact match)
         normalized_release = normalize_release(jira, project_key, release_name)
         log.debug(f'Normalized release name: {normalized_release}')
         
@@ -3643,7 +3651,7 @@ Date Filters:
         type=str,
         metavar='RELEASE',
         dest='release_tickets',
-        help='Get tickets associated with a specific release (case-insensitive).')
+        help='Get tickets associated with a specific release (case-insensitive). Supports glob patterns (e.g., "12.1*" to match all 12.1.x releases).')
     parser.add_argument(
         '--no-release',
         nargs='*',
