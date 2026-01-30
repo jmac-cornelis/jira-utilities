@@ -759,13 +759,15 @@ def normalize_issue_types(jira, project_key, issue_type_names):
 def normalize_statuses(jira, status_names):
     '''
     Normalize status names to match Jira's case (case-insensitive matching).
+    Supports negation with ^ prefix (e.g., ^Closed to exclude Closed status).
 
     Input:
         jira: JIRA object with active connection.
-        status_names: List of status names (case-insensitive).
+        status_names: List of status names (case-insensitive). Use ^ prefix to exclude.
 
     Output:
-        List of status names with correct case as defined in Jira.
+        Dict with 'include' and 'exclude' lists of normalized status names.
+        For backward compatibility, if no exclusions, returns just the list.
 
     Raises:
         JiraProjectError: If a status is not found.
@@ -781,19 +783,79 @@ def normalize_statuses(jira, status_names):
     # Build case-insensitive lookup
     status_lookup = {s.name.lower(): s.name for s in statuses}
     
-    normalized = []
+    # Separate includes and excludes (^ prefix for exclusions)
+    includes = []
+    excludes = []
+    
     for name in status_names:
-        name_lower = name.lower()
+        # Check for negation prefix
+        if name.startswith('^'):
+            actual_name = name[1:]  # Remove the ^ prefix
+            is_exclude = True
+        else:
+            actual_name = name
+            is_exclude = False
+        
+        name_lower = actual_name.lower()
         if name_lower in status_lookup:
-            normalized.append(status_lookup[name_lower])
-            log.debug(f'Normalized status "{name}" -> "{status_lookup[name_lower]}"')
+            normalized_name = status_lookup[name_lower]
+            if is_exclude:
+                excludes.append(normalized_name)
+                log.debug(f'Normalized excluded status "{name}" -> "^{normalized_name}"')
+            else:
+                includes.append(normalized_name)
+                log.debug(f'Normalized status "{name}" -> "{normalized_name}"')
         else:
             available = ', '.join(sorted(status_lookup.values()))
-            log.error(f'Status "{name}" not found')
-            raise JiraProjectError(f'Status "{name}" not found. Available: {available}')
+            log.error(f'Status "{actual_name}" not found')
+            raise JiraProjectError(f'Status "{actual_name}" not found. Available: {available}')
     
-    log.debug(f'Normalized statuses: {normalized}')
-    return normalized
+    # If there are exclusions, return a dict with both lists
+    if excludes:
+        result = {'include': includes, 'exclude': excludes}
+        log.debug(f'Normalized statuses with exclusions: {result}')
+        return result
+    
+    # For backward compatibility, return just the list if no exclusions
+    log.debug(f'Normalized statuses: {includes}')
+    return includes
+
+
+def _build_status_jql(normalized_statuses):
+    '''
+    Build JQL clause(s) for status filtering, handling both includes and excludes.
+    
+    Input:
+        normalized_statuses: Either a list of status names (backward compatible),
+                            or a dict with 'include' and 'exclude' keys.
+    
+    Output:
+        JQL clause string (e.g., 'status IN ("Open", "In Progress")' or
+        'status NOT IN ("Closed")'), or empty string if no statuses specified.
+    '''
+    if not normalized_statuses:
+        return ''
+    
+    clauses = []
+    
+    # Handle dict format (with exclusions)
+    if isinstance(normalized_statuses, dict):
+        includes = normalized_statuses.get('include', [])
+        excludes = normalized_statuses.get('exclude', [])
+        
+        if includes:
+            status_list = ', '.join([f'"{s}"' for s in includes])
+            clauses.append(f'status IN ({status_list})')
+        
+        if excludes:
+            status_list = ', '.join([f'"{s}"' for s in excludes])
+            clauses.append(f'status NOT IN ({status_list})')
+    else:
+        # Handle list format (backward compatible, no exclusions)
+        status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
+        clauses.append(f'status IN ({status_list})')
+    
+    return ' AND '.join(clauses)
 
 
 def normalize_release(jira, project_key, release_name):
@@ -1446,9 +1508,10 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
             type_list = ', '.join([f'"{t}"' for t in normalized_types])
             jql_parts.append(f'issuetype IN ({type_list})')
         
-        if normalized_statuses:
-            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
-            jql_parts.append(f'status IN ({status_list})')
+        # Build status clause using helper (handles both includes and excludes)
+        status_clause = _build_status_jql(normalized_statuses)
+        if status_clause:
+            jql_parts.append(status_clause)
         
         jql = ' AND '.join(jql_parts)
         if date_clause:
@@ -1534,7 +1597,16 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
         if normalized_types:
             output(f'Issue types: {", ".join(normalized_types)}')
         if normalized_statuses:
-            output(f'Statuses: {", ".join(normalized_statuses)}')
+            # Format status display for both includes and excludes
+            if isinstance(normalized_statuses, dict):
+                parts = []
+                if normalized_statuses.get('include'):
+                    parts.append(', '.join(normalized_statuses['include']))
+                if normalized_statuses.get('exclude'):
+                    parts.append('NOT: ' + ', '.join(normalized_statuses['exclude']))
+                output(f'Statuses: {"; ".join(parts)}')
+            else:
+                output(f'Statuses: {", ".join(normalized_statuses)}')
         if date_filter and date_filter.lower() != 'all':
             output(f'Date filter: {date_filter}')
         if limit:
@@ -1613,9 +1685,10 @@ def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, s
             type_list = ', '.join([f'"{t}"' for t in normalized_types])
             jql_parts.append(f'issuetype IN ({type_list})')
         
-        if normalized_statuses:
-            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
-            jql_parts.append(f'status IN ({status_list})')
+        # Build status clause using helper (handles both includes and excludes)
+        status_clause = _build_status_jql(normalized_statuses)
+        if status_clause:
+            jql_parts.append(status_clause)
         
         jql = ' AND '.join(jql_parts)
         if date_clause:
@@ -1698,7 +1771,16 @@ def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, s
         if normalized_types:
             output(f'Issue types: {", ".join(normalized_types)}')
         if normalized_statuses:
-            output(f'Statuses: {", ".join(normalized_statuses)}')
+            # Format status display for both includes and excludes
+            if isinstance(normalized_statuses, dict):
+                parts = []
+                if normalized_statuses.get('include'):
+                    parts.append(', '.join(normalized_statuses['include']))
+                if normalized_statuses.get('exclude'):
+                    parts.append('NOT: ' + ', '.join(normalized_statuses['exclude']))
+                output(f'Statuses: {"; ".join(parts)}')
+            else:
+                output(f'Statuses: {", ".join(normalized_statuses)}')
         if date_filter:
             output(f'Date filter: {date_filter}')
         if limit:
@@ -1760,9 +1842,10 @@ def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, d
             type_list = ', '.join([f'"{t}"' for t in normalized_types])
             jql_parts.append(f'issuetype IN ({type_list})')
         
-        if normalized_statuses:
-            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
-            jql_parts.append(f'status IN ({status_list})')
+        # Build status clause using helper (handles both includes and excludes)
+        status_clause = _build_status_jql(normalized_statuses)
+        if status_clause:
+            jql_parts.append(status_clause)
         
         jql = ' AND '.join(jql_parts)
         if date_clause:
@@ -1848,7 +1931,16 @@ def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, d
         if normalized_types:
             output(f'Issue types: {", ".join(normalized_types)}')
         if normalized_statuses:
-            output(f'Statuses: {", ".join(normalized_statuses)}')
+            # Format status display for both includes and excludes
+            if isinstance(normalized_statuses, dict):
+                parts = []
+                if normalized_statuses.get('include'):
+                    parts.append(', '.join(normalized_statuses['include']))
+                if normalized_statuses.get('exclude'):
+                    parts.append('NOT: ' + ', '.join(normalized_statuses['exclude']))
+                output(f'Statuses: {"; ".join(parts)}')
+            else:
+                output(f'Statuses: {", ".join(normalized_statuses)}')
         if date_filter and date_filter.lower() != 'all':
             output(f'Date filter: {date_filter}')
         if limit:
@@ -1912,9 +2004,10 @@ def get_ticket_totals(jira, project_key, issue_types=None, statuses=None, date_f
             type_list = ', '.join([f'"{t}"' for t in normalized_types])
             jql_parts.append(f'issuetype IN ({type_list})')
         
-        if normalized_statuses:
-            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
-            jql_parts.append(f'status IN ({status_list})')
+        # Build status clause using helper (handles both includes and excludes)
+        status_clause = _build_status_jql(normalized_statuses)
+        if status_clause:
+            jql_parts.append(status_clause)
         
         jql = ' AND '.join(jql_parts)
         if date_clause:
@@ -1953,7 +2046,16 @@ def get_ticket_totals(jira, project_key, issue_types=None, statuses=None, date_f
         if normalized_types:
             output(f'Issue types: {", ".join(normalized_types)}')
         if normalized_statuses:
-            output(f'Statuses: {", ".join(normalized_statuses)}')
+            # Format status display for both includes and excludes
+            if isinstance(normalized_statuses, dict):
+                parts = []
+                if normalized_statuses.get('include'):
+                    parts.append(', '.join(normalized_statuses['include']))
+                if normalized_statuses.get('exclude'):
+                    parts.append('NOT: ' + ', '.join(normalized_statuses['exclude']))
+                output(f'Statuses: {"; ".join(parts)}')
+            else:
+                output(f'Statuses: {", ".join(normalized_statuses)}')
         if date_filter and date_filter.lower() != 'all':
             output(f'Date filter: {date_filter}')
         
@@ -2014,9 +2116,10 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
             type_list = ', '.join([f'"{t}"' for t in normalized_types])
             jql_parts.append(f'issuetype IN ({type_list})')
         
-        if normalized_statuses:
-            status_list = ', '.join([f'"{s}"' for s in normalized_statuses])
-            jql_parts.append(f'status IN ({status_list})')
+        # Build status clause using helper (handles both includes and excludes)
+        status_clause = _build_status_jql(normalized_statuses)
+        if status_clause:
+            jql_parts.append(status_clause)
         
         jql = ' AND '.join(jql_parts)
         if date_clause:
@@ -2111,7 +2214,16 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
         if normalized_types:
             output(f'Issue types: {", ".join(normalized_types)}')
         if normalized_statuses:
-            output(f'Statuses: {", ".join(normalized_statuses)}')
+            # Format status display for both includes and excludes
+            if isinstance(normalized_statuses, dict):
+                parts = []
+                if normalized_statuses.get('include'):
+                    parts.append(', '.join(normalized_statuses['include']))
+                if normalized_statuses.get('exclude'):
+                    parts.append('NOT: ' + ', '.join(normalized_statuses['exclude']))
+                output(f'Statuses: {"; ".join(parts)}')
+            else:
+                output(f'Statuses: {", ".join(normalized_statuses)}')
         if date_filter and date_filter.lower() != 'all':
             output(f'Date filter: {date_filter}')
         if limit:
@@ -3553,7 +3665,7 @@ Date Filters:
         '--status',
         nargs='+',
         metavar='STATUS',
-        help='Filter by status (case-insensitive). Can specify multiple statuses.')
+        help='Filter by status (case-insensitive). Can specify multiple statuses. Use ^ prefix to exclude (e.g., ^Closed to exclude Closed).')
     parser.add_argument(
         '--date',
         type=str,
