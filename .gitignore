@@ -5,11 +5,21 @@
 # Python virtual environment
 .venv/
 venv/
+env/
 ENV/
 
 # IDE settings
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
 
 # Log files
 *.log
