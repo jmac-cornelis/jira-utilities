@@ -166,6 +166,96 @@ def print_ticket_table_footer(count):
     output('')
 
 
+def print_dashboard_table_header():
+    '''Print the header row for dashboard tables.'''
+    output('-' * 130)
+    output(f'{"ID":<12} {"Name":<35} {"Owner":<25} {"Shared":<10} {"Favourite":<10} {"Description":<35}')
+    output('-' * 130)
+
+
+def print_dashboard_row(dashboard):
+    '''
+    Print a single dashboard row in the standard table format.
+    
+    Input:
+        dashboard: Dashboard dict from Jira API.
+    '''
+    dash_id = str(dashboard.get('id', 'N/A'))
+    name = dashboard.get('name', 'N/A') or 'N/A'
+    
+    # Extract owner info
+    owner = dashboard.get('owner', {})
+    owner_name = owner.get('displayName', 'N/A') if owner else 'N/A'
+    
+    # Check if shared (has sharePermissions with entries)
+    share_permissions = dashboard.get('sharePermissions', [])
+    is_shared = 'Yes' if share_permissions else 'No'
+    
+    # Check if favourite
+    is_favourite = 'Yes' if dashboard.get('isFavourite', False) else 'No'
+    
+    description = dashboard.get('description', '') or ''
+    
+    # Truncate for display
+    if len(name) > 33:
+        name = name[:33] + '..'
+    if len(owner_name) > 23:
+        owner_name = owner_name[:23] + '..'
+    if len(description) > 33:
+        description = description[:33] + '..'
+    
+    output(f'{dash_id:<12} {name:<35} {owner_name:<25} {is_shared:<10} {is_favourite:<10} {description:<35}')
+
+
+def print_dashboard_table_footer(count):
+    '''Print the footer row for dashboard tables.'''
+    output('=' * 130)
+    output(f'Total: {count} dashboards')
+    output('')
+
+
+def print_gadget_table_header():
+    '''Print the header row for gadget tables.'''
+    output('-' * 120)
+    output(f'{"ID":<12} {"Module Key":<40} {"Title":<30} {"Position":<12} {"Color":<15}')
+    output('-' * 120)
+
+
+def print_gadget_row(gadget):
+    '''
+    Print a single gadget row in the standard table format.
+    
+    Input:
+        gadget: Gadget dict from Jira API.
+    '''
+    gadget_id = str(gadget.get('id', 'N/A'))
+    module_key = gadget.get('moduleKey', 'N/A') or 'N/A'
+    title = gadget.get('title', 'N/A') or 'N/A'
+    
+    # Extract position
+    position = gadget.get('position', {})
+    row = position.get('row', 0)
+    col = position.get('column', 0)
+    position_str = f'{row},{col}'
+    
+    color = gadget.get('color', 'N/A') or 'N/A'
+    
+    # Truncate for display
+    if len(module_key) > 38:
+        module_key = module_key[:38] + '..'
+    if len(title) > 28:
+        title = title[:28] + '..'
+    
+    output(f'{gadget_id:<12} {module_key:<40} {title:<30} {position_str:<12} {color:<15}')
+
+
+def print_gadget_table_footer(count):
+    '''Print the footer row for gadget tables.'''
+    output('=' * 120)
+    output(f'Total: {count} gadgets')
+    output('')
+
+
 # Store the last JQL query for display at end of operation
 _last_jql = None
 
@@ -245,6 +335,15 @@ class JiraProjectError(Error):
     '''
     def __init__(self, message):
         self.message = f'Jira project error: {message}'
+        super().__init__(self.message)
+
+
+class JiraDashboardError(Error):
+    '''
+    Exception raised when Jira dashboard operations fail.
+    '''
+    def __init__(self, message):
+        self.message = f'Jira dashboard error: {message}'
         super().__init__(self.message)
 
 
@@ -2454,6 +2553,824 @@ def run_jql_query(jira, jql_query, limit=None, dump_file=None, dump_format='csv'
 
 
 # ****************************************************************************************
+# Dashboard Management Functions
+# ****************************************************************************************
+
+def list_dashboards(jira, owner=None, shared=False):
+    '''
+    List accessible dashboards.
+
+    Input:
+        jira: JIRA object with active connection.
+        owner: Filter by owner username/email (use "me" for current user), or None for all.
+        shared: If True, show only dashboards shared with current user.
+
+    Output:
+        None; prints dashboard list to stdout.
+
+    Raises:
+        JiraDashboardError: If the API request fails.
+    '''
+    log.debug(f'Entering list_dashboards(owner={owner}, shared={shared})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # Use dashboard/search endpoint for filtering capabilities
+        # Build query parameters
+        params = {'maxResults': 100}
+        
+        if owner:
+            # Handle "me" as current user
+            if owner.lower() == 'me':
+                params['accountId'] = 'me'
+            else:
+                # Try to find user by email or display name
+                params['owner'] = owner
+        
+        if shared:
+            # Filter to show only shared dashboards
+            params['filter'] = 'sharedWithMe'
+        
+        all_dashboards = []
+        start_at = 0
+        max_retries = 5
+        
+        while True:
+            params['startAt'] = start_at
+            
+            for retry in range(max_retries):
+                response = requests.get(
+                    f'{JIRA_URL}/rest/api/3/dashboard/search',
+                    auth=(email, api_token),
+                    headers={'Accept': 'application/json'},
+                    params=params
+                )
+                
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+            
+            if response.status_code != 200:
+                log.error(f'Dashboard API request failed: {response.status_code} - {response.text}')
+                raise JiraDashboardError(f'API error: {response.status_code} - {response.text}')
+            
+            data = response.json()
+            dashboards = data.get('values', [])
+            all_dashboards.extend(dashboards)
+            
+            # Check if there are more pages
+            total = data.get('total', 0)
+            if start_at + len(dashboards) >= total:
+                break
+            start_at += len(dashboards)
+        
+        log.debug(f'Retrieved {len(all_dashboards)} dashboards')
+        
+        # Print results
+        output('')
+        output('=' * 130)
+        output('Accessible Dashboards')
+        if owner:
+            output(f'Owner filter: {owner}')
+        if shared:
+            output('Showing: Dashboards shared with current user')
+        output('=' * 130)
+        
+        print_dashboard_table_header()
+        
+        for dashboard in all_dashboards:
+            print_dashboard_row(dashboard)
+        
+        print_dashboard_table_footer(len(all_dashboards))
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to list dashboards: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def get_dashboard(jira, dashboard_id):
+    '''
+    Get details of a specific dashboard by ID.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The dashboard ID.
+
+    Output:
+        None; prints dashboard details to stdout.
+
+    Raises:
+        JiraDashboardError: If the dashboard is not found or API request fails.
+    '''
+    log.debug(f'Entering get_dashboard(dashboard_id={dashboard_id})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        response = requests.get(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} not found')
+        
+        if response.status_code != 200:
+            log.error(f'Dashboard API request failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'API error: {response.status_code} - {response.text}')
+        
+        dashboard = response.json()
+        log.debug(f'Retrieved dashboard: {dashboard.get("name")}')
+        
+        # Print detailed dashboard info
+        output('')
+        output('=' * 80)
+        output(f'Dashboard Details: {dashboard.get("name", "N/A")}')
+        output('=' * 80)
+        output(f'ID:          {dashboard.get("id", "N/A")}')
+        output(f'Name:        {dashboard.get("name", "N/A")}')
+        output(f'Description: {dashboard.get("description", "N/A") or "N/A"}')
+        
+        owner = dashboard.get('owner', {})
+        output(f'Owner:       {owner.get("displayName", "N/A") if owner else "N/A"}')
+        
+        output(f'Favourite:   {"Yes" if dashboard.get("isFavourite", False) else "No"}')
+        output(f'View URL:    {dashboard.get("view", "N/A")}')
+        
+        # Share permissions
+        share_permissions = dashboard.get('sharePermissions', [])
+        if share_permissions:
+            output('')
+            output('Share Permissions:')
+            for perm in share_permissions:
+                perm_type = perm.get('type', 'unknown')
+                if perm_type == 'global':
+                    output(f'  - Global (all users)')
+                elif perm_type == 'project':
+                    project = perm.get('project', {})
+                    output(f'  - Project: {project.get("name", "N/A")} ({project.get("key", "N/A")})')
+                elif perm_type == 'group':
+                    group = perm.get('group', {})
+                    output(f'  - Group: {group.get("name", "N/A")}')
+                elif perm_type == 'user':
+                    user = perm.get('user', {})
+                    output(f'  - User: {user.get("displayName", "N/A")}')
+                else:
+                    output(f'  - {perm_type}')
+        else:
+            output('')
+            output('Share Permissions: Private (not shared)')
+        
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to get dashboard: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def create_dashboard(jira, name, description=None, share_permissions=None):
+    '''
+    Create a new dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        name: Name for the new dashboard.
+        description: Optional description for the dashboard.
+        share_permissions: Optional list of share permission dicts, or JSON string.
+
+    Output:
+        None; prints created dashboard details to stdout.
+
+    Raises:
+        JiraDashboardError: If the dashboard creation fails.
+    '''
+    log.debug(f'Entering create_dashboard(name={name}, description={description}, share_permissions={share_permissions})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # Build request payload
+        payload = {'name': name}
+        
+        if description:
+            payload['description'] = description
+        
+        # Parse share_permissions if provided as JSON string
+        if share_permissions:
+            if isinstance(share_permissions, str):
+                try:
+                    payload['sharePermissions'] = json.loads(share_permissions)
+                except json.JSONDecodeError as e:
+                    raise JiraDashboardError(f'Invalid JSON for share-permissions: {e}')
+            else:
+                payload['sharePermissions'] = share_permissions
+        else:
+            # Default to private (empty share permissions)
+            payload['sharePermissions'] = []
+        
+        log.debug(f'Create dashboard payload: {payload}')
+        
+        response = requests.post(
+            f'{JIRA_URL}/rest/api/3/dashboard',
+            auth=(email, api_token),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            json=payload
+        )
+        
+        if response.status_code not in [200, 201]:
+            log.error(f'Dashboard create failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'Failed to create dashboard: {response.status_code} - {response.text}')
+        
+        dashboard = response.json()
+        log.info(f'Created dashboard: {dashboard.get("id")} - {dashboard.get("name")}')
+        
+        # Print success message
+        output('')
+        output('=' * 80)
+        output('Dashboard Created Successfully')
+        output('=' * 80)
+        output(f'ID:          {dashboard.get("id", "N/A")}')
+        output(f'Name:        {dashboard.get("name", "N/A")}')
+        output(f'Description: {dashboard.get("description", "N/A") or "N/A"}')
+        output(f'View URL:    {dashboard.get("view", "N/A")}')
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to create dashboard: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def update_dashboard(jira, dashboard_id, name=None, description=None, share_permissions=None):
+    '''
+    Update an existing dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The dashboard ID to update.
+        name: New name for the dashboard, or None to keep existing.
+        description: New description, or None to keep existing.
+        share_permissions: New share permissions as list or JSON string, or None to keep existing.
+
+    Output:
+        None; prints updated dashboard details to stdout.
+
+    Raises:
+        JiraDashboardError: If the dashboard update fails.
+    '''
+    log.debug(f'Entering update_dashboard(dashboard_id={dashboard_id}, name={name}, description={description})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # First, get the current dashboard to preserve unchanged fields
+        response = requests.get(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} not found')
+        
+        if response.status_code != 200:
+            raise JiraDashboardError(f'Failed to get dashboard: {response.status_code} - {response.text}')
+        
+        current = response.json()
+        
+        # Build update payload - name is required for PUT
+        payload = {
+            'name': name if name else current.get('name'),
+            'sharePermissions': current.get('sharePermissions', [])
+        }
+        
+        if description is not None:
+            payload['description'] = description
+        elif current.get('description'):
+            payload['description'] = current.get('description')
+        
+        # Parse share_permissions if provided
+        if share_permissions:
+            if isinstance(share_permissions, str):
+                try:
+                    payload['sharePermissions'] = json.loads(share_permissions)
+                except json.JSONDecodeError as e:
+                    raise JiraDashboardError(f'Invalid JSON for share-permissions: {e}')
+            else:
+                payload['sharePermissions'] = share_permissions
+        
+        log.debug(f'Update dashboard payload: {payload}')
+        
+        response = requests.put(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}',
+            auth=(email, api_token),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            json=payload
+        )
+        
+        if response.status_code not in [200, 204]:
+            log.error(f'Dashboard update failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'Failed to update dashboard: {response.status_code} - {response.text}')
+        
+        dashboard = response.json() if response.status_code == 200 else payload
+        log.info(f'Updated dashboard: {dashboard_id}')
+        
+        # Print success message
+        output('')
+        output('=' * 80)
+        output('Dashboard Updated Successfully')
+        output('=' * 80)
+        output(f'ID:          {dashboard_id}')
+        output(f'Name:        {dashboard.get("name", "N/A")}')
+        output(f'Description: {dashboard.get("description", "N/A") or "N/A"}')
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to update dashboard: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def delete_dashboard(jira, dashboard_id, force=False):
+    '''
+    Delete a dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The dashboard ID to delete.
+        force: If True, skip confirmation prompt.
+
+    Output:
+        None; prints deletion confirmation to stdout.
+
+    Raises:
+        JiraDashboardError: If the dashboard deletion fails.
+    '''
+    log.debug(f'Entering delete_dashboard(dashboard_id={dashboard_id}, force={force})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # First, get the dashboard to show what will be deleted
+        response = requests.get(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} not found')
+        
+        if response.status_code != 200:
+            raise JiraDashboardError(f'Failed to get dashboard: {response.status_code} - {response.text}')
+        
+        dashboard = response.json()
+        dashboard_name = dashboard.get('name', 'Unknown')
+        
+        # Confirm deletion unless force is True
+        if not force:
+            output('')
+            output(f'WARNING: About to delete dashboard "{dashboard_name}" (ID: {dashboard_id})')
+            output('This action cannot be undone.')
+            output('')
+            output('Use --force to skip this confirmation.')
+            output('')
+            return
+        
+        # Perform deletion
+        response = requests.delete(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code not in [200, 204]:
+            log.error(f'Dashboard delete failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'Failed to delete dashboard: {response.status_code} - {response.text}')
+        
+        log.info(f'Deleted dashboard: {dashboard_id} - {dashboard_name}')
+        
+        # Print success message
+        output('')
+        output('=' * 80)
+        output('Dashboard Deleted Successfully')
+        output('=' * 80)
+        output(f'ID:   {dashboard_id}')
+        output(f'Name: {dashboard_name}')
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to delete dashboard: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def copy_dashboard(jira, dashboard_id, name, description=None, share_permissions=None):
+    '''
+    Copy/clone an existing dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The source dashboard ID to copy.
+        name: Name for the new dashboard copy.
+        description: Optional description for the copy, or None to copy from source.
+        share_permissions: Optional share permissions for the copy, or None for private.
+
+    Output:
+        None; prints created dashboard details to stdout.
+
+    Raises:
+        JiraDashboardError: If the dashboard copy fails.
+    '''
+    log.debug(f'Entering copy_dashboard(dashboard_id={dashboard_id}, name={name}, description={description})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # Build request payload
+        payload = {'name': name}
+        
+        if description:
+            payload['description'] = description
+        
+        # Parse share_permissions if provided
+        if share_permissions:
+            if isinstance(share_permissions, str):
+                try:
+                    payload['sharePermissions'] = json.loads(share_permissions)
+                except json.JSONDecodeError as e:
+                    raise JiraDashboardError(f'Invalid JSON for share-permissions: {e}')
+            else:
+                payload['sharePermissions'] = share_permissions
+        else:
+            # Default to private
+            payload['sharePermissions'] = []
+        
+        log.debug(f'Copy dashboard payload: {payload}')
+        
+        response = requests.post(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}/copy',
+            auth=(email, api_token),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            json=payload
+        )
+        
+        if response.status_code not in [200, 201]:
+            log.error(f'Dashboard copy failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'Failed to copy dashboard: {response.status_code} - {response.text}')
+        
+        dashboard = response.json()
+        log.info(f'Copied dashboard {dashboard_id} to new dashboard: {dashboard.get("id")} - {dashboard.get("name")}')
+        
+        # Print success message
+        output('')
+        output('=' * 80)
+        output('Dashboard Copied Successfully')
+        output('=' * 80)
+        output(f'Source ID:   {dashboard_id}')
+        output(f'New ID:      {dashboard.get("id", "N/A")}')
+        output(f'Name:        {dashboard.get("name", "N/A")}')
+        output(f'Description: {dashboard.get("description", "N/A") or "N/A"}')
+        output(f'View URL:    {dashboard.get("view", "N/A")}')
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to copy dashboard: {e}')
+        raise JiraDashboardError(str(e))
+
+
+# ****************************************************************************************
+# Gadget Management Functions
+# ****************************************************************************************
+
+def list_gadgets(jira, dashboard_id):
+    '''
+    List gadgets on a dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The dashboard ID.
+
+    Output:
+        None; prints gadget list to stdout.
+
+    Raises:
+        JiraDashboardError: If the API request fails.
+    '''
+    log.debug(f'Entering list_gadgets(dashboard_id={dashboard_id})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # First get dashboard info for display
+        dash_response = requests.get(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if dash_response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} not found')
+        
+        dashboard_name = 'Unknown'
+        if dash_response.status_code == 200:
+            dashboard_name = dash_response.json().get('name', 'Unknown')
+        
+        # Get gadgets
+        response = requests.get(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}/gadget',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} not found')
+        
+        if response.status_code != 200:
+            log.error(f'Gadget API request failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'API error: {response.status_code} - {response.text}')
+        
+        data = response.json()
+        gadgets = data.get('gadgets', [])
+        log.debug(f'Retrieved {len(gadgets)} gadgets')
+        
+        # Print results
+        output('')
+        output('=' * 120)
+        output(f'Gadgets on Dashboard: {dashboard_name} (ID: {dashboard_id})')
+        output('=' * 120)
+        
+        print_gadget_table_header()
+        
+        for gadget in gadgets:
+            print_gadget_row(gadget)
+        
+        print_gadget_table_footer(len(gadgets))
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to list gadgets: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def add_gadget(jira, dashboard_id, module_key, position=None, color=None, properties=None):
+    '''
+    Add a gadget to a dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The dashboard ID.
+        module_key: The gadget module key (e.g., 'com.atlassian.jira.gadgets:filter-results-gadget').
+        position: Optional position as 'row,column' string.
+        color: Optional gadget color (blue, red, yellow, green, cyan, purple, gray, white).
+        properties: Optional gadget properties as dict or JSON string.
+
+    Output:
+        None; prints added gadget details to stdout.
+
+    Raises:
+        JiraDashboardError: If the gadget addition fails.
+    '''
+    log.debug(f'Entering add_gadget(dashboard_id={dashboard_id}, module_key={module_key}, position={position}, color={color})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # Build request payload
+        payload = {'moduleKey': module_key}
+        
+        # Parse position if provided
+        if position:
+            try:
+                parts = position.split(',')
+                if len(parts) != 2:
+                    raise ValueError('Position must be in format row,column')
+                row = int(parts[0].strip())
+                col = int(parts[1].strip())
+                payload['position'] = {'row': row, 'column': col}
+            except ValueError as e:
+                raise JiraDashboardError(f'Invalid position format: {e}')
+        
+        # Validate and set color
+        valid_colors = ['blue', 'red', 'yellow', 'green', 'cyan', 'purple', 'gray', 'white']
+        if color:
+            color_lower = color.lower()
+            if color_lower not in valid_colors:
+                raise JiraDashboardError(f'Invalid color "{color}". Valid colors: {", ".join(valid_colors)}')
+            payload['color'] = color_lower
+        
+        # Parse properties if provided
+        if properties:
+            if isinstance(properties, str):
+                try:
+                    payload['properties'] = json.loads(properties)
+                except json.JSONDecodeError as e:
+                    raise JiraDashboardError(f'Invalid JSON for gadget-properties: {e}')
+            else:
+                payload['properties'] = properties
+        
+        log.debug(f'Add gadget payload: {payload}')
+        
+        response = requests.post(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}/gadget',
+            auth=(email, api_token),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            json=payload
+        )
+        
+        if response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} not found')
+        
+        if response.status_code not in [200, 201]:
+            log.error(f'Add gadget failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'Failed to add gadget: {response.status_code} - {response.text}')
+        
+        gadget = response.json()
+        log.info(f'Added gadget {gadget.get("id")} to dashboard {dashboard_id}')
+        
+        # Print success message
+        output('')
+        output('=' * 80)
+        output('Gadget Added Successfully')
+        output('=' * 80)
+        output(f'Dashboard ID: {dashboard_id}')
+        output(f'Gadget ID:    {gadget.get("id", "N/A")}')
+        output(f'Module Key:   {gadget.get("moduleKey", "N/A")}')
+        output(f'Title:        {gadget.get("title", "N/A")}')
+        
+        pos = gadget.get('position', {})
+        output(f'Position:     {pos.get("row", 0)},{pos.get("column", 0)}')
+        output(f'Color:        {gadget.get("color", "N/A")}')
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to add gadget: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def remove_gadget(jira, dashboard_id, gadget_id):
+    '''
+    Remove a gadget from a dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The dashboard ID.
+        gadget_id: The gadget ID to remove.
+
+    Output:
+        None; prints removal confirmation to stdout.
+
+    Raises:
+        JiraDashboardError: If the gadget removal fails.
+    '''
+    log.debug(f'Entering remove_gadget(dashboard_id={dashboard_id}, gadget_id={gadget_id})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        response = requests.delete(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}/gadget/{gadget_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} or gadget {gadget_id} not found')
+        
+        if response.status_code not in [200, 204]:
+            log.error(f'Remove gadget failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'Failed to remove gadget: {response.status_code} - {response.text}')
+        
+        log.info(f'Removed gadget {gadget_id} from dashboard {dashboard_id}')
+        
+        # Print success message
+        output('')
+        output('=' * 80)
+        output('Gadget Removed Successfully')
+        output('=' * 80)
+        output(f'Dashboard ID: {dashboard_id}')
+        output(f'Gadget ID:    {gadget_id}')
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to remove gadget: {e}')
+        raise JiraDashboardError(str(e))
+
+
+def update_gadget(jira, dashboard_id, gadget_id, position=None, color=None):
+    '''
+    Update a gadget on a dashboard.
+
+    Input:
+        jira: JIRA object with active connection.
+        dashboard_id: The dashboard ID.
+        gadget_id: The gadget ID to update.
+        position: New position as 'row,column' string, or None to keep existing.
+        color: New color, or None to keep existing.
+
+    Output:
+        None; prints updated gadget details to stdout.
+
+    Raises:
+        JiraDashboardError: If the gadget update fails.
+    '''
+    log.debug(f'Entering update_gadget(dashboard_id={dashboard_id}, gadget_id={gadget_id}, position={position}, color={color})')
+    
+    try:
+        email, api_token = get_jira_credentials()
+        
+        # Build request payload
+        payload = {}
+        
+        # Parse position if provided
+        if position:
+            try:
+                parts = position.split(',')
+                if len(parts) != 2:
+                    raise ValueError('Position must be in format row,column')
+                row = int(parts[0].strip())
+                col = int(parts[1].strip())
+                payload['position'] = {'row': row, 'column': col}
+            except ValueError as e:
+                raise JiraDashboardError(f'Invalid position format: {e}')
+        
+        # Validate and set color
+        valid_colors = ['blue', 'red', 'yellow', 'green', 'cyan', 'purple', 'gray', 'white']
+        if color:
+            color_lower = color.lower()
+            if color_lower not in valid_colors:
+                raise JiraDashboardError(f'Invalid color "{color}". Valid colors: {", ".join(valid_colors)}')
+            payload['color'] = color_lower
+        
+        if not payload:
+            raise JiraDashboardError('No updates specified. Use --position or --color.')
+        
+        log.debug(f'Update gadget payload: {payload}')
+        
+        response = requests.put(
+            f'{JIRA_URL}/rest/api/3/dashboard/{dashboard_id}/gadget/{gadget_id}',
+            auth=(email, api_token),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+            json=payload
+        )
+        
+        if response.status_code == 404:
+            raise JiraDashboardError(f'Dashboard {dashboard_id} or gadget {gadget_id} not found')
+        
+        if response.status_code not in [200, 204]:
+            log.error(f'Update gadget failed: {response.status_code} - {response.text}')
+            raise JiraDashboardError(f'Failed to update gadget: {response.status_code} - {response.text}')
+        
+        log.info(f'Updated gadget {gadget_id} on dashboard {dashboard_id}')
+        
+        # Print success message
+        output('')
+        output('=' * 80)
+        output('Gadget Updated Successfully')
+        output('=' * 80)
+        output(f'Dashboard ID: {dashboard_id}')
+        output(f'Gadget ID:    {gadget_id}')
+        if position:
+            output(f'Position:     {position}')
+        if color:
+            output(f'Color:        {color}')
+        output('=' * 80)
+        output('')
+        
+    except JiraDashboardError:
+        raise
+    except Exception as e:
+        log.error(f'Failed to update gadget: {e}')
+        raise JiraDashboardError(str(e))
+
+
+# ****************************************************************************************
 # Handle the arguments
 # ****************************************************************************************
 def handle_args():
@@ -2716,6 +3633,112 @@ Date Filters:
         action='store_true',
         dest='show_jql',
         help='Print the equivalent JQL statement for the operation.')
+    
+    # Dashboard management arguments
+    parser.add_argument(
+        '--dashboards',
+        action='store_true',
+        help='List accessible dashboards.')
+    parser.add_argument(
+        '--dashboard',
+        type=str,
+        metavar='ID',
+        help='Get dashboard details by ID.')
+    parser.add_argument(
+        '--owner',
+        type=str,
+        metavar='USER',
+        help='Filter dashboards by owner (use "me" for current user).')
+    parser.add_argument(
+        '--shared',
+        action='store_true',
+        help='Show only dashboards shared with current user.')
+    parser.add_argument(
+        '--create-dashboard',
+        type=str,
+        metavar='NAME',
+        dest='create_dashboard',
+        help='Create a new dashboard with the specified name.')
+    parser.add_argument(
+        '--update-dashboard',
+        type=str,
+        metavar='ID',
+        dest='update_dashboard',
+        help='Update dashboard by ID.')
+    parser.add_argument(
+        '--delete-dashboard',
+        type=str,
+        metavar='ID',
+        dest='delete_dashboard',
+        help='Delete dashboard by ID.')
+    parser.add_argument(
+        '--copy-dashboard',
+        type=str,
+        metavar='ID',
+        dest='copy_dashboard',
+        help='Copy/clone dashboard by ID.')
+    parser.add_argument(
+        '--description',
+        type=str,
+        metavar='TEXT',
+        help='Dashboard description (for create/update/copy).')
+    parser.add_argument(
+        '--name',
+        type=str,
+        metavar='NAME',
+        help='New name for dashboard (for update/copy).')
+    parser.add_argument(
+        '--share-permissions',
+        type=str,
+        metavar='JSON',
+        dest='share_permissions',
+        help='Share permissions as JSON array (e.g., \'[{"type":"global"}]\').')
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='Skip confirmation prompts (for delete operations).')
+    
+    # Gadget management arguments
+    parser.add_argument(
+        '--gadgets',
+        type=str,
+        metavar='DASHBOARD_ID',
+        help='List gadgets on the specified dashboard.')
+    parser.add_argument(
+        '--add-gadget',
+        type=str,
+        metavar='MODULE_KEY',
+        dest='add_gadget',
+        help='Add gadget to dashboard (requires --dashboard).')
+    parser.add_argument(
+        '--remove-gadget',
+        type=str,
+        metavar='GADGET_ID',
+        dest='remove_gadget',
+        help='Remove gadget from dashboard (requires --dashboard).')
+    parser.add_argument(
+        '--update-gadget',
+        type=str,
+        metavar='GADGET_ID',
+        dest='update_gadget',
+        help='Update gadget on dashboard (requires --dashboard).')
+    parser.add_argument(
+        '--position',
+        type=str,
+        metavar='ROW,COL',
+        help='Gadget position as row,column (e.g., "0,1").')
+    parser.add_argument(
+        '--color',
+        type=str,
+        metavar='COLOR',
+        help='Gadget color (blue, red, yellow, green, cyan, purple, gray, white).')
+    parser.add_argument(
+        '--gadget-properties',
+        type=str,
+        metavar='JSON',
+        dest='gadget_properties',
+        help='Gadget properties as JSON object.')
+    
     args = parser.parse_args()
 
     # Configure stdout logging based on arguments
@@ -2798,8 +3821,49 @@ Date Filters:
     if args.execute:
         args.dry_run = False
     
+    # Validate dashboard arguments
+    dashboard_actions = [args.dashboards, args.dashboard, args.create_dashboard,
+                        args.update_dashboard, args.delete_dashboard, args.copy_dashboard,
+                        args.gadgets, args.add_gadget, args.remove_gadget, args.update_gadget]
+    
+    # --owner and --shared only valid with --dashboards
+    if (args.owner or args.shared) and not args.dashboards:
+        parser.error('--owner and --shared require --dashboards')
+    
+    # --description only valid with dashboard create/update/copy
+    if args.description and not (args.create_dashboard or args.update_dashboard or args.copy_dashboard):
+        parser.error('--description requires --create-dashboard, --update-dashboard, or --copy-dashboard')
+    
+    # --name only valid with dashboard update/copy
+    if args.name and not (args.update_dashboard or args.copy_dashboard):
+        parser.error('--name requires --update-dashboard or --copy-dashboard')
+    
+    # --share-permissions only valid with dashboard create/update/copy
+    if args.share_permissions and not (args.create_dashboard or args.update_dashboard or args.copy_dashboard):
+        parser.error('--share-permissions requires --create-dashboard, --update-dashboard, or --copy-dashboard')
+    
+    # --force only valid with --delete-dashboard
+    if args.force and not args.delete_dashboard:
+        parser.error('--force requires --delete-dashboard')
+    
+    # --copy-dashboard requires --name
+    if args.copy_dashboard and not args.name:
+        parser.error('--copy-dashboard requires --name to specify the new dashboard name')
+    
+    # Gadget operations require --dashboard
+    if (args.add_gadget or args.remove_gadget or args.update_gadget) and not args.dashboard:
+        parser.error('--add-gadget, --remove-gadget, and --update-gadget require --dashboard')
+    
+    # --position and --color only valid with gadget add/update
+    if (args.position or args.color) and not (args.add_gadget or args.update_gadget):
+        parser.error('--position and --color require --add-gadget or --update-gadget')
+    
+    # --gadget-properties only valid with --add-gadget
+    if args.gadget_properties and not args.add_gadget:
+        parser.error('--gadget-properties requires --add-gadget')
+    
     # Validate that at least one action is specified
-    if not args.list_projects and not any(project_actions) and not jql_specified and not args.bulk_update:
+    if not args.list_projects and not any(project_actions) and not jql_specified and not args.bulk_update and not any(dashboard_actions):
         parser.print_help()
         sys.exit(1)
     
@@ -2894,6 +3958,37 @@ def main():
         if args.bulk_update:
             bulk_update_tickets(jira, args.input_file, args.set_release, args.remove_release,
                                args.transition, args.assign, args.dry_run, args.max_updates)
+        
+        # Dashboard management operations
+        if args.dashboards:
+            list_dashboards(jira, args.owner, args.shared)
+        
+        if args.dashboard:
+            # Check if gadget operations are requested with --dashboard
+            if args.add_gadget:
+                add_gadget(jira, args.dashboard, args.add_gadget, args.position, args.color, args.gadget_properties)
+            elif args.remove_gadget:
+                remove_gadget(jira, args.dashboard, args.remove_gadget)
+            elif args.update_gadget:
+                update_gadget(jira, args.dashboard, args.update_gadget, args.position, args.color)
+            else:
+                # No gadget operation, just get dashboard details
+                get_dashboard(jira, args.dashboard)
+        
+        if args.create_dashboard:
+            create_dashboard(jira, args.create_dashboard, args.description, args.share_permissions)
+        
+        if args.update_dashboard:
+            update_dashboard(jira, args.update_dashboard, args.name, args.description, args.share_permissions)
+        
+        if args.delete_dashboard:
+            delete_dashboard(jira, args.delete_dashboard, args.force)
+        
+        if args.copy_dashboard:
+            copy_dashboard(jira, args.copy_dashboard, args.name, args.description, args.share_permissions)
+        
+        if args.gadgets:
+            list_gadgets(jira, args.gadgets)
             
     except JiraCredentialsError as e:
         log.error(e.message)
@@ -2912,6 +4007,12 @@ def main():
         output('')
         sys.exit(1)
     except JiraProjectError as e:
+        log.error(e.message)
+        output('')
+        output('ERROR: ' + e.message)
+        output('')
+        sys.exit(1)
+    except JiraDashboardError as e:
         log.error(e.message)
         output('')
         output('ERROR: ' + e.message)

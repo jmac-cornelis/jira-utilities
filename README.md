@@ -12,6 +12,7 @@ A command-line tool for interacting with Cornelis Networks' Jira instance. This 
 - [Examples](#examples)
 - [Output Formats](#output-formats)
 - [Date Filters](#date-filters)
+- [Dashboard Management](#dashboard-management)
 
 ## Requirements
 
@@ -420,6 +421,196 @@ The script handles common errors gracefully:
 - **Invalid issue type/status** - Shows valid options
 - **Rate limiting** - Automatic retry with backoff
 - **Network errors** - Clear error messages
+
+## Dashboard Management
+
+Dashboard management features allow you to create, update, delete, and copy Jira dashboards, as well as manage gadgets on those dashboards.
+
+### Dashboard Options
+
+| Option | Description |
+|--------|-------------|
+| `--dashboards` | List all accessible dashboards |
+| `--dashboard ID` | Get dashboard details by ID |
+| `--owner USER` | Filter dashboards by owner (use "me" for current user) |
+| `--shared` | Show only dashboards shared with current user |
+| `--create-dashboard NAME` | Create a new dashboard with the specified name |
+| `--update-dashboard ID` | Update an existing dashboard by ID |
+| `--delete-dashboard ID` | Delete a dashboard by ID |
+| `--copy-dashboard ID` | Copy/clone an existing dashboard |
+| `--description TEXT` | Dashboard description (for create/update) |
+| `--name NAME` | New name for update or copy operations |
+| `--share-permissions JSON` | Share permissions as JSON array |
+| `--force` | Skip confirmation prompt for delete operations |
+
+### Gadget Management Options
+
+| Option | Description |
+|--------|-------------|
+| `--gadgets DASHBOARD_ID` | List all gadgets on a dashboard |
+| `--add-gadget MODULE_KEY` | Add a gadget to a dashboard (requires `--dashboard`) |
+| `--remove-gadget GADGET_ID` | Remove a gadget from a dashboard (requires `--dashboard`) |
+| `--update-gadget GADGET_ID` | Update a gadget on a dashboard (requires `--dashboard`) |
+| `--position ROW,COL` | Gadget position (row and column) |
+| `--color COLOR` | Gadget chrome color |
+| `--gadget-properties JSON` | Gadget properties as JSON object |
+
+#### Available Gadget Colors
+
+- `blue`
+- `red`
+- `yellow`
+- `green`
+- `cyan`
+- `purple`
+- `gray`
+- `white`
+
+### Dashboard Examples
+
+#### Listing Dashboards
+
+```bash
+# List all accessible dashboards
+python jira_utils.py --dashboards
+
+# Get details for a specific dashboard
+python jira_utils.py --dashboard 10001
+
+# List dashboards owned by current user
+python jira_utils.py --dashboards --owner me
+
+# List dashboards owned by a specific user
+python jira_utils.py --dashboards --owner "user@cornelisnetworks.com"
+
+# List dashboards shared with current user
+python jira_utils.py --dashboards --shared
+```
+
+#### Creating Dashboards
+
+```bash
+# Create a simple dashboard
+python jira_utils.py --create-dashboard "My Dashboard"
+
+# Create a dashboard with description
+python jira_utils.py --create-dashboard "Sprint Dashboard" --description "Dashboard for tracking sprint progress"
+
+# Create a dashboard with share permissions
+python jira_utils.py --create-dashboard "Team Dashboard" --share-permissions '[{"type": "project", "projectId": "10000"}]'
+```
+
+#### Updating Dashboards
+
+```bash
+# Update dashboard name
+python jira_utils.py --update-dashboard 10001 --name "New Dashboard Name"
+
+# Update dashboard description
+python jira_utils.py --update-dashboard 10001 --description "Updated description"
+
+# Update both name and description
+python jira_utils.py --update-dashboard 10001 --name "Renamed Dashboard" --description "New description"
+```
+
+#### Deleting Dashboards
+
+```bash
+# Delete a dashboard (with confirmation prompt)
+python jira_utils.py --delete-dashboard 10001
+
+# Delete a dashboard without confirmation
+python jira_utils.py --delete-dashboard 10001 --force
+```
+
+#### Copying Dashboards
+
+```bash
+# Copy a dashboard with a new name
+python jira_utils.py --copy-dashboard 10001 --name "Copy of Dashboard"
+
+# Copy a dashboard with new name and description
+python jira_utils.py --copy-dashboard 10001 --name "My Copy" --description "Copied dashboard for personal use"
+```
+
+### Gadget Examples
+
+> **Note:** Gadget management is primarily supported on Jira Cloud. Some features may not be available on Jira Server/Data Center.
+
+#### Listing Gadgets
+
+```bash
+# List all gadgets on a dashboard
+python jira_utils.py --gadgets 10001
+```
+
+#### Adding Gadgets
+
+```bash
+# Add a filter results gadget
+python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:filter-results-gadget"
+
+# Add a gadget at a specific position
+python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:pie-chart-gadget" --position 0,1
+
+# Add a gadget with a specific color
+python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:assigned-to-me-gadget" --color blue
+
+# Add a gadget with properties
+python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:filter-results-gadget" --gadget-properties '{"filterId": "10000", "num": "10"}'
+```
+
+#### Updating Gadgets
+
+```bash
+# Update gadget position
+python jira_utils.py --dashboard 10001 --update-gadget 10050 --position 1,0
+
+# Update gadget color
+python jira_utils.py --dashboard 10001 --update-gadget 10050 --color green
+
+# Update gadget properties
+python jira_utils.py --dashboard 10001 --update-gadget 10050 --gadget-properties '{"num": "20"}'
+```
+
+#### Removing Gadgets
+
+```bash
+# Remove a gadget from a dashboard
+python jira_utils.py --dashboard 10001 --remove-gadget 10050
+```
+
+### Common Gadget Module Keys
+
+| Module Key | Description |
+|------------|-------------|
+| `com.atlassian.jira.gadgets:filter-results-gadget` | Displays issues from a saved filter |
+| `com.atlassian.jira.gadgets:pie-chart-gadget` | Pie chart visualization of issues |
+| `com.atlassian.jira.gadgets:created-vs-resolved-gadget` | Chart comparing created vs resolved issues |
+| `com.atlassian.jira.gadgets:assigned-to-me-gadget` | Shows issues assigned to current user |
+| `com.atlassian.jira.gadgets:activity-stream-gadget` | Activity stream showing recent updates |
+
+### Share Permissions Format
+
+Share permissions are specified as a JSON array. Common permission types:
+
+```json
+[
+  {"type": "user", "user": {"accountId": "user-account-id"}},
+  {"type": "project", "projectId": "10000"},
+  {"type": "group", "group": {"name": "jira-users"}},
+  {"type": "loggedin"},
+  {"type": "global"}
+]
+```
+
+| Type | Description |
+|------|-------------|
+| `user` | Share with a specific user |
+| `project` | Share with all users in a project |
+| `group` | Share with a Jira group |
+| `loggedin` | Share with all logged-in users |
+| `global` | Share with everyone (public) |
 
 ## Author
 
