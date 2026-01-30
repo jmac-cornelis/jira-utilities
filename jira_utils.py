@@ -28,6 +28,11 @@ from datetime import date, datetime, timedelta
 import re
 import requests
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if present
+load_dotenv()
+
 try:
     from jira import JIRA
 except ImportError:

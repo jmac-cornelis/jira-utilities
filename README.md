@@ -23,6 +23,7 @@ A command-line tool for interacting with Cornelis Networks' Jira instance. This 
 ### Python Dependencies
 
 - `jira` - Jira API client library
+- `python-dotenv` - Load environment variables from .env file
 - `requests` - HTTP library for API calls
 
 ## Installation
@@ -37,25 +38,45 @@ A command-line tool for interacting with Cornelis Networks' Jira instance. This 
 
 3. Install dependencies:
    ```bash
-   pip install jira requests
+   pip install -r requirements.txt
+   ```
+
+   Or install manually:
+   ```bash
+   pip install jira python-dotenv requests
    ```
 
 ## Authentication
 
-This script uses Jira API tokens for authentication. You must set up environment variables before running:
+This script uses Jira API tokens for authentication. You need to configure your credentials before running.
 
-1. Generate an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+### Option 1: Using a .env File (Recommended)
 
-2. Set environment variables:
+The script automatically loads credentials from a `.env` file in the project directory.
+
+1. Copy the example file:
    ```bash
-   export JIRA_EMAIL="your.email@cornelisnetworks.com"
-   export JIRA_API_TOKEN="your_api_token_here"
+   cp .env.example .env
    ```
 
-   Alternatively, create a `.env` file with these exports and source it:
+2. Edit `.env` and fill in your credentials:
    ```bash
-   source .env
+   JIRA_EMAIL=your.email@cornelisnetworks.com
+   JIRA_API_TOKEN=your_api_token_here
    ```
+
+3. Generate an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+
+> **Note:** The `.env` file is gitignored for security - your credentials will not be committed to version control.
+
+### Option 2: Using Environment Variables
+
+Alternatively, you can set environment variables directly:
+
+```bash
+export JIRA_EMAIL="your.email@cornelisnetworks.com"
+export JIRA_API_TOKEN="your_api_token_here"
+```
 
 > **IMPORTANT:** Never commit credentials to version control.
 
@@ -68,8 +89,10 @@ python jira_utils.py [OPTIONS]
 
 With virtual environment:
 ```bash
-source venv/bin/activate && source .env && python jira_utils.py [OPTIONS]
+source venv/bin/activate && python jira_utils.py [OPTIONS]
 ```
+
+> **Note:** The script automatically loads credentials from `.env` - no need to source it manually.
 
 ## Command Reference
 
@@ -411,6 +434,14 @@ Use `-v` (verbose) for debug-level output to stdout, or `-q` (quiet) for minimal
 | `jira_utils.log` | Detailed execution log (overwritten each run) |
 | `jql.txt` | Last JQL query when using `--show-jql` |
 | `*.csv` / `*.json` | Ticket dumps when using `--dump-file` |
+
+## Configuration Files
+
+| File | Description |
+|------|-------------|
+| `.env` | Your local credentials (gitignored, never committed) |
+| `.env.example` | Template showing required environment variables |
+| `requirements.txt` | Python package dependencies |
 
 ## Error Handling
 
