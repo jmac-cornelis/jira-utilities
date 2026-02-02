@@ -3528,26 +3528,28 @@ Credentials Setup:
 
 Examples:
   %(prog)s --list                              List all Jira projects
-  %(prog)s --project PROJ --workflow           Show workflow statuses for PROJ
-  %(prog)s --project PROJ --issue-types        Show issue types for PROJ
-  %(prog)s --project PROJ --fields             Show create/edit/transition fields for all types
-  %(prog)s --project PROJ --fields Bug Task    Show fields for Bug and Task only
-  %(prog)s --project PROJ --versions           Show versions/releases for PROJ
+  %(prog)s --project PROJ --get-workflow       Show workflow statuses for PROJ
+  %(prog)s --project PROJ --get-issue-types    Show issue types for PROJ
+  %(prog)s --project PROJ --get-fields         Show create/edit/transition fields for all types
+  %(prog)s --project PROJ --get-fields --issue-types Bug Task
+                                               Show fields for Bug and Task only
+  %(prog)s --project PROJ --get-versions       Show versions/releases for PROJ
   %(prog)s --project PROJ --total              Show total ticket count for PROJ
-  %(prog)s --project PROJ --total Bug Task     Show count for specific issue types
+  %(prog)s --project PROJ --total --issue-types Bug Task
+                                               Show count for specific issue types
   %(prog)s --project PROJ --total --status Open
                                                Show count for Open tickets
-  %(prog)s --project PROJ --total Bug --status Open "In Progress"
+  %(prog)s --project PROJ --total --issue-types Bug --status Open "In Progress"
                                                Show count for Open/In Progress Bugs
   %(prog)s --project PROJ --total --date week  Show count for tickets created this week
   %(prog)s --project PROJ --get-tickets        Get all tickets for PROJ
-  %(prog)s --project PROJ --get-tickets Bug --status Open --limit 50
+  %(prog)s --project PROJ --get-tickets --issue-types Bug --status Open --limit 50
                                                Get up to 50 Open Bugs
   %(prog)s --project PROJ --get-tickets --status Closed --date month
                                                Get Closed tickets from this month
   %(prog)s --project PROJ --get-tickets --date 01-01-2024:12-31-2024
                                                Get tickets created in date range
-  %(prog)s --project PROJ --workflow --issue-types --fields --versions
+  %(prog)s --project PROJ --get-workflow --get-issue-types --get-fields --get-versions
                                                Show all info for PROJ
   %(prog)s --jql "project = PROJ AND status = Open"
                                                Run a custom JQL query
@@ -3555,7 +3557,7 @@ Examples:
                                                Run JQL with limit
   %(prog)s --project PROJ --get-tickets --dump-file tickets
                                                Dump all tickets to tickets.csv
-  %(prog)s --project PROJ --get-tickets Bug --status Open --dump-file bugs --dump-format json
+  %(prog)s --project PROJ --get-tickets --issue-types Bug --status Open --dump-file bugs --dump-format json
                                                Dump Open Bugs to bugs.json
   %(prog)s --jql "project = PROJ" --dump-file results --dump-format csv
                                                Dump JQL results to results.csv
@@ -3567,10 +3569,12 @@ Examples:
                                                Get Open tickets for 12.x releases, dump to file
   %(prog)s --project PROJ --release-tickets "v1.0"
                                                Get all tickets for release v1.0
+  %(prog)s --project PROJ --release-tickets "12.1*" --issue-types Bug Story Task
+                                               Get Bugs, Stories, Tasks for releases matching 12.1*
   %(prog)s --project PROJ --release-tickets "v1.0" --status Open --limit 50
                                                Get Open tickets for release v1.0
   %(prog)s --project PROJ --no-release         Get tickets with no release assigned
-  %(prog)s --project PROJ --no-release Bug --status Open
+  %(prog)s --project PROJ --no-release --issue-types Bug --status Open
                                                Get Open Bugs with no release
 
 Bulk Update Examples:
@@ -3618,26 +3622,30 @@ Date Filters:
         metavar='KEY',
         help='Project key to operate on (e.g., PROJ).')
     parser.add_argument(
-        '--workflow',
+        '--get-workflow',
         action='store_true',
-        help='Dump the status workflow for the specified project.')
+        dest='get_workflow',
+        help='Display workflow statuses for the specified project.')
     parser.add_argument(
-        '--issue-types',
+        '--get-issue-types',
         action='store_true',
-        dest='issue_types',
-        help='Dump the issue types for the specified project.')
+        dest='get_issue_types',
+        help='Display issue types for the specified project.')
     parser.add_argument(
-        '--fields',
+        '--get-fields',
         nargs='*',
         metavar='TYPE',
-        help='Dump create/edit/transition fields for specified ticket types (or all if none specified).')
+        dest='get_fields',
+        help='Display create/edit/transition fields. Optionally filter by issue types.')
     parser.add_argument(
-        '--versions',
+        '--get-versions',
         action='store_true',
-        help='Dump the versions (releases) for the specified project.')
+        dest='get_versions',
+        help='Display versions (releases) with detailed info for the specified project.')
     parser.add_argument(
-        '--components',
+        '--get-components',
         action='store_true',
+        dest='get_components',
         help='List all components for the specified project.')
     parser.add_argument(
         '--releases',
@@ -3651,24 +3659,27 @@ Date Filters:
         type=str,
         metavar='RELEASE',
         dest='release_tickets',
-        help='Get tickets associated with a specific release (case-insensitive). Supports glob patterns (e.g., "12.1*" to match all 12.1.x releases).')
+        help='Get tickets for a release. Supports glob patterns (e.g., "12.1*"). Use --issue-types to filter by issue types.')
+    parser.add_argument(
+        '--issue-types',
+        nargs='+',
+        metavar='TYPE',
+        dest='issue_types',
+        help='Filter by issue types (e.g., Bug Story Task Sub-task). Used with --release-tickets, --no-release, --total, --get-tickets.')
     parser.add_argument(
         '--no-release',
-        nargs='*',
-        metavar='TYPE',
+        action='store_true',
         dest='no_release',
-        help='Get tickets with no release assigned. Optionally filter by issue types.')
+        help='Get tickets with no release assigned. Use --issue-types to filter by issue types.')
     parser.add_argument(
         '--total',
-        nargs='*',
-        metavar='TYPE',
-        help='Show ticket count. Optionally filter by specific issue types.')
+        action='store_true',
+        help='Show ticket count. Use --issue-types to filter by specific issue types.')
     parser.add_argument(
         '--get-tickets',
-        nargs='*',
-        metavar='TYPE',
+        action='store_true',
         dest='get_tickets',
-        help='Get tickets. Optionally filter by specific issue types.')
+        help='Get tickets. Use --issue-types to filter by specific issue types.')
     parser.add_argument(
         '--status',
         nargs='+',
@@ -3891,35 +3902,36 @@ Date Filters:
         log.debug('No output level specified. Defaulting to INFO.')
     
     # Validate argument combinations
-    # args.fields is None if not specified, [] if specified with no args, or a list if specified with args
-    fields_specified = args.fields is not None
-    total_specified = args.total is not None
-    get_tickets_specified = args.get_tickets is not None
-    jql_specified = args.jql is not None
+    # args.get_fields is None if not specified, [] if specified with no args, or a list if specified with args
+    get_fields_specified = args.get_fields is not None
     release_tickets_specified = args.release_tickets is not None
-    no_release_specified = args.no_release is not None
+    jql_specified = args.jql is not None
     
-    project_actions = [args.workflow, args.issue_types, fields_specified, args.versions, args.components, args.releases,
-                       total_specified, get_tickets_specified, release_tickets_specified, no_release_specified]
+    project_actions = [args.get_workflow, args.get_issue_types, get_fields_specified, args.get_versions, args.get_components, args.releases,
+                       args.total, args.get_tickets, release_tickets_specified, args.no_release]
     if any(project_actions) and not args.project:
-        parser.error('--project is required when using --workflow, --issue-types, --fields, --versions, --components, --releases, --total, --get-tickets, --release-tickets, or --no-release')
+        parser.error('--project is required when using --get-workflow, --get-issue-types, --get-fields, --get-versions, --get-components, --releases, --total, --get-tickets, --release-tickets, or --no-release')
+    
+    # Validate --issue-types is only used with appropriate commands
+    if args.issue_types and not (args.total or args.get_tickets or release_tickets_specified or args.no_release or get_fields_specified):
+        parser.error('--issue-types requires --total, --get-tickets, --release-tickets, --no-release, or --get-fields')
     
     # Validate --status is only used with appropriate commands
-    if args.status and not (total_specified or get_tickets_specified or release_tickets_specified or no_release_specified):
+    if args.status and not (args.total or args.get_tickets or release_tickets_specified or args.no_release):
         parser.error('--status requires --total, --get-tickets, --release-tickets, or --no-release')
     
     # Validate --date and --limit usage
-    if args.date and not (total_specified or get_tickets_specified or release_tickets_specified or no_release_specified or args.components):
-        parser.error('--date requires --total, --get-tickets, --release-tickets, --no-release, or --components')
-    if args.limit and not (get_tickets_specified or jql_specified or release_tickets_specified or no_release_specified):
+    if args.date and not (args.total or args.get_tickets or release_tickets_specified or args.no_release or args.get_components):
+        parser.error('--date requires --total, --get-tickets, --release-tickets, --no-release, or --get-components')
+    if args.limit and not (args.get_tickets or jql_specified or release_tickets_specified or args.no_release):
         parser.error('--limit requires --get-tickets, --jql, --release-tickets, or --no-release')
     
     # Validate --dump-file and --dump-format usage
     # Allow dump-file with any command that produces tabular/list data
-    dump_compatible = (get_tickets_specified or jql_specified or release_tickets_specified or 
-                       no_release_specified or args.releases or args.versions or args.components)
+    dump_compatible = (args.get_tickets or jql_specified or release_tickets_specified or
+                       args.no_release or args.releases or args.get_versions or args.get_components)
     if (args.dump_file or args.dump_format != 'csv') and not dump_compatible:
-        parser.error('--dump-file and --dump-format require a command that produces data (e.g., --get-tickets, --jql, --releases, --versions, --components)')
+        parser.error('--dump-file and --dump-format require a command that produces data (e.g., --get-tickets, --jql, --releases, --get-versions, --get-components)')
     
     # Validate bulk update arguments
     if args.bulk_update:
@@ -3992,13 +4004,10 @@ Date Filters:
         parser.print_help()
         sys.exit(1)
     
-    # Store whether fields/total/get_tickets/jql was specified for easier checking
-    args.fields_specified = fields_specified
-    args.total_specified = total_specified
-    args.get_tickets_specified = get_tickets_specified
+    # Store whether get_fields/jql/release_tickets was specified for easier checking
+    args.get_fields_specified = get_fields_specified
     args.jql_specified = jql_specified
     args.release_tickets_specified = release_tickets_specified
-    args.no_release_specified = no_release_specified
 
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
     log.info(f'+  {os.path.basename(sys.argv[0])}')
@@ -4036,45 +4045,47 @@ def main():
         if args.list_projects:
             list_projects(jira)
         
-        if args.workflow:
+        if args.get_workflow:
             get_project_workflows(jira, args.project)
         
-        if args.issue_types:
+        if args.get_issue_types:
             get_project_issue_types(jira, args.project)
         
-        if args.fields_specified:
-            get_project_fields(jira, args.project, args.fields)
+        if args.get_fields_specified:
+            # Use --issue-types for filtering if provided, otherwise use args from --get-fields
+            issue_type_filter = args.issue_types if args.issue_types else args.get_fields
+            get_project_fields(jira, args.project, issue_type_filter)
         
-        if args.versions:
+        if args.get_versions:
             get_project_versions(jira, args.project)
         
-        if args.components:
+        if args.get_components:
             get_project_components(jira, args.project, args.date, args.dump_file, args.dump_format)
         
         if args.releases:
-            if args.get_tickets_specified:
+            if args.get_tickets:
                 # Get tickets for all releases matching the pattern
-                get_releases_tickets(jira, args.project, args.releases, args.get_tickets,
+                get_releases_tickets(jira, args.project, args.releases, args.issue_types,
                                     args.status, args.date, args.limit, args.dump_file, args.dump_format)
             else:
                 # Just list the releases
                 get_releases(jira, args.project, args.releases, args.dump_file, args.dump_format)
         
         if args.release_tickets_specified:
-            get_release_tickets(jira, args.project, args.release_tickets, args.total if args.total_specified else None,
+            get_release_tickets(jira, args.project, args.release_tickets, args.issue_types,
                                args.status, args.date, args.limit, args.dump_file, args.dump_format)
         
-        if args.no_release_specified:
-            get_no_release_tickets(jira, args.project, args.no_release, args.status, args.date, args.limit,
+        if args.no_release:
+            get_no_release_tickets(jira, args.project, args.issue_types, args.status, args.date, args.limit,
                                   args.dump_file, args.dump_format)
         
-        if args.total_specified:
-            get_ticket_totals(jira, args.project, args.total, args.status, args.date)
+        if args.total:
+            get_ticket_totals(jira, args.project, args.issue_types, args.status, args.date)
         
-        if args.get_tickets_specified and not args.releases:
+        if args.get_tickets and not args.releases:
             # Only run standalone get_tickets if --releases is not specified
             # (when --releases is specified with --get-tickets, it's handled above)
-            get_tickets(jira, args.project, args.get_tickets, args.status, args.date, args.limit, 
+            get_tickets(jira, args.project, args.issue_types, args.status, args.date, args.limit,
                        args.dump_file, args.dump_format)
         
         if args.jql_specified:

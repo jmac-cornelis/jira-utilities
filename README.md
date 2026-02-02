@@ -111,33 +111,34 @@ source venv/bin/activate && python jira_utils.py [OPTIONS]
 |--------|-------------|
 | `--list` | List all available Jira projects |
 | `--project KEY` | Specify project key to operate on (required for most commands) |
-| `--workflow` | Display workflow statuses for the specified project |
-| `--issue-types` | Display issue types for the specified project |
-| `--fields [TYPE ...]` | Display create/edit/transition fields. Optionally filter by issue types |
-| `--versions` | Display versions (releases) with detailed info |
-| `--components` | List all components for the project |
+| `--get-workflow` | Display workflow statuses for the specified project |
+| `--get-issue-types` | Display issue types for the specified project |
+| `--get-fields [TYPE ...]` | Display create/edit/transition fields. Optionally filter by issue types |
+| `--get-versions` | Display versions (releases) with detailed info |
+| `--get-components` | List all components for the project |
 
 ### Release Management
 
 | Option | Description |
 |--------|-------------|
 | `--releases [PATTERN]` | List releases for the project. Optional glob pattern (e.g., `"12.*"`) |
-| `--release-tickets RELEASE` | Get tickets associated with a specific release (case-insensitive) |
-| `--no-release [TYPE ...]` | Get tickets with no release assigned. Optionally filter by issue types |
+| `--release-tickets RELEASE` | Get tickets associated with a specific release (supports glob patterns like `"12.1*"`) |
+| `--no-release` | Get tickets with no release assigned |
 
 ### Ticket Queries
 
 | Option | Description |
 |--------|-------------|
-| `--total [TYPE ...]` | Show ticket count. Optionally filter by issue types |
-| `--get-tickets [TYPE ...]` | Get tickets. Optionally filter by issue types |
+| `--total` | Show ticket count |
+| `--get-tickets` | Get tickets |
 | `--jql QUERY` | Run a custom JQL query |
 
 ### Query Filters
 
 | Option | Description |
 |--------|-------------|
-| `--status STATUS [STATUS ...]` | Filter by status (case-insensitive). Multiple statuses allowed |
+| `--issue-types TYPE [TYPE ...]` | Filter by issue types (e.g., Bug Story Task Sub-task) |
+| `--status STATUS [STATUS ...]` | Filter by status (case-insensitive). Multiple statuses allowed. Use `^` prefix to exclude (e.g., `^Closed`) |
 | `--date FILTER` | Date filter (see [Date Filters](#date-filters)) |
 | `--limit N` | Limit the number of tickets retrieved |
 
@@ -172,37 +173,37 @@ python jira_utils.py --list
 ### Project Information
 ```bash
 # Show workflow statuses
-python jira_utils.py --project PROJ --workflow
+python jira_utils.py --project PROJ --get-workflow
 
 # Show issue types
-python jira_utils.py --project PROJ --issue-types
+python jira_utils.py --project PROJ --get-issue-types
 
 # Show all fields for all issue types
-python jira_utils.py --project PROJ --fields
+python jira_utils.py --project PROJ --get-fields
 
 # Show fields for specific issue types
-python jira_utils.py --project PROJ --fields Bug Task
+python jira_utils.py --project PROJ --get-fields --issue-types Bug Task
 
 # Show versions/releases
-python jira_utils.py --project PROJ --versions
+python jira_utils.py --project PROJ --get-versions
 
 # Show components
-python jira_utils.py --project PROJ --components
+python jira_utils.py --project PROJ --get-components
 
 # Show only components with tickets created in the last 2 weeks
-python jira_utils.py --project PROJ --components --date week
+python jira_utils.py --project PROJ --get-components --date week
 
 # Show components with activity this month
-python jira_utils.py --project PROJ --components --date month
+python jira_utils.py --project PROJ --get-components --date month
 
 # Dump components to file
-python jira_utils.py --project PROJ --components --dump-file components
+python jira_utils.py --project PROJ --get-components --dump-file components
 
 # Dump active components with ticket counts
-python jira_utils.py --project PROJ --components --date week --dump-file active_components
+python jira_utils.py --project PROJ --get-components --date week --dump-file active_components
 
 # Show all project info at once
-python jira_utils.py --project PROJ --workflow --issue-types --fields --versions --components
+python jira_utils.py --project PROJ --get-workflow --get-issue-types --get-fields --get-versions --get-components
 ```
 
 ### Release Queries
@@ -242,7 +243,7 @@ python jira_utils.py --project PROJ --releases "12.*" --get-tickets --status Ope
 python jira_utils.py --project PROJ --no-release
 
 # Get Open Bugs with no release
-python jira_utils.py --project PROJ --no-release Bug --status Open
+python jira_utils.py --project PROJ --no-release --issue-types Bug --status Open
 ```
 
 ### Ticket Counts
@@ -251,13 +252,13 @@ python jira_utils.py --project PROJ --no-release Bug --status Open
 python jira_utils.py --project PROJ --total
 
 # Count for specific issue types
-python jira_utils.py --project PROJ --total Bug Task
+python jira_utils.py --project PROJ --total --issue-types Bug Task
 
 # Count for Open tickets
 python jira_utils.py --project PROJ --total --status Open
 
 # Count for Open/In Progress Bugs
-python jira_utils.py --project PROJ --total Bug --status Open "In Progress"
+python jira_utils.py --project PROJ --total --issue-types Bug --status Open "In Progress"
 
 # Count for tickets created this week
 python jira_utils.py --project PROJ --total --date week
@@ -269,7 +270,7 @@ python jira_utils.py --project PROJ --total --date week
 python jira_utils.py --project PROJ --get-tickets
 
 # Get up to 50 Open Bugs
-python jira_utils.py --project PROJ --get-tickets Bug --status Open --limit 50
+python jira_utils.py --project PROJ --get-tickets --issue-types Bug --status Open --limit 50
 
 # Get Closed tickets from this month
 python jira_utils.py --project PROJ --get-tickets --status Closed --date month
@@ -281,7 +282,7 @@ python jira_utils.py --project PROJ --get-tickets --date 01-01-2024:12-31-2024
 python jira_utils.py --project PROJ --get-tickets --dump-file tickets
 
 # Dump Open Bugs to JSON
-python jira_utils.py --project PROJ --get-tickets Bug --status Open --dump-file bugs --dump-format json
+python jira_utils.py --project PROJ --get-tickets --issue-types Bug --status Open --dump-file bugs --dump-format json
 ```
 
 ### Custom JQL Queries
@@ -299,7 +300,7 @@ python jira_utils.py --jql "project = PROJ" --dump-file results --dump-format cs
 ### Show Equivalent JQL
 ```bash
 # Show the JQL that would be generated
-python jira_utils.py --project PROJ --get-tickets Bug --status Open --show-jql
+python jira_utils.py --project PROJ --get-tickets --issue-types Bug --status Open --show-jql
 
 # The JQL is displayed at the end and saved to jql.txt
 ```
