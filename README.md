@@ -13,6 +13,7 @@ A command-line tool for interacting with Cornelis Networks' Jira instance. This 
 - [Output Formats](#output-formats)
 - [Date Filters](#date-filters)
 - [Dashboard Management](#dashboard-management)
+- [Draw.io Diagram Generation](#drawio-diagram-generation)
 
 ## Requirements
 
@@ -110,12 +111,15 @@ source venv/bin/activate && python jira_utils.py [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--list` | List all available Jira projects |
-| `--project KEY` | Specify project key to operate on (required for most commands) |
+| `--project KEY` | Specify project key to operate on (required for most commands; optional for `--get-children` and `--get-related` when a ticket key is provided) |
 | `--get-workflow` | Display workflow statuses for the specified project |
 | `--get-issue-types` | Display issue types for the specified project |
 | `--get-fields [TYPE ...]` | Display create/edit/transition fields. Optionally filter by issue types |
 | `--get-versions` | Display versions (releases) with detailed info |
 | `--get-components` | List all components for the project |
+| `--get-children KEY` | Display full child hierarchy for the given ticket (recurses via parent links; project is optional) |
+| `--get-related KEY` | Display linked issues for the given ticket; add `--hierarchy [DEPTH]` to recurse across links (project is optional) |
+| `--hierarchy [DEPTH]` | When used with `--get-related`, traverse linked issues recursively. Omit DEPTH or use `-1` for unlimited depth; use a positive integer to limit depth (e.g., 1 = direct links only, 2 = links of links). |
 
 ### Release Management
 
@@ -186,9 +190,32 @@ python jira_utils.py --project PROJ --get-fields --issue-types Bug Task
 
 # Show versions/releases
 python jira_utils.py --project PROJ --get-versions
-
 # Show components
 python jira_utils.py --project PROJ --get-components
+
+# Show full child hierarchy for a ticket (project optional when key is provided)
+python jira_utils.py --get-children PROJ-123
+
+# Get linked issues (direct links only)
+python jira_utils.py --get-related PROJ-123
+
+# Recursively traverse linked issues (unlimited depth)
+python jira_utils.py --get-related PROJ-123 --hierarchy
+
+# Traverse linked issues up to depth 2
+python jira_utils.py --get-related PROJ-123 --hierarchy 2
+
+# Scope hierarchy to a project explicitly (optional)
+python jira_utils.py --project PROJ --get-children PROJ-123
+
+# Limit hierarchy results to 20 issues and dump to JSON
+python jira_utils.py --get-children PROJ-123 --limit 20 --dump-file children --dump-format json
+
+# Combine linked traversal with limit and JSON dump (depth-limited)
+python jira_utils.py --get-related PROJ-123 --hierarchy 3 --limit 50 --dump-file related --dump-format json
+
+# Combine hierarchy with limit and CSV dump
+python jira_utils.py --get-children PROJ-123 --limit 50 --dump-file children
 
 # Show only components with tickets created in the last 2 weeks
 python jira_utils.py --project PROJ --get-components --date week
@@ -643,6 +670,84 @@ Share permissions are specified as a JSON array. Common permission types:
 | `group` | Share with a Jira group |
 | `loggedin` | Share with all logged-in users |
 | `global` | Share with everyone (public) |
+
+## Draw.io Diagram Generation
+
+The `drawio_utilities.py` script generates draw.io diagrams from Jira hierarchy CSV exports. This creates visual dependency maps that can be opened in draw.io desktop, VS Code, or the online editor.
+
+### Installation
+
+No additional dependencies required - uses Python standard library only.
+
+### Usage
+
+```bash
+python drawio_utilities.py --create-map INPUT_CSV [--output FILE] [--title TITLE]
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--create-map CSV_FILE` | Create a draw.io diagram from a Jira hierarchy CSV file |
+| `--output FILE`, `-o` | Output filename for the .drawio file (default: input file with .drawio extension) |
+| `--title TITLE`, `-t` | Title for the diagram (default: derived from root ticket) |
+| `-v`, `--verbose` | Enable verbose output |
+| `-q`, `--quiet` | Minimal output |
+
+### Workflow
+
+1. **Export hierarchy from Jira:**
+   ```bash
+   python jira_utils.py --get-related STL-74071 --hierarchy --dump-file tickets
+   ```
+
+2. **Generate draw.io diagram:**
+   ```bash
+   python drawio_utilities.py --create-map tickets.csv
+   ```
+
+3. **Open the diagram:**
+   - draw.io desktop app: https://www.diagrams.net/
+   - VS Code with Draw.io Integration extension
+   - Online at https://app.diagrams.net/
+
+### Examples
+
+```bash
+# Basic usage - creates tickets.drawio from tickets.csv
+python drawio_utilities.py --create-map tickets.csv
+
+# Custom output filename
+python drawio_utilities.py --create-map tickets.csv --output release-deps.drawio
+
+# Custom title
+python drawio_utilities.py --create-map tickets.csv --title "Release 12.2 Dependencies"
+
+# Full workflow example
+python jira_utils.py --get-related STL-74071 --hierarchy 2 --dump-file deps
+python drawio_utilities.py --create-map deps.csv --output release-12.2-map.drawio
+```
+
+### Color Coding
+
+The diagram uses color coding to indicate relationship types:
+
+| Link Type | Box Fill | Border Color |
+|-----------|----------|--------------|
+| Root ticket (depth 0) | Light green | Gray |
+| `is blocked by` / `blocks` | Light red | Red |
+| `relates to` | Light blue | Blue |
+| `is caused by` / `causes` | Light yellow | Yellow |
+| `is cloned by` / `clones` | Light orange | Orange |
+| Other link types | White | Gray |
+
+### Diagram Layout
+
+- **Pyramid structure**: Root ticket at top, children arranged by depth level below
+- **Clickable links**: Each ticket box links to the Jira ticket URL
+- **Connection lines**: Lines between boxes show the relationship type
+- **Labels**: Each box shows the ticket key and truncated summary
 
 ## Author
 

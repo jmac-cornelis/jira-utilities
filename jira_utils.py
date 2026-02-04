@@ -1289,6 +1289,22 @@ def _dump_components_to_file(components, dump_file, dump_format='csv', ticket_co
     if ticket_counts:
         fieldnames.append('ticket_count')
     
+    # Determine fieldnames (include any extra keys present in rows)
+    base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary', 'assignee', 'reporter', 'created', 'updated', 'resolved', 'fix_version', 'affects_version']
+    # Collect all keys that appear in any row
+    all_keys = set(base_fields)
+    for r in rows:
+        all_keys.update(r.keys())
+    # Preserve base field order, then append any extras deterministically
+    extra_columns = [k for k in all_keys if k not in base_fields]
+    extra_columns.sort()
+    # ensure extra columns are present in all rows to satisfy DictWriter
+    for r in rows:
+        for col in extra_columns:
+            r.setdefault(col, '')
+    # Guarantee ordering and that DictWriter sees all columns: include extras in fieldnames and rows
+    fieldnames = base_fields + extra_columns
+
     if dump_format == 'json':
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(rows, f, indent=2, default=str)
@@ -1345,6 +1361,342 @@ def match_pattern_with_exclusions(name, pattern):
     excluded = any(fnmatch.fnmatch(name, exc) for exc in excludes)
     
     return not excluded
+
+
+def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, dump_file=None, dump_format='csv'):
+    '''
+    Recursively retrieve and display the full child hierarchy for a given ticket.
+
+    Traversal strategy:
+      - Uses JQL `parent = "<key>"` to find children (Advanced Roadmaps/parent links and subtasks).
+      - Recurses depth-first until no more children or the optional --limit is reached.
+      - Includes the root ticket in the output.
+
+    Input:
+        jira: JIRA object with active connection.
+        project_key: Optional project key (validated if provided).
+        root_key: Issue key to start from (required).
+        limit: Optional maximum number of tickets to return (including root).
+        dump_file: Optional output filename (extension added automatically).
+        dump_format: Output format ('csv' or 'json').
+
+    Output:
+        None; prints a hierarchy view and a table. Optionally writes to file.
+    '''
+    log.debug(f'Entering get_children_hierarchy(project_key={project_key}, root_key={root_key}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+
+    # Validate project if provided (root may be outside the project)
+    if project_key:
+        validate_project(jira, project_key)
+    if not root_key:
+        raise ValueError('root_key is required for get_children_hierarchy')
+
+    try:
+        # Helper: fetch a single issue and return its raw dict (matches search API structure)
+        def _fetch_issue_raw(issue_key):
+            log.debug(f'Fetching root/child issue via jira.issue: {issue_key}')
+            issue_obj = jira.issue(issue_key)
+            return issue_obj.raw
+
+        # Helper: search for direct children of a parent key using the /rest/api/3/search/jql endpoint
+        def _fetch_children(parent_key, remaining_limit=None):
+            email, api_token = get_jira_credentials()
+            all_children = []
+            next_page_token = None
+            batch_size = 100
+            max_retries = 5
+
+            # Fields needed for display/dump; keep aligned with print_ticket_row/dump_tickets_to_file
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'parent']
+
+            while True:
+                if remaining_limit is not None and remaining_limit <= 0:
+                    break
+
+                current_batch = batch_size
+                if remaining_limit is not None:
+                    current_batch = min(batch_size, remaining_limit)
+
+                payload = {
+                    'jql': f'parent = "{parent_key}"',
+                    'maxResults': current_batch,
+                    'fields': fields_to_fetch
+                }
+                if next_page_token:
+                    payload['nextPageToken'] = next_page_token
+
+                # Record the top-level JQL (first page) for --show-jql visibility
+                if not next_page_token:
+                    show_jql(payload['jql'])
+
+                for retry in range(max_retries):
+                    response = requests.post(
+                        f'{JIRA_URL}/rest/api/3/search/jql',
+                        auth=(email, api_token),
+                        headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                        json=payload
+                    )
+
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get('Retry-After', 5))
+                        log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                        time.sleep(retry_after)
+                        continue
+                    break
+
+                if response.status_code != 200:
+                    log.error(f'Child search failed for {parent_key}: {response.status_code} - {response.text}')
+                    raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+
+                data = response.json()
+                issues = data.get('issues', [])
+                all_children.extend(issues)
+
+                next_page_token = data.get('nextPageToken')
+
+                if remaining_limit is not None:
+                    remaining_limit -= len(issues)
+                    if remaining_limit <= 0:
+                        break
+
+                if not next_page_token:
+                    break
+
+            return all_children
+
+        visited = set()
+        ordered = []  # list of {'issue': issue_dict, 'depth': depth}
+
+        def _recurse(current_key, depth, remaining_limit):
+            if remaining_limit is not None and len(ordered) >= remaining_limit:
+                return
+
+            children = _fetch_children(current_key, None if remaining_limit is None else (remaining_limit - len(ordered)))
+
+            for child in children:
+                child_key = child.get('key')
+                if not child_key or child_key in visited:
+                    continue
+
+                visited.add(child_key)
+                ordered.append({'issue': child, 'depth': depth + 1})
+
+                # Recurse further if limit not reached
+                _recurse(child_key, depth + 1, remaining_limit)
+
+        # Seed with root issue
+        root_issue = _fetch_issue_raw(root_key)
+        visited.add(root_key)
+        ordered.append({'issue': root_issue, 'depth': 0})
+
+        _recurse(root_key, 0, limit)
+
+        # Apply limit after traversal (in case root counts toward limit)
+        if limit is not None and len(ordered) > limit:
+            ordered = ordered[:limit]
+
+        # Output hierarchy view
+        output('')
+        output('=' * 120)
+        output(f'Child Hierarchy for: {root_key}')
+        if project_key:
+            output(f'Project: {project_key}')
+        if limit:
+            output(f'Limit: {limit} (includes root)')
+        output('=' * 120)
+
+        output('Hierarchy (depth-indented):')
+        for item in ordered:
+            issue = item['issue']
+            fields = issue.get('fields', {})
+            indent = '  ' * item['depth']
+            summary = fields.get('summary', 'N/A') or 'N/A'
+            issue_type = fields.get('issuetype', {}).get('name', 'N/A') if fields.get('issuetype') else 'N/A'
+            status = fields.get('status', {}).get('name', 'N/A') if fields.get('status') else 'N/A'
+            output(f'{indent}- {issue.get("key", "N/A")} [{issue_type} | {status}] {summary}')
+
+        output('')
+        output('Table:')
+        print_ticket_table_header()
+
+        for item in ordered:
+            issue = item['issue']
+            fields = issue.get('fields', {})
+            # Indent summary for table display to visualize hierarchy depth
+            summary = fields.get('summary', 'N/A') or 'N/A'
+            fields['summary'] = f'{"  " * item["depth"]}{summary}'
+            print_ticket_row(issue)
+
+        print_ticket_table_footer(len(ordered))
+
+        if dump_file:
+            dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format)
+
+    except Exception as e:
+        log.error(f'Failed to get children hierarchy: {e}')
+        raise
+
+
+def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, limit=None, dump_file=None, dump_format='csv'):
+   '''
+   Retrieve linked issues for a given ticket. Optionally recurse across links to build a linked hierarchy.
+
+   Traversal strategy:
+     - Direct links only when --hierarchy is not provided.
+     - Depth-first traversal across all link directions when --hierarchy is provided.
+     - Guards against cycles by tracking visited issue keys.
+     - Includes the root ticket in the output.
+
+   Input:
+       jira: JIRA object with active connection.
+       project_key: Optional project key (validated if provided).
+       root_key: Issue key to start from (required).
+       hierarchy: None for direct links only, -1 for unlimited depth, or positive int for depth limit.
+       limit: Optional maximum number of tickets to return (including root).
+       dump_file: Optional output filename (extension added automatically).
+       dump_format: Output format ('csv' or 'json').
+
+   Output:
+       None; prints a linked view, a table, and optionally writes to file.
+       Use drawio_utilities.py --create-map on the CSV output to generate a draw.io diagram.
+   '''
+   log.debug(f'Entering get_related_issues(project_key={project_key}, root_key={root_key}, hierarchy={hierarchy}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+
+   if project_key:
+       validate_project(jira, project_key)
+   if not root_key:
+       raise ValueError('root_key is required for get_related_issues')
+
+   log.info(f'Getting related tickets to {root_key}. May take some time...')
+
+   try:
+       fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'issuelinks']
+
+       def _fetch_issue_raw(issue_key):
+           log.debug(f'Fetching issue for related traversal: {issue_key}')
+           issue_obj = jira.issue(issue_key, fields=','.join(fields_to_fetch))
+           return issue_obj.raw
+
+       def _collect_links(issue_raw):
+           links = issue_raw.get('fields', {}).get('issuelinks', []) or []
+           edges = []  # list of (target_key, via_label)
+           for link in links:
+               link_type = link.get('type', {}) or {}
+               inward_label = link_type.get('inward') or link_type.get('name') or 'linked'
+               outward_label = link_type.get('outward') or link_type.get('name') or 'linked'
+
+               if 'outwardIssue' in link:
+                   tgt = link.get('outwardIssue') or {}
+                   tgt_key = tgt.get('key')
+                   if tgt_key:
+                       edges.append((tgt_key, outward_label))
+
+               if 'inwardIssue' in link:
+                   tgt = link.get('inwardIssue') or {}
+                   tgt_key = tgt.get('key')
+                   if tgt_key:
+                       edges.append((tgt_key, inward_label))
+           return edges
+
+       visited = set()
+       ordered = []  # list of {'issue': issue_dict, 'depth': depth, 'via': label}
+
+       def _traverse(issue_key, issue_raw, depth, remaining_limit, remaining_depth):
+           if remaining_limit is not None and len(ordered) >= remaining_limit:
+               return
+           if remaining_depth is not None and remaining_depth <= 0:
+               return
+
+           edges = _collect_links(issue_raw)
+           for tgt_key, via in edges:
+               if remaining_limit is not None and len(ordered) >= remaining_limit:
+                   break
+               if tgt_key in visited:
+                   continue
+
+               tgt_raw = _fetch_issue_raw(tgt_key)
+               visited.add(tgt_key)
+               ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via})
+
+               if hierarchy is not None:
+                   _traverse(tgt_key, tgt_raw, depth + 1, remaining_limit, None if remaining_depth is None else remaining_depth - 1)
+
+       # Seed with root issue
+       root_issue = _fetch_issue_raw(root_key)
+       visited.add(root_key)
+       ordered.append({'issue': root_issue, 'depth': 0, 'via': None})
+
+       if hierarchy is not None:
+           # hierarchy: None -> direct, -1 -> unlimited, n>0 -> depth-limited
+           depth_limit = None if hierarchy == -1 else hierarchy
+           _traverse(root_key, root_issue, 0, limit, depth_limit)
+       else:
+           # Only direct links
+           edges = _collect_links(root_issue)
+           for tgt_key, via in edges:
+               if limit is not None and len(ordered) >= limit:
+                   break
+               if tgt_key in visited:
+                   continue
+               tgt_raw = _fetch_issue_raw(tgt_key)
+               visited.add(tgt_key)
+               ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via})
+
+       # Apply limit after traversal (in case root counts toward limit)
+       if limit is not None and len(ordered) > limit:
+           ordered = ordered[:limit]
+
+       # Output linked view
+       output('')
+       output('=' * 120)
+       output(f'Related Issues for: {root_key}')
+       if project_key:
+           output(f'Project: {project_key}')
+       if hierarchy is None:
+           output('Traversal: direct links only')
+       elif hierarchy == -1:
+           output('Traversal: recursive across links (unlimited depth)')
+       else:
+           output(f'Traversal: recursive across links (depth <= {hierarchy})')
+       if limit:
+           output(f'Limit: {limit} (includes root)')
+       output('=' * 120)
+
+       output('Linked issues (depth-indented):')
+       for item in ordered:
+           issue = item['issue']
+           fields = issue.get('fields', {})
+           indent = '  ' * item['depth']
+           summary = fields.get('summary', 'N/A') or 'N/A'
+           issue_type = fields.get('issuetype', {}).get('name', 'N/A') if fields.get('issuetype') else 'N/A'
+           status = fields.get('status', {}).get('name', 'N/A') if fields.get('status') else 'N/A'
+           via = item.get('via')
+           via_label = f' via {via}' if via else ''
+           output(f'{indent}- {issue.get("key", "N/A")} [{issue_type} | {status}]{via_label} {summary}')
+
+       output('')
+       output('Table:')
+       print_ticket_table_header()
+
+       for item in ordered:
+           issue = item['issue']
+           fields = issue.get('fields', {})
+           summary = fields.get('summary', 'N/A') or 'N/A'
+           via = item.get('via')
+           if via:
+               summary = f'{summary} (via {via})'
+           fields['summary'] = f'{"  " * item["depth"]}{summary}'
+           print_ticket_row(issue)
+
+       print_ticket_table_footer(len(ordered))
+
+       if dump_file:
+           extras = {item['issue'].get('key', ''): {'depth': item.get('depth'), 'via': item.get('via')} for item in ordered}
+           dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras)
+
+   except Exception as e:
+       log.error(f'Failed to get related issues: {e}')
+       raise
 
 
 def get_releases(jira, project_key, pattern=None, dump_file=None, dump_format='csv'):
@@ -2258,7 +2610,7 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
         raise
 
 
-def dump_tickets_to_file(issues, dump_file, dump_format):
+def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None):
     '''
     Write tickets to a file in the specified format.
 
@@ -2266,6 +2618,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format):
         issues: List of issue dicts from Jira API.
         dump_file: Output filename (without extension).
         dump_format: Output format ('csv' or 'json').
+        extra_fields: Optional mapping of issue key -> dict of additional fields to include (e.g., {'depth': 1, 'via': 'blocks'}).
 
     Output:
         None; writes to file.
@@ -2273,7 +2626,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format):
     Side Effects:
         Creates or overwrites the output file.
     '''
-    log.debug(f'Entering dump_tickets_to_file(issues_count={len(issues)}, dump_file={dump_file}, dump_format={dump_format})')
+    log.debug(f'Entering dump_tickets_to_file(issues_count={len(issues)}, dump_file={dump_file}, dump_format={dump_format}, extra_fields_provided={extra_fields is not None})')
     # Add extension if not present
     if not dump_file.endswith(f'.{dump_format}'):
         output_path = f'{dump_file}.{dump_format}'
@@ -2311,6 +2664,15 @@ def dump_tickets_to_file(issues, dump_file, dump_format):
             'fix_version': fix_version_str,
             'affects_version': affects_version_str,
         }
+
+        # Optional extra fields (e.g., hierarchy depth, link type)
+        if extra_fields:
+            meta = extra_fields.get(issue.get('key', '')) if isinstance(extra_fields, dict) else None
+            if meta:
+                if 'depth' in meta:
+                    row['depth'] = meta.get('depth')
+                if 'via' in meta:
+                    row['link_via'] = meta.get('via') or ''
         
         # Format dates
         for date_field in ['created', 'updated', 'resolutiondate']:
@@ -2335,9 +2697,20 @@ def dump_tickets_to_file(issues, dump_file, dump_format):
             json.dump(rows, f, indent=2, ensure_ascii=False)
     elif dump_format == 'csv':
         if rows:
-            fieldnames = ['key', 'project', 'issue_type', 'status', 'priority', 'summary', 
-                         'assignee', 'reporter', 'created', 'updated', 'resolved',
-                         'fix_version', 'affects_version']
+            base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary',
+                           'assignee', 'reporter', 'created', 'updated', 'resolved',
+                           'fix_version', 'affects_version']
+            # Collect all keys present across rows (to capture depth/link_via, etc.)
+            all_keys = set(base_fields)
+            for r in rows:
+                all_keys.update(r.keys())
+            extra_columns = [k for k in all_keys if k not in base_fields]
+            extra_columns.sort()
+            # Ensure every row has all fields
+            for r in rows:
+                for col in extra_columns:
+                    r.setdefault(col, '')
+            fieldnames = base_fields + extra_columns
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
@@ -2347,8 +2720,8 @@ def dump_tickets_to_file(issues, dump_file, dump_format):
             with open(output_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['key', 'project', 'issue_type', 'status', 'priority', 'summary',
-                               'assignee', 'reporter', 'created', 'updated', 'resolved',
-                               'fix_version', 'affects_version'])
+                                 'assignee', 'reporter', 'created', 'updated', 'resolved',
+                                 'fix_version', 'affects_version'])
     
     log.info(f'Wrote {len(rows)} tickets to: {output_path}')
 
@@ -3648,6 +4021,26 @@ Date Filters:
         dest='get_components',
         help='List all components for the specified project.')
     parser.add_argument(
+        '--get-children',
+        type=str,
+        metavar='KEY',
+        dest='get_children',
+        help='Display full child hierarchy for the given ticket (recurses via parent links).')
+    parser.add_argument(
+        '--get-related',
+        type=str,
+        metavar='KEY',
+        dest='get_related',
+        help='Display linked issues for the given ticket; use --hierarchy [DEPTH] to recurse across links (DEPTH optional).')
+    parser.add_argument(
+        '--hierarchy',
+        nargs='?',
+        const=-1,
+        type=int,
+        metavar='DEPTH',
+        dest='hierarchy',
+        help='When used with --get-related, recursively traverse linked issues to build a hierarchy. Optional DEPTH limits traversal depth (1 = direct links only). Omit DEPTH for unlimited depth.')
+    parser.add_argument(
         '--releases',
         nargs='?',
         const='*',
@@ -3906,9 +4299,12 @@ Date Filters:
     get_fields_specified = args.get_fields is not None
     release_tickets_specified = args.release_tickets is not None
     jql_specified = args.jql is not None
+    children_specified = args.get_children is not None
+    related_specified = args.get_related is not None
     
     project_actions = [args.get_workflow, args.get_issue_types, get_fields_specified, args.get_versions, args.get_components, args.releases,
                        args.total, args.get_tickets, release_tickets_specified, args.no_release]
+    # --get-children and --get-related are allowed without --project
     if any(project_actions) and not args.project:
         parser.error('--project is required when using --get-workflow, --get-issue-types, --get-fields, --get-versions, --get-components, --releases, --total, --get-tickets, --release-tickets, or --no-release')
     
@@ -3923,15 +4319,22 @@ Date Filters:
     # Validate --date and --limit usage
     if args.date and not (args.total or args.get_tickets or release_tickets_specified or args.no_release or args.get_components):
         parser.error('--date requires --total, --get-tickets, --release-tickets, --no-release, or --get-components')
-    if args.limit and not (args.get_tickets or jql_specified or release_tickets_specified or args.no_release):
-        parser.error('--limit requires --get-tickets, --jql, --release-tickets, or --no-release')
-    
+    if args.limit and not (args.get_tickets or jql_specified or release_tickets_specified or args.no_release or args.get_children or args.get_related):
+        parser.error('--limit requires --get-tickets, --jql, --release-tickets, --no-release, --get-children, or --get-related')
+ 
+    if args.hierarchy is not None and not args.get_related:
+        parser.error('--hierarchy requires --get-related')
+    if args.hierarchy is not None and args.hierarchy < -1:
+        parser.error('--hierarchy DEPTH must be -1 (omit for unlimited) or a non-negative integer')
+ 
+    # Validate --dump-file and --dump-format usage
+ 
     # Validate --dump-file and --dump-format usage
     # Allow dump-file with any command that produces tabular/list data
     dump_compatible = (args.get_tickets or jql_specified or release_tickets_specified or
-                       args.no_release or args.releases or args.get_versions or args.get_components)
+                       args.no_release or args.releases or args.get_versions or args.get_components or args.get_children or args.get_related)
     if (args.dump_file or args.dump_format != 'csv') and not dump_compatible:
-        parser.error('--dump-file and --dump-format require a command that produces data (e.g., --get-tickets, --jql, --releases, --get-versions, --get-components)')
+        parser.error('--dump-file and --dump-format require a command that produces data (e.g., --get-tickets, --jql, --releases, --get-versions, --get-components, --get-children, --get-related)')
     
     # Validate bulk update arguments
     if args.bulk_update:
@@ -4000,7 +4403,7 @@ Date Filters:
         parser.error('--gadget-properties requires --add-gadget')
     
     # Validate that at least one action is specified
-    if not args.list_projects and not any(project_actions) and not jql_specified and not args.bulk_update and not any(dashboard_actions):
+    if not args.list_projects and not any(project_actions) and not jql_specified and not args.bulk_update and not any(dashboard_actions) and not children_specified and not related_specified:
         parser.print_help()
         sys.exit(1)
     
@@ -4047,20 +4450,26 @@ def main():
         
         if args.get_workflow:
             get_project_workflows(jira, args.project)
-        
+
         if args.get_issue_types:
             get_project_issue_types(jira, args.project)
-        
+
         if args.get_fields_specified:
             # Use --issue-types for filtering if provided, otherwise use args from --get-fields
             issue_type_filter = args.issue_types if args.issue_types else args.get_fields
             get_project_fields(jira, args.project, issue_type_filter)
-        
+
         if args.get_versions:
             get_project_versions(jira, args.project)
-        
+
         if args.get_components:
             get_project_components(jira, args.project, args.date, args.dump_file, args.dump_format)
+
+        if args.get_children:
+            get_children_hierarchy(jira, args.project, args.get_children, args.limit, args.dump_file, args.dump_format)
+
+        if args.get_related:
+            get_related_issues(jira, args.project, args.get_related, args.hierarchy, args.limit, args.dump_file, args.dump_format)
         
         if args.releases:
             if args.get_tickets:
