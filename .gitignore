@@ -91,3 +91,4 @@ dmypy.json
 jql.txt
 template.py
 release_12.1_tickets.json
+*.drawio
