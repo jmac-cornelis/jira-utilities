@@ -1,39 +1,14 @@
-# Environment variables (sensitive credentials)
+# Cornelis Agent Pipeline - Git Ignore
+
+# Environment and credentials
 .env
-.env.*
-!.env.example
+*.env.local
 
-# Python virtual environment
-.venv/
-venv/
-env/
-ENV/
-
-# IDE settings
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS-specific files
-.DS_Store
-.DS_Store?
-Thumbs.db
-ehthumbs.db
-
-# Log files
-*.log
-
-# Data output files
-*.csv
-
-# Python bytecode
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Distribution / packaging
+*.so
 .Python
 build/
 develop-eggs/
@@ -51,44 +26,50 @@ wheels/
 .installed.cfg
 *.egg
 
-# PyInstaller
-*.manifest
-*.spec
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-# Unit test / coverage reports
+# Logs
+*.log
+logs/
+
+# Session data (contains potentially sensitive info)
+data/sessions/
+*.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
 htmlcov/
 .tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Build artifacts
+*.pyc
+*.pyo
 
-# pyenv
-.python-version
+# Jupyter
+.ipynb_checkpoints/
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Ruff
-.ruff_cache/
-
-# User-specific files (removed from tracking)
+# Output files
 jql.txt
-template.py
-release_12.1_tickets.json
-*.drawio
+*.csv
+!data/templates/*.json

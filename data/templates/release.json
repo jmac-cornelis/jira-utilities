@@ -1,0 +1,13 @@
+{
+  "name": "Release Template",
+  "description": "Template for creating Release versions",
+  "fields": {
+    "name_pattern": "{major}.{minor}.{patch}",
+    "description_template": "Release {name}\n\nTarget Date: {release_date}\n\n## Highlights\n\n{highlights}\n\n## Included Features\n\n{features}"
+  },
+  "naming_conventions": {
+    "major": "Breaking changes or major features",
+    "minor": "New features, backward compatible",
+    "patch": "Bug fixes and minor improvements"
+  }
+}

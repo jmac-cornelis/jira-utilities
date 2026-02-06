@@ -1539,11 +1539,15 @@ def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, du
 
 def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, limit=None, dump_file=None, dump_format='csv'):
    '''
-   Retrieve linked issues for a given ticket. Optionally recurse across links to build a linked hierarchy.
+   Retrieve related issues for a given ticket.
+
+   "Related" includes:
+     - Linked issues (issuelinks)
+     - Children discovered via JQL `parent = "<key>"`
 
    Traversal strategy:
-     - Direct links only when --hierarchy is not provided.
-     - Depth-first traversal across all link directions when --hierarchy is provided.
+     - Direct links + direct children when --hierarchy is not provided.
+     - Depth-first traversal across both links and children when --hierarchy is provided.
      - Guards against cycles by tracking visited issue keys.
      - Includes the root ticket in the output.
 
@@ -1551,7 +1555,7 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
        jira: JIRA object with active connection.
        project_key: Optional project key (validated if provided).
        root_key: Issue key to start from (required).
-       hierarchy: None for direct links only, -1 for unlimited depth, or positive int for depth limit.
+       hierarchy: None for direct-only, -1 for unlimited depth, or positive int for depth limit.
        limit: Optional maximum number of tickets to return (including root).
        dump_file: Optional output filename (extension added automatically).
        dump_format: Output format ('csv' or 'json').
@@ -1579,7 +1583,7 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
 
        def _collect_links(issue_raw):
            links = issue_raw.get('fields', {}).get('issuelinks', []) or []
-           edges = []  # list of (target_key, via_label)
+           edges = []  # list of (target_key, via_label, relation)
            for link in links:
                link_type = link.get('type', {}) or {}
                inward_label = link_type.get('inward') or link_type.get('name') or 'linked'
@@ -1589,17 +1593,96 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
                    tgt = link.get('outwardIssue') or {}
                    tgt_key = tgt.get('key')
                    if tgt_key:
-                       edges.append((tgt_key, outward_label))
+                       edges.append((tgt_key, outward_label, 'link'))
 
                if 'inwardIssue' in link:
                    tgt = link.get('inwardIssue') or {}
                    tgt_key = tgt.get('key')
                    if tgt_key:
-                       edges.append((tgt_key, inward_label))
+                       edges.append((tgt_key, inward_label, 'link'))
            return edges
 
+       def _fetch_children_keys(parent_key, remaining_limit=None):
+           '''
+           Fetch direct children for a parent issue using JQL `parent = "<key>"`.
+
+           Note:
+               This mirrors the approach used in get_children_hierarchy(), but returns only keys
+               so we can unify traversal across links + children without duplicating issue dicts.
+           '''
+           email, api_token = get_jira_credentials()
+           all_child_keys = []
+           next_page_token = None
+           batch_size = 100
+           max_retries = 5
+
+           while True:
+               if remaining_limit is not None and remaining_limit <= 0:
+                   break
+
+               current_batch = batch_size
+               if remaining_limit is not None:
+                   current_batch = min(batch_size, remaining_limit)
+
+               payload = {
+                   'jql': f'parent = "{parent_key}"',
+                   'maxResults': current_batch,
+                   # We only need keys; keep fields minimal to reduce payload size.
+                   'fields': ['summary']
+               }
+               if next_page_token:
+                   payload['nextPageToken'] = next_page_token
+
+               # Record the top-level JQL (first page) for --show-jql visibility
+               if not next_page_token:
+                   show_jql(payload['jql'])
+
+               for retry in range(max_retries):
+                   response = requests.post(
+                       f'{JIRA_URL}/rest/api/3/search/jql',
+                       auth=(email, api_token),
+                       headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                       json=payload
+                   )
+
+                   if response.status_code == 429:
+                       retry_after = int(response.headers.get('Retry-After', 5))
+                       log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                       time.sleep(retry_after)
+                       continue
+                   break
+
+               if response.status_code != 200:
+                   log.error(f'Child search failed for {parent_key}: {response.status_code} - {response.text}')
+                   raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+
+               data = response.json()
+               issues = data.get('issues', [])
+
+               for issue in issues:
+                   child_key = issue.get('key')
+                   if child_key:
+                       all_child_keys.append(child_key)
+
+               next_page_token = data.get('nextPageToken')
+
+               if remaining_limit is not None:
+                   remaining_limit -= len(issues)
+                   if remaining_limit <= 0:
+                       break
+
+               if not next_page_token:
+                   break
+
+           return all_child_keys
+
+       def _collect_children(parent_key, remaining_limit=None):
+           # Children are modeled as edges from parent -> child
+           child_keys = _fetch_children_keys(parent_key, remaining_limit)
+           return [(k, 'child', 'child') for k in child_keys if k]
+
        visited = set()
-       ordered = []  # list of {'issue': issue_dict, 'depth': depth, 'via': label}
+       ordered = []  # list of {'issue': issue_dict, 'depth': depth, 'via': label, 'relation': str, 'from_key': str}
 
        def _traverse(issue_key, issue_raw, depth, remaining_limit, remaining_depth):
            if remaining_limit is not None and len(ordered) >= remaining_limit:
@@ -1607,8 +1690,9 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
            if remaining_depth is not None and remaining_depth <= 0:
                return
 
+           # 1) Traverse linked issues (existing behavior)
            edges = _collect_links(issue_raw)
-           for tgt_key, via in edges:
+           for tgt_key, via, relation in edges:
                if remaining_limit is not None and len(ordered) >= remaining_limit:
                    break
                if tgt_key in visited:
@@ -1616,31 +1700,60 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
 
                tgt_raw = _fetch_issue_raw(tgt_key)
                visited.add(tgt_key)
-               ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via})
+               ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via, 'relation': relation, 'from_key': issue_key})
 
                if hierarchy is not None:
                    _traverse(tgt_key, tgt_raw, depth + 1, remaining_limit, None if remaining_depth is None else remaining_depth - 1)
 
+           # 2) Also traverse child tickets (parent -> child) according to the same hierarchy depth
+           if remaining_limit is None or len(ordered) < remaining_limit:
+               remaining_slots = None if remaining_limit is None else (remaining_limit - len(ordered))
+               child_edges = _collect_children(issue_key, remaining_slots)
+               for tgt_key, via, relation in child_edges:
+                   if remaining_limit is not None and len(ordered) >= remaining_limit:
+                       break
+                   if tgt_key in visited:
+                       continue
+
+                   tgt_raw = _fetch_issue_raw(tgt_key)
+                   visited.add(tgt_key)
+                   ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via, 'relation': relation, 'from_key': issue_key})
+
+                   if hierarchy is not None:
+                       _traverse(tgt_key, tgt_raw, depth + 1, remaining_limit, None if remaining_depth is None else remaining_depth - 1)
+
        # Seed with root issue
        root_issue = _fetch_issue_raw(root_key)
        visited.add(root_key)
-       ordered.append({'issue': root_issue, 'depth': 0, 'via': None})
+       ordered.append({'issue': root_issue, 'depth': 0, 'via': None, 'relation': None, 'from_key': None})
 
        if hierarchy is not None:
            # hierarchy: None -> direct, -1 -> unlimited, n>0 -> depth-limited
            depth_limit = None if hierarchy == -1 else hierarchy
            _traverse(root_key, root_issue, 0, limit, depth_limit)
        else:
-           # Only direct links
+           # Only direct links + direct children
            edges = _collect_links(root_issue)
-           for tgt_key, via in edges:
+           for tgt_key, via, relation in edges:
                if limit is not None and len(ordered) >= limit:
                    break
                if tgt_key in visited:
                    continue
                tgt_raw = _fetch_issue_raw(tgt_key)
                visited.add(tgt_key)
-               ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via})
+               ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via, 'relation': relation, 'from_key': root_key})
+
+           if limit is None or len(ordered) < limit:
+               remaining_slots = None if limit is None else (limit - len(ordered))
+               child_edges = _collect_children(root_key, remaining_slots)
+               for tgt_key, via, relation in child_edges:
+                   if limit is not None and len(ordered) >= limit:
+                       break
+                   if tgt_key in visited:
+                       continue
+                   tgt_raw = _fetch_issue_raw(tgt_key)
+                   visited.add(tgt_key)
+                   ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via, 'relation': relation, 'from_key': root_key})
 
        # Apply limit after traversal (in case root counts toward limit)
        if limit is not None and len(ordered) > limit:
@@ -1653,16 +1766,16 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
        if project_key:
            output(f'Project: {project_key}')
        if hierarchy is None:
-           output('Traversal: direct links only')
+           output('Traversal: direct links + direct children')
        elif hierarchy == -1:
-           output('Traversal: recursive across links (unlimited depth)')
+           output('Traversal: recursive across links + children (unlimited depth)')
        else:
-           output(f'Traversal: recursive across links (depth <= {hierarchy})')
+           output(f'Traversal: recursive across links + children (depth <= {hierarchy})')
        if limit:
            output(f'Limit: {limit} (includes root)')
        output('=' * 120)
 
-       output('Linked issues (depth-indented):')
+       output('Related issues (depth-indented):')
        for item in ordered:
            issue = item['issue']
            fields = issue.get('fields', {})
@@ -1691,7 +1804,15 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
        print_ticket_table_footer(len(ordered))
 
        if dump_file:
-           extras = {item['issue'].get('key', ''): {'depth': item.get('depth'), 'via': item.get('via')} for item in ordered}
+           extras = {
+               item['issue'].get('key', ''): {
+                   'depth': item.get('depth'),
+                   'via': item.get('via'),
+                   'relation': item.get('relation'),
+                   'from_key': item.get('from_key'),
+               }
+               for item in ordered
+           }
            dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras)
 
    except Exception as e:
@@ -2665,14 +2786,22 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None):
             'affects_version': affects_version_str,
         }
 
-        # Optional extra fields (e.g., hierarchy depth, link type)
+        # Optional extra fields (e.g., hierarchy depth, link type, traversal metadata)
         if extra_fields:
             meta = extra_fields.get(issue.get('key', '')) if isinstance(extra_fields, dict) else None
             if meta:
+                # Backward compatible fields used by drawio_utilities.py
                 if 'depth' in meta:
                     row['depth'] = meta.get('depth')
                 if 'via' in meta:
                     row['link_via'] = meta.get('via') or ''
+
+                # Pass through any additional metadata as extra CSV/JSON columns
+                # (e.g., relation='child'|'link', from_key=<source issue key>)
+                for k, v in meta.items():
+                    if k in ('depth', 'via'):
+                        continue
+                    row[k] = v
         
         # Format dates
         for date_field in ['created', 'updated', 'resolutiondate']:
@@ -2924,6 +3053,152 @@ def bulk_update_tickets(jira, input_file, set_release=None, remove_release=False
         output()
         output('This was a DRY RUN. To execute changes, add --execute flag.')
     
+    output('=' * 80)
+    output()
+
+
+def bulk_delete_tickets(jira, input_file, delete_subtasks=False, dry_run=True, max_deletes=None, force=False):
+    '''
+    Perform bulk deletion of tickets listed in a CSV file.
+
+    Safety model:
+        - Dry-run by default (no changes).
+        - Actual deletes require --execute (which disables dry-run).
+        - When executing, an additional explicit confirmation prompt is shown unless --force is set.
+
+    Input:
+        jira: JIRA object with active connection.
+        input_file: Path to the CSV file containing ticket keys.
+        delete_subtasks: If True, delete subtasks as well (Jira REST parameter deleteSubtasks=true).
+        dry_run: If True, only preview deletions.
+        max_deletes: Optional cap on how many tickets to delete.
+        force: If True, skip the interactive confirmation prompt.
+
+    Output:
+        None; prints results to stdout.
+
+    Side Effects:
+        If not dry_run, deletes tickets in Jira.
+
+    Notes:
+        Jira Cloud does not provide a single "bulk delete" REST endpoint; deletion is performed
+        per-issue via HTTP DELETE.
+    '''
+    log.debug(
+        'Entering bulk_delete_tickets('
+        f'input_file={input_file}, delete_subtasks={delete_subtasks}, '
+        f'dry_run={dry_run}, max_deletes={max_deletes}, force={force})'
+    )
+
+    tickets = load_tickets_from_csv(input_file)
+
+    if not tickets:
+        output('No tickets found in input file.')
+        return
+
+    # Apply max_deletes cap
+    if max_deletes and len(tickets) > max_deletes:
+        log.debug(f'Limiting deletes to {max_deletes} tickets (out of {len(tickets)})')
+        tickets = tickets[:max_deletes]
+
+    # Print summary
+    output()
+    output('=' * 80)
+    if dry_run:
+        output('BULK DELETE - DRY RUN (no changes will be made)')
+    else:
+        output('BULK DELETE - EXECUTING DELETES')
+    output('=' * 80)
+    output(f'Input file:        {input_file}')
+    output(f'Tickets to delete: {len(tickets)}')
+    output(f'Delete subtasks:   {delete_subtasks}')
+    output('-' * 80)
+
+    if not dry_run and not force:
+        output('WARNING: This operation will permanently delete issues in Jira.')
+        output('To confirm, type DELETE and press Enter.')
+        confirmation = input('CONFIRM DELETE> ').strip()
+        if confirmation != 'DELETE':
+            output('Aborting: confirmation did not match "DELETE".')
+            output('=' * 80)
+            output()
+            return
+
+    email, api_token = get_jira_credentials()
+
+    success_count = 0
+    error_count = 0
+    errors = []
+
+    max_retries = 5
+
+    for i, ticket in enumerate(tickets, 1):
+        ticket_key = (ticket.get('key') or '').strip()
+
+        if not ticket_key:
+            log.warning(f'Skipping row {i}: no key found')
+            error_count += 1
+            errors.append((f'Row {i}', 'No key found'))
+            continue
+
+        status_str = f'[{i}/{len(tickets)}] {ticket_key}'
+
+        if dry_run:
+            output(f'{status_str}: Would delete (delete_subtasks={delete_subtasks})')
+            success_count += 1
+            continue
+
+        # Execute deletion via REST API (per-issue)
+        params = {}
+        if delete_subtasks:
+            params['deleteSubtasks'] = 'true'
+
+        for retry in range(max_retries):
+            response = requests.delete(
+                f'{JIRA_URL}/rest/api/3/issue/{ticket_key}',
+                auth=(email, api_token),
+                headers={'Accept': 'application/json'},
+                params=params,
+            )
+
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', 5))
+                log.warning(
+                    f'{ticket_key}: Rate limited. Waiting {retry_after} seconds '
+                    f'(retry {retry + 1}/{max_retries})...'
+                )
+                time.sleep(retry_after)
+                continue
+
+            break
+
+        # Jira returns 204 No Content on success
+        if response.status_code in (200, 202, 204):
+            output(f'{status_str}: DELETED')
+            success_count += 1
+        else:
+            msg = f'{response.status_code} - {response.text}'
+            output(f'{status_str}: FAILED - {msg}')
+            log.error(f'{ticket_key}: Delete failed: {msg}')
+            error_count += 1
+            errors.append((ticket_key, msg))
+
+    # Print summary
+    output('-' * 80)
+    output(f'Completed: {success_count} successful, {error_count} failed')
+
+    if errors and not dry_run:
+        output()
+        output('Errors:')
+        for key, error in errors[:10]:  # Show first 10 errors
+            output(f'  {key}: {error}')
+        if len(errors) > 10:
+            output(f'  ... and {len(errors) - 10} more errors')
+
+    if dry_run:
+        output()
+        output('This was a DRY RUN. To execute deletions, add --execute flag.')
+
     output('=' * 80)
     output()
 
@@ -3966,6 +4241,22 @@ Bulk Update Examples:
   %(prog)s --bulk-update --input-file tickets.csv --remove-release --execute
   %(prog)s --bulk-update --input-file tickets.csv --set-release "v2.0" --max-updates 10 --execute
 
+Bulk Delete Examples:
+  # Step 1: Find tickets and dump to CSV
+  %(prog)s --jql "project = PROJ AND labels = temp" --dump-file to_delete
+
+  # Step 2: Preview deletes (dry-run is default)
+  %(prog)s --bulk-delete --input-file to_delete.csv
+
+  # Step 3: Execute deletes (requires explicit DELETE confirmation)
+  %(prog)s --bulk-delete --input-file to_delete.csv --execute
+
+  # Delete parent issues and their subtasks
+  %(prog)s --bulk-delete --input-file parents.csv --delete-subtasks --execute
+
+  # Skip interactive confirmation prompt (DANGEROUS)
+  %(prog)s --bulk-delete --input-file to_delete.csv --execute --force
+
 Date Filters:
   today                    Tickets created today
   week                     Tickets created in the last 7 days
@@ -4031,7 +4322,7 @@ Date Filters:
         type=str,
         metavar='KEY',
         dest='get_related',
-        help='Display linked issues for the given ticket; use --hierarchy [DEPTH] to recurse across links (DEPTH optional).')
+        help='Display related issues for the given ticket (linked issues + children); use --hierarchy [DEPTH] to recurse (DEPTH optional).')
     parser.add_argument(
         '--hierarchy',
         nargs='?',
@@ -4039,7 +4330,7 @@ Date Filters:
         type=int,
         metavar='DEPTH',
         dest='hierarchy',
-        help='When used with --get-related, recursively traverse linked issues to build a hierarchy. Optional DEPTH limits traversal depth (1 = direct links only). Omit DEPTH for unlimited depth.')
+        help='When used with --get-related, recursively traverse linked issues and children to build a hierarchy. Optional DEPTH limits traversal depth (1 = direct only). Omit DEPTH for unlimited depth.')
     parser.add_argument(
         '--releases',
         nargs='?',
@@ -4114,12 +4405,20 @@ Date Filters:
         action='store_true',
         dest='bulk_update',
         help='Perform bulk update on tickets from input file.')
+
+    # Bulk delete arguments
+    parser.add_argument(
+        '--bulk-delete',
+        action='store_true',
+        dest='bulk_delete',
+        help='Perform bulk delete on tickets from input file (dry-run by default).')
+
     parser.add_argument(
         '--input-file',
         type=str,
         metavar='FILE',
         dest='input_file',
-        help='Input CSV file containing ticket keys for bulk update.')
+        help='Input CSV file containing ticket keys for bulk update/delete.')
     parser.add_argument(
         '--set-release',
         type=str,
@@ -4157,6 +4456,20 @@ Date Filters:
         metavar='N',
         dest='max_updates',
         help='Maximum number of tickets to update in bulk operation.')
+
+    parser.add_argument(
+        '--max-deletes',
+        type=int,
+        metavar='N',
+        dest='max_deletes',
+        help='Maximum number of tickets to delete in bulk operation.')
+
+    parser.add_argument(
+        '--delete-subtasks',
+        action='store_true',
+        dest='delete_subtasks',
+        help='When used with --bulk-delete, delete subtasks as well.')
+
     parser.add_argument(
         '--show-jql',
         action='store_true',
@@ -4342,21 +4655,34 @@ Date Filters:
             parser.error('--bulk-update requires --input-file')
         if not any([args.set_release, args.remove_release, args.transition, args.assign]):
             parser.error('--bulk-update requires at least one operation: --set-release, --remove-release, --transition, or --assign')
-    
+
+    # Validate bulk delete arguments
+    if args.bulk_delete:
+        if not args.input_file:
+            parser.error('--bulk-delete requires --input-file')
+        # No extra operation flags required; deletion is the operation.
+
     # Validate bulk update operation args are only used with --bulk-update
     bulk_ops = [args.set_release, args.remove_release, args.transition, args.assign]
     if any(bulk_ops) and not args.bulk_update:
         parser.error('--set-release, --remove-release, --transition, and --assign require --bulk-update')
-    
-    if args.input_file and not args.bulk_update:
-        parser.error('--input-file requires --bulk-update')
-    
-    if args.execute and not args.bulk_update:
-        parser.error('--execute requires --bulk-update')
-    
+
+    if args.delete_subtasks and not args.bulk_delete:
+        parser.error('--delete-subtasks requires --bulk-delete')
+
+    # input-file may be used with either bulk-update or bulk-delete
+    if args.input_file and not (args.bulk_update or args.bulk_delete):
+        parser.error('--input-file requires --bulk-update or --bulk-delete')
+
+    if args.execute and not (args.bulk_update or args.bulk_delete):
+        parser.error('--execute requires --bulk-update or --bulk-delete')
+
     if args.max_updates and not args.bulk_update:
         parser.error('--max-updates requires --bulk-update')
-    
+
+    if args.max_deletes and not args.bulk_delete:
+        parser.error('--max-deletes requires --bulk-delete')
+
     # If --execute is specified, disable dry_run
     if args.execute:
         args.dry_run = False
@@ -4382,9 +4708,9 @@ Date Filters:
     if args.share_permissions and not (args.create_dashboard or args.update_dashboard or args.copy_dashboard):
         parser.error('--share-permissions requires --create-dashboard, --update-dashboard, or --copy-dashboard')
     
-    # --force only valid with --delete-dashboard
-    if args.force and not args.delete_dashboard:
-        parser.error('--force requires --delete-dashboard')
+    # --force only valid with --delete-dashboard or --bulk-delete
+    if args.force and not (args.delete_dashboard or args.bulk_delete):
+        parser.error('--force requires --delete-dashboard or --bulk-delete')
     
     # --copy-dashboard requires --name
     if args.copy_dashboard and not args.name:
@@ -4403,7 +4729,7 @@ Date Filters:
         parser.error('--gadget-properties requires --add-gadget')
     
     # Validate that at least one action is specified
-    if not args.list_projects and not any(project_actions) and not jql_specified and not args.bulk_update and not any(dashboard_actions) and not children_specified and not related_specified:
+    if not args.list_projects and not any(project_actions) and not jql_specified and not (args.bulk_update or args.bulk_delete) and not any(dashboard_actions) and not children_specified and not related_specified:
         parser.print_help()
         sys.exit(1)
     
@@ -4503,6 +4829,16 @@ def main():
         if args.bulk_update:
             bulk_update_tickets(jira, args.input_file, args.set_release, args.remove_release,
                                args.transition, args.assign, args.dry_run, args.max_updates)
+
+        if args.bulk_delete:
+            bulk_delete_tickets(
+                jira,
+                args.input_file,
+                delete_subtasks=args.delete_subtasks,
+                dry_run=args.dry_run,
+                max_deletes=args.max_deletes,
+                force=args.force,
+            )
         
         # Dashboard management operations
         if args.dashboards:

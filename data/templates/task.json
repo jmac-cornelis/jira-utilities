@@ -1,0 +1,12 @@
+{
+  "name": "Task Template",
+  "description": "Template for creating Task tickets",
+  "fields": {
+    "issue_type": "Task",
+    "summary_prefix": "",
+    "description_template": "## Task Description\n\n{description}\n\n## Implementation Details\n\n{implementation}\n\n## Definition of Done\n\n- [ ] Code complete\n- [ ] Unit tests passing\n- [ ] Code reviewed\n- [ ] Documentation updated",
+    "default_labels": [],
+    "default_priority": "Medium"
+  },
+  "child_types": ["Sub-task"]
+}
