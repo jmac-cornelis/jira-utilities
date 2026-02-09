@@ -1,0 +1,11 @@
+{
+  "project": "PROJ",
+  "summary": "Example ticket created via jira_utils.py",
+  "issue_type": "Task",
+  "description": "This is an example description. It will be converted to Jira Cloud ADF on create.",
+  "assignee_id": "5b10ac8d82e05b22cc7d4ef5",
+  "components": ["Platform"],
+  "fix_versions": ["12.3.0"],
+  "labels": ["temp", "created-by-cli"],
+  "parent": "PROJ-123"
+}

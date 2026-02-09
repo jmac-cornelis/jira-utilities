@@ -30,8 +30,12 @@ import requests
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env file if present
-load_dotenv()
+# Load environment variables from the default .env if present.
+#
+# CLI users can override this at runtime with --env; see handle_args().
+# We use override=False here so real process environment variables (e.g. set by CI)
+# still take precedence.
+load_dotenv(override=False)
 
 try:
     from jira import JIRA
@@ -44,8 +48,10 @@ except ImportError:
 # ****************************************************************************************
 # Set global variables here and log.debug them below
 
-# Jira configuration
-JIRA_URL = 'https://cornelisnetworks.atlassian.net'
+DEFAULT_JIRA_URL = 'https://cornelisnetworks.atlassian.net'
+
+# Jira configuration (allow override via env / .env)
+JIRA_URL = os.getenv('JIRA_URL', DEFAULT_JIRA_URL)
 
 # Logging config
 log = logging.getLogger(os.path.basename(sys.argv[0]))
@@ -2895,7 +2901,152 @@ def load_tickets_from_csv(input_file):
     return tickets
 
 
-def bulk_update_tickets(jira, input_file, set_release=None, remove_release=False, 
+def _adf_from_text(text):
+    '''
+    Convert plain text into Jira Cloud ADF (Atlassian Document Format).
+
+    Jira Cloud REST API v3 expects ADF JSON for rich text fields (e.g. description).
+
+    References:
+      - Atlassian ADF overview: https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/
+      - Jira issue create (v3): https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/#api-rest-api-3-issue-post
+    '''
+    if text is None:
+        return None
+
+    # Keep it intentionally simple: one paragraph with one text node.
+    return {
+        'type': 'doc',
+        'version': 1,
+        'content': [
+            {
+                'type': 'paragraph',
+                'content': [
+                    {'type': 'text', 'text': str(text)}
+                ],
+            }
+        ],
+    }
+
+
+def create_ticket(
+    jira,
+    project_key,
+    summary,
+    issue_type,
+    description=None,
+    assignee=None,
+    components=None,
+    fix_versions=None,
+    labels=None,
+    parent_key=None,
+    dry_run=True,
+):
+    '''
+    Create a Jira ticket.
+
+    Safety model:
+        - Dry-run by default (no changes).
+        - Actual creation requires --execute (which disables dry-run).
+
+    Input:
+        jira: JIRA client instance.
+        project_key: Jira project key.
+        summary: Issue summary.
+        issue_type: Issue type name (e.g. Task, Bug, Story, Epic).
+        description: Optional plain-text description (converted to ADF for Jira Cloud).
+        assignee: Optional assignee accountId.
+        components: Optional list of component names.
+        fix_versions: Optional list of fixVersion names.
+        labels: Optional list of labels.
+        parent_key: Optional parent issue key (sub-task parent / epic parent, depending on project configuration).
+        dry_run: If True, do not create; only print what would be created.
+
+    Output:
+        None; prints results to stdout.
+
+    Side Effects:
+        If not dry_run, creates an issue in Jira.
+
+    Notes:
+        - For Jira Cloud, assignee must typically be an accountId, not an email.
+        - Epic linkage varies across Jira configurations; some instances use a custom field.
+          We set the standard `parent` field when parent_key is provided.
+    '''
+    log.debug(
+        'Entering create_ticket('
+        f'project_key={project_key}, summary={summary}, issue_type={issue_type}, '
+        f'assignee={assignee}, components={components}, fix_versions={fix_versions}, '
+        f'labels={labels}, parent_key={parent_key}, dry_run={dry_run})'
+    )
+
+    # Build issue fields
+    fields = {
+        'project': {'key': project_key},
+        'summary': summary,
+        'issuetype': {'name': issue_type},
+    }
+
+    if description:
+        fields['description'] = _adf_from_text(description)
+
+    if assignee:
+        # Jira Cloud: `id` is the accountId.
+        fields['assignee'] = {'id': assignee}
+
+    if components:
+        fields['components'] = [{'name': c} for c in components]
+
+    if fix_versions:
+        fields['fixVersions'] = [{'name': v} for v in fix_versions]
+
+    if labels:
+        fields['labels'] = labels
+
+    if parent_key:
+        fields['parent'] = {'key': parent_key}
+
+    output('')
+    output('=' * 80)
+    if dry_run:
+        output('CREATE TICKET - DRY RUN (no changes will be made)')
+    else:
+        output('CREATE TICKET - EXECUTING')
+    output('=' * 80)
+    output(f'Project:     {project_key}')
+    output(f'Type:        {issue_type}')
+    output(f'Summary:     {summary}')
+    if parent_key:
+        output(f'Parent:      {parent_key}')
+    if assignee:
+        output(f'Assignee ID: {assignee}')
+    if components:
+        output(f'Components:  {", ".join(components)}')
+    if fix_versions:
+        output(f'FixVersions: {", ".join(fix_versions)}')
+    if labels:
+        output(f'Labels:      {", ".join(labels)}')
+    output('-' * 80)
+
+    if dry_run:
+        output('Would create ticket with the above fields.')
+        output('To execute creation, add --execute.')
+        output('=' * 80)
+        output('')
+        return
+
+    try:
+        issue = jira.create_issue(fields=fields)
+        output(f'Created: {issue.key}')
+        output(f'URL:     {JIRA_URL}/browse/{issue.key}')
+        output('=' * 80)
+        output('')
+    except Exception as e:
+        log.error(f'Failed to create ticket: {e}')
+        raise
+
+
+def bulk_update_tickets(jira, input_file, set_release=None, remove_release=False,
                         transition=None, assign=None, dry_run=True, max_updates=None):
     '''
     Perform bulk updates on tickets loaded from a CSV file.
@@ -4276,6 +4427,12 @@ Date Filters:
         action='store_true',
         help='Minimal stdout.')
     parser.add_argument(
+        '--env',
+        type=str,
+        default='.env',
+        metavar='FILE',
+        help='Path to dotenv file to load (default: .env). Use this to load a different env file at runtime.')
+    parser.add_argument(
         '--list',
         action='store_true',
         dest='list_projects',
@@ -4384,6 +4541,61 @@ Date Filters:
         type=str,
         metavar='QUERY',
         help='Run a custom JQL query and display results.')
+
+    # Ticket creation arguments
+    parser.add_argument(
+        '--create-ticket',
+        nargs='?',
+        const='',
+        default=None,
+        dest='create_ticket',
+        metavar='FILE',
+        help='Create a new ticket. If FILE is provided, load ticket fields from JSON. If omitted, use CLI flags. Dry-run by default; use --execute to actually create.')
+    parser.add_argument(
+        '--summary',
+        type=str,
+        metavar='TEXT',
+        help='Ticket summary (required with --create-ticket).')
+    parser.add_argument(
+        '--issue-type',
+        type=str,
+        dest='issue_type',
+        metavar='TYPE',
+        help='Issue type name (required with --create-ticket), e.g., Task, Bug, Story.')
+    parser.add_argument(
+        '--ticket-description',
+        type=str,
+        dest='ticket_description',
+        metavar='TEXT',
+        help='Plain-text description to set on the ticket (optional).')
+    parser.add_argument(
+        '--assignee-id',
+        type=str,
+        dest='assignee_id',
+        metavar='ACCOUNT_ID',
+        help='Assignee accountId (optional).')
+    parser.add_argument(
+        '--components',
+        nargs='+',
+        metavar='NAME',
+        help='Component names to set (optional).')
+    parser.add_argument(
+        '--fix-versions',
+        nargs='+',
+        dest='fix_versions',
+        metavar='VERSION',
+        help='Fix version(s) to set (optional).')
+    parser.add_argument(
+        '--labels',
+        nargs='+',
+        metavar='LABEL',
+        help='Labels to set (optional).')
+    parser.add_argument(
+        '--parent',
+        type=str,
+        metavar='KEY',
+        help='Parent ticket key (optional; for sub-tasks or parent-linked issue types).')
+
     parser.add_argument(
         '--dump-file',
         type=str,
@@ -4583,6 +4795,99 @@ Date Filters:
     
     args = parser.parse_args()
 
+    # If user selected a non-default dotenv file, load it now.
+    #
+    # Note: we already load the default `.env` at import time with override=False.
+    # When `--env` is provided, we reload from that file with override=True so it
+    # can override values from the default `.env`.
+    if args.env and args.env != '.env':
+        if not os.path.exists(args.env):
+            parser.error(f'--env file not found: {args.env}')
+        load_dotenv(dotenv_path=args.env, override=True)
+
+        # Refresh globals that were computed at import time.
+        global JIRA_URL
+        JIRA_URL = os.getenv('JIRA_URL', DEFAULT_JIRA_URL)
+
+    # Ticket creation JSON (optional):
+    #   - `--create-ticket` is always required to create a ticket
+    #   - `--create-ticket FILE` loads fields from JSON
+    #   - `--create-ticket` (no FILE) uses CLI flags only
+    #
+    # Precedence model:
+    #   - CLI flags override JSON values
+    #   - JSON can provide required fields so you don't have to repeat them
+    args.ticket_json = {}
+    args.create_ticket_path = None
+
+    # When `--create-ticket` is specified with no FILE, argparse sets it to '' (empty string).
+    # When not specified at all, it is None.
+    if args.create_ticket is not None and args.create_ticket != '':
+        args.create_ticket_path = args.create_ticket
+
+        if not os.path.exists(args.create_ticket_path):
+            parser.error(f'--create-ticket file not found: {args.create_ticket_path}')
+
+        try:
+            with open(args.create_ticket_path, 'r', encoding='utf-8') as f:
+                ticket_json = json.load(f)
+        except json.JSONDecodeError as e:
+            parser.error(f'--create-ticket file is not valid JSON: {e}')
+        except Exception as e:
+            parser.error(f'Failed to read --create-ticket file: {e}')
+
+        if not isinstance(ticket_json, dict):
+            parser.error('--create-ticket file must contain a JSON object at the top level')
+
+        args.ticket_json = ticket_json
+
+        # Allow project to be specified via JSON.
+        json_project = ticket_json.get('project') or ticket_json.get('project_key')
+        if not args.project and json_project:
+            args.project = str(json_project)
+
+        # Fill create-ticket args from JSON (CLI overrides JSON).
+        args.summary = args.summary or ticket_json.get('summary')
+        args.issue_type = args.issue_type or ticket_json.get('issue_type')
+
+        args.ticket_description = (
+            args.ticket_description
+            or ticket_json.get('description')
+            or ticket_json.get('ticket_description')
+        )
+
+        args.assignee_id = args.assignee_id or ticket_json.get('assignee_id')
+
+        def _normalize_str_list(value, field_name):
+            """Normalize JSON field into a list[str] or None.
+
+            Accepts either:
+              - null / missing => None
+              - string => [string]
+              - list[string] => list[string]
+
+            We keep this normalization in [`handle_args()`](jira_utils.py:4300) so later
+            code can assume list semantics.
+            """
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, list):
+                try:
+                    return [str(v) for v in value]
+                except Exception:
+                    parser.error(f'--create-ticket JSON field "{field_name}" must be a string or list of strings')
+            parser.error(f'--create-ticket JSON field "{field_name}" must be a string or list of strings')
+
+        args.components = args.components or _normalize_str_list(ticket_json.get('components'), 'components')
+        args.fix_versions = args.fix_versions or _normalize_str_list(ticket_json.get('fix_versions'), 'fix_versions')
+        args.labels = args.labels or _normalize_str_list(ticket_json.get('labels'), 'labels')
+
+        args.parent = args.parent or ticket_json.get('parent') or ticket_json.get('parent_key')
+        if args.parent is not None:
+            args.parent = str(args.parent)
+
     # Configure stdout logging based on arguments
     ch = logging.StreamHandler(sys.stdout)
     if args.verbose:
@@ -4614,12 +4919,13 @@ Date Filters:
     jql_specified = args.jql is not None
     children_specified = args.get_children is not None
     related_specified = args.get_related is not None
+    create_ticket_specified = args.create_ticket is not None
     
     project_actions = [args.get_workflow, args.get_issue_types, get_fields_specified, args.get_versions, args.get_components, args.releases,
-                       args.total, args.get_tickets, release_tickets_specified, args.no_release]
+                       args.total, args.get_tickets, release_tickets_specified, args.no_release, create_ticket_specified]
     # --get-children and --get-related are allowed without --project
     if any(project_actions) and not args.project:
-        parser.error('--project is required when using --get-workflow, --get-issue-types, --get-fields, --get-versions, --get-components, --releases, --total, --get-tickets, --release-tickets, or --no-release')
+        parser.error('--project is required when using --get-workflow, --get-issue-types, --get-fields, --get-versions, --get-components, --releases, --total, --get-tickets, --release-tickets, --no-release, or --create-ticket')
     
     # Validate --issue-types is only used with appropriate commands
     if args.issue_types and not (args.total or args.get_tickets or release_tickets_specified or args.no_release or get_fields_specified):
@@ -4634,6 +4940,26 @@ Date Filters:
         parser.error('--date requires --total, --get-tickets, --release-tickets, --no-release, or --get-components')
     if args.limit and not (args.get_tickets or jql_specified or release_tickets_specified or args.no_release or args.get_children or args.get_related):
         parser.error('--limit requires --get-tickets, --jql, --release-tickets, --no-release, --get-children, or --get-related')
+
+    # Validate ticket creation arguments
+    if args.create_ticket is not None:
+        if not args.summary:
+            parser.error('--create-ticket requires --summary (or provide it via --create-ticket FILE)')
+        if not args.issue_type:
+            parser.error('--create-ticket requires --issue-type (or provide it via --create-ticket FILE)')
+    else:
+        create_only_args = [
+            args.summary,
+            args.issue_type,
+            args.ticket_description,
+            args.assignee_id,
+            args.components,
+            args.fix_versions,
+            args.labels,
+            args.parent,
+        ]
+        if any(create_only_args):
+            parser.error('--summary, --issue-type, --ticket-description, --assignee-id, --components, --fix-versions, --labels, and --parent require --create-ticket')
  
     if args.hierarchy is not None and not args.get_related:
         parser.error('--hierarchy requires --get-related')
@@ -4674,8 +5000,8 @@ Date Filters:
     if args.input_file and not (args.bulk_update or args.bulk_delete):
         parser.error('--input-file requires --bulk-update or --bulk-delete')
 
-    if args.execute and not (args.bulk_update or args.bulk_delete):
-        parser.error('--execute requires --bulk-update or --bulk-delete')
+    if args.execute and not (args.bulk_update or args.bulk_delete or (args.create_ticket is not None)):
+        parser.error('--execute requires --bulk-update, --bulk-delete, or --create-ticket')
 
     if args.max_updates and not args.bulk_update:
         parser.error('--max-updates requires --bulk-update')
@@ -4825,6 +5151,22 @@ def main():
         
         if args.jql_specified:
             run_jql_query(jira, args.jql, args.limit, args.dump_file, args.dump_format)
+
+        if args.create_ticket is not None:
+            # Note: args.* values may have been filled from `--create-ticket FILE`, with CLI overriding JSON.
+            create_ticket(
+                jira,
+                args.project,
+                args.summary,
+                args.issue_type,
+                description=args.ticket_description,
+                assignee=args.assignee_id,
+                components=args.components,
+                fix_versions=args.fix_versions,
+                labels=args.labels,
+                parent_key=args.parent,
+                dry_run=args.dry_run,
+            )
         
         if args.bulk_update:
             bulk_update_tickets(jira, args.input_file, args.set_release, args.remove_release,

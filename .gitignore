@@ -2,6 +2,7 @@
 
 # Environment and credentials
 .env
+.env_sandbox
 *.env.local
 
 # Python
