@@ -7,6 +7,7 @@ An AI-powered agent pipeline for automating Jira release planning at Cornelis Ne
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Installation](#installation)
+  - [Global CLI Install (pipx)](#global-cli-install-pipx)
 - [Configuration](#configuration)
 - [Usage](#usage)
   - [Jira CLI (`jira_utils.py`)](#jira-cli-jira_utilspy)
@@ -15,6 +16,7 @@ An AI-powered agent pipeline for automating Jira release planning at Cornelis Ne
 - [Ticket Creation](#ticket-creation)
 - [Agent Pipeline](#agent-pipeline)
 - [Tools](#tools)
+- [Standalone Utilities](#standalone-utilities)
 - [Development](#development)
 
 ## Overview
@@ -104,6 +106,37 @@ The Cornelis Agent Pipeline automates the process of creating Jira release struc
    cp .env.example .env
    # Edit .env with your credentials
    ```
+
+### Global CLI Install (pipx)
+
+To make `jira-utils` and `drawio-utils` available as commands in **any** directory (without activating a venv), use [pipx](https://pipx.pypa.io/):
+
+```bash
+# Install pipx (macOS)
+brew install pipx
+pipx ensurepath          # adds ~/.local/bin to PATH (restart terminal)
+
+# Editable install from the repo — changes to source are reflected immediately
+pipx install /path/to/this/repo --editable
+
+# Verify
+jira-utils -h
+drawio-utils -h
+```
+
+This creates an isolated virtualenv with only the CLI dependencies (`jira`, `python-dotenv`, `requests`). The agent pipeline extras (`openai`, `litellm`, etc.) are **not** installed by default; add them with:
+
+```bash
+pipx install /path/to/this/repo --editable --pip-args='.[agents]'
+```
+
+To uninstall:
+
+```bash
+pipx uninstall cornelis-jira-tools
+```
+
+> **Note:** The `--editable` flag means the installed commands point back to your working copy. Any edits to `jira_utils.py` or `drawio_utilities.py` take effect immediately — no reinstall needed.
 
 ## Configuration
 
@@ -608,9 +641,10 @@ cornelis-agent/
 │   └── knowledge/           # Product knowledge
 │       └── cornelis_products.md
 ├── plans/                   # Architecture & conversation docs
-├── jira_utils.py            # Standalone Jira CLI utility
-├── drawio_utilities.py      # Standalone draw.io CLI utility
+├── jira_utils.py            # Standalone Jira CLI utility (→ jira-utils)
+├── drawio_utilities.py      # Standalone draw.io CLI utility (→ drawio-utils)
 ├── main.py                  # Agent pipeline entry point
+├── pyproject.toml           # Package metadata & console_scripts (pipx)
 ├── .env.example             # Environment template
 └── requirements.txt         # Dependencies
 ```
@@ -647,16 +681,23 @@ pytest tests/
 pytest tests/test_tools/test_jira_tools.py
 ```
 
-## Legacy Utilities
+## Standalone Utilities
 
-The original utilities are preserved and can be used standalone:
+The CLI utilities can be used standalone (without the agent pipeline). After a `pipx install` they are available globally as `jira-utils` and `drawio-utils`:
 
-- [`jira_utils.py`](jira_utils.py) — Full-featured Jira CLI (project queries, ticket creation, bulk ops, dashboards)
-- [`drawio_utilities.py`](drawio_utilities.py) — Draw.io diagram generator from Jira hierarchy CSV exports
+| Command | Source | Description |
+|---------|--------|-------------|
+| `jira-utils` | [`jira_utils.py`](jira_utils.py) | Full-featured Jira CLI (project queries, ticket creation, bulk ops, dashboards) |
+| `drawio-utils` | [`drawio_utilities.py`](drawio_utilities.py) | Draw.io diagram generator from Jira hierarchy CSV exports |
 
 Run either with `-h` for full help:
 
 ```bash
+# Via pipx (global)
+jira-utils -h
+drawio-utils -h
+
+# Or directly from the repo
 python3 jira_utils.py -h
 python3 drawio_utilities.py -h
 ```
