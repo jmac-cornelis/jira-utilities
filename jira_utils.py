@@ -1369,7 +1369,7 @@ def match_pattern_with_exclusions(name, pattern):
     return not excluded
 
 
-def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, dump_file=None, dump_format='csv'):
+def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, dump_file=None, dump_format='csv', table_format='flat'):
     '''
     Recursively retrieve and display the full child hierarchy for a given ticket.
 
@@ -1385,11 +1385,12 @@ def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, du
         limit: Optional maximum number of tickets to return (including root).
         dump_file: Optional output filename (extension added automatically).
         dump_format: Output format ('csv' or 'json').
+        table_format: Table layout for CSV ('flat' or 'indented').
 
     Output:
         None; prints a hierarchy view and a table. Optionally writes to file.
     '''
-    log.debug(f'Entering get_children_hierarchy(project_key={project_key}, root_key={root_key}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+    log.debug(f'Entering get_children_hierarchy(project_key={project_key}, root_key={root_key}, limit={limit}, dump_file={dump_file}, dump_format={dump_format}, table_format={table_format})')
 
     # Validate project if provided (root may be outside the project)
     if project_key:
@@ -1536,14 +1537,21 @@ def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, du
         print_ticket_table_footer(len(ordered))
 
         if dump_file:
-            dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format)
+            # Build extra_fields with depth metadata for each ticket
+            extras = {
+                item['issue'].get('key', ''): {
+                    'depth': item.get('depth'),
+                }
+                for item in ordered
+            }
+            dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras, table_format=table_format)
 
     except Exception as e:
         log.error(f'Failed to get children hierarchy: {e}')
         raise
 
 
-def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, limit=None, dump_file=None, dump_format='csv'):
+def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, limit=None, dump_file=None, dump_format='csv', table_format='flat'):
    '''
    Retrieve related issues for a given ticket.
 
@@ -1819,7 +1827,7 @@ def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, li
                }
                for item in ordered
            }
-           dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras)
+           dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras, table_format=table_format)
 
    except Exception as e:
        log.error(f'Failed to get related issues: {e}')
@@ -2737,7 +2745,165 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
         raise
 
 
-def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None):
+def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
+    '''
+    Write ticket rows to an Excel (.xlsx) file using openpyxl.
+
+    Ticket key cells are rendered as clickable Jira hyperlinks (display text is
+    the ticket ID, e.g. "STL-71438", with the full browse URL behind it).
+
+    Supports both "flat" and "indented" table formats (same logic as the CSV
+    writer but targeting an Excel workbook).
+
+    Input:
+        rows: List of row dicts (already flattened by dump_tickets_to_file).
+        output_path: Destination .xlsx file path.
+        extra_fields: Original extra_fields mapping (used only for metadata awareness).
+        table_format: 'flat' or 'indented'.
+    '''
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        log.error('openpyxl is required for Excel output. Install with: pip install openpyxl')
+        raise ImportError('openpyxl is required for --dump-format excel. Install with: pip install openpyxl')
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Tickets'
+
+    # Jira base URL for building hyperlinks
+    jira_url = JIRA_URL.rstrip('/')
+
+    # ---------------------------------------------------------------
+    # Determine column layout based on table_format
+    # ---------------------------------------------------------------
+    base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary',
+                   'assignee', 'reporter', 'created', 'updated', 'resolved',
+                   'fix_version', 'affects_version']
+
+    is_indented = (table_format == 'indented' and any('depth' in r for r in rows))
+
+    if is_indented:
+        # Calculate max depth
+        max_depth = 0
+        for r in rows:
+            d = r.get('depth')
+            if d is not None:
+                try:
+                    max_depth = max(max_depth, int(d))
+                except (ValueError, TypeError):
+                    pass
+
+        depth_columns = [f'Depth {i}' for i in range(max_depth + 1)]
+        content_fields = [f for f in base_fields if f != 'key']
+
+        # Extra columns excluding depth (already represented by depth columns)
+        all_keys = set(base_fields)
+        for r in rows:
+            all_keys.update(r.keys())
+        extra_columns = sorted(k for k in all_keys if k not in base_fields and k != 'depth')
+
+        fieldnames = depth_columns + content_fields + extra_columns
+    else:
+        # Flat format
+        all_keys = set(base_fields)
+        for r in rows:
+            all_keys.update(r.keys())
+        extra_columns = sorted(k for k in all_keys if k not in base_fields)
+        fieldnames = base_fields + extra_columns
+
+    # ---------------------------------------------------------------
+    # Header row styling
+    # ---------------------------------------------------------------
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+    header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin'),
+    )
+    link_font = Font(color='0563C1', underline='single')
+
+    # Write header
+    for col_idx, field in enumerate(fieldnames, 1):
+        cell = ws.cell(row=1, column=col_idx, value=field)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+        cell.border = thin_border
+
+    # ---------------------------------------------------------------
+    # Data rows
+    # ---------------------------------------------------------------
+    for row_idx, row_data in enumerate(rows, 2):
+        if is_indented:
+            # Build indented row: ticket key goes into the correct Depth column
+            d = 0
+            try:
+                d = int(row_data.get('depth', 0))
+            except (ValueError, TypeError):
+                d = 0
+
+            for col_idx, field in enumerate(fieldnames, 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.border = thin_border
+
+                if field in depth_columns:
+                    # Only populate the depth column matching this row's depth
+                    if field == f'Depth {d}':
+                        ticket_key = row_data.get('key', '')
+                        cell.value = ticket_key
+                        if ticket_key:
+                            cell.hyperlink = f'{jira_url}/browse/{ticket_key}'
+                            cell.font = link_font
+                    else:
+                        cell.value = ''
+                else:
+                    cell.value = row_data.get(field, '')
+        else:
+            # Flat row
+            for col_idx, field in enumerate(fieldnames, 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.border = thin_border
+                value = row_data.get(field, '')
+
+                if field == 'key' and value:
+                    # Render ticket key as a clickable hyperlink
+                    cell.value = value
+                    cell.hyperlink = f'{jira_url}/browse/{value}'
+                    cell.font = link_font
+                else:
+                    cell.value = value
+
+    # ---------------------------------------------------------------
+    # Auto-fit column widths (approximate)
+    # ---------------------------------------------------------------
+    for col_idx, field in enumerate(fieldnames, 1):
+        # Start with header width
+        max_len = len(str(field))
+        # Sample up to 50 data rows for width estimation
+        for row_idx in range(2, min(len(rows) + 2, 52)):
+            cell_val = ws.cell(row=row_idx, column=col_idx).value
+            if cell_val is not None:
+                max_len = max(max_len, len(str(cell_val)))
+        # Cap at 50 characters, minimum 10
+        adjusted_width = min(max(max_len + 2, 10), 50)
+        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = adjusted_width
+
+    # Freeze the header row
+    ws.freeze_panes = 'A2'
+
+    # Enable auto-filter on the header row
+    ws.auto_filter.ref = ws.dimensions
+
+    wb.save(output_path)
+    log.info(f'Wrote {len(rows)} tickets (excel, table_format={table_format}) to: {output_path}')
+
+
+def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, table_format='flat'):
     '''
     Write tickets to a file in the specified format.
 
@@ -2746,6 +2912,9 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None):
         dump_file: Output filename (without extension).
         dump_format: Output format ('csv' or 'json').
         extra_fields: Optional mapping of issue key -> dict of additional fields to include (e.g., {'depth': 1, 'via': 'blocks'}).
+        table_format: Table layout for CSV ('flat' or 'indented'). 'flat' uses a depth column.
+                      'indented' replaces the depth column with per-level columns (Depth 0, Depth 1, ...)
+                      where the ticket key appears in the column matching its depth.
 
     Output:
         None; writes to file.
@@ -2753,10 +2922,12 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None):
     Side Effects:
         Creates or overwrites the output file.
     '''
-    log.debug(f'Entering dump_tickets_to_file(issues_count={len(issues)}, dump_file={dump_file}, dump_format={dump_format}, extra_fields_provided={extra_fields is not None})')
+    log.debug(f'Entering dump_tickets_to_file(issues_count={len(issues)}, dump_file={dump_file}, dump_format={dump_format}, extra_fields_provided={extra_fields is not None}, table_format={table_format})')
     # Add extension if not present
-    if not dump_file.endswith(f'.{dump_format}'):
-        output_path = f'{dump_file}.{dump_format}'
+    # Excel uses .xlsx extension rather than .excel
+    ext = 'xlsx' if dump_format == 'excel' else dump_format
+    if not dump_file.endswith(f'.{ext}'):
+        output_path = f'{dump_file}.{ext}'
     else:
         output_path = dump_file
     
@@ -2830,11 +3001,81 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None):
     if dump_format == 'json':
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(rows, f, indent=2, ensure_ascii=False)
+    elif dump_format == 'excel':
+        _write_excel(rows, output_path, extra_fields, table_format)
     elif dump_format == 'csv':
         if rows:
             base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary',
                            'assignee', 'reporter', 'created', 'updated', 'resolved',
                            'fix_version', 'affects_version']
+
+            # ------------------------------------------------------------------
+            # "indented" table format: replace the depth column with per-level
+            # columns (Depth 0, Depth 1, ...) where the ticket key is placed in
+            # the column matching its depth.  Content columns start after the
+            # deepest depth column.
+            # ------------------------------------------------------------------
+            if table_format == 'indented' and any('depth' in r for r in rows):
+                # Determine the maximum depth across all rows
+                max_depth = 0
+                for r in rows:
+                    d = r.get('depth')
+                    if d is not None:
+                        try:
+                            max_depth = max(max_depth, int(d))
+                        except (ValueError, TypeError):
+                            pass
+
+                # Build depth column names: Depth 0, Depth 1, ...
+                depth_columns = [f'Depth {i}' for i in range(max_depth + 1)]
+
+                # Content columns are everything except 'key' and 'depth'
+                # (key is moved into the depth columns)
+                content_fields = [f for f in base_fields if f != 'key']
+
+                # Collect extra columns (link_via, from_key, relation, etc.) but
+                # exclude 'depth' since it is represented by the depth columns
+                all_keys = set(base_fields)
+                for r in rows:
+                    all_keys.update(r.keys())
+                extra_columns = sorted(k for k in all_keys if k not in base_fields and k != 'depth')
+
+                fieldnames = depth_columns + content_fields + extra_columns
+
+                indented_rows = []
+                for r in rows:
+                    new_row = {}
+                    # Place the ticket key in the correct depth column
+                    d = 0
+                    try:
+                        d = int(r.get('depth', 0))
+                    except (ValueError, TypeError):
+                        d = 0
+                    for col in depth_columns:
+                        new_row[col] = ''
+                    new_row[f'Depth {d}'] = r.get('key', '')
+
+                    # Copy content fields
+                    for f in content_fields:
+                        new_row[f] = r.get(f, '')
+
+                    # Copy extra columns (excluding depth)
+                    for col in extra_columns:
+                        new_row[col] = r.get(col, '')
+
+                    indented_rows.append(new_row)
+
+                with open(output_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(indented_rows)
+
+                log.info(f'Wrote {len(indented_rows)} tickets (indented format, max depth {max_depth}) to: {output_path}')
+                return
+
+            # ------------------------------------------------------------------
+            # "flat" table format (default): depth is a regular column
+            # ------------------------------------------------------------------
             # Collect all keys present across rows (to capture depth/link_via, etc.)
             all_keys = set(base_fields)
             for r in rows:
@@ -4489,6 +4730,18 @@ Date Filters:
         dest='hierarchy',
         help='When used with --get-related, recursively traverse linked issues and children to build a hierarchy. Optional DEPTH limits traversal depth (1 = direct only). Omit DEPTH for unlimited depth.')
     parser.add_argument(
+        '--table-format',
+        type=str,
+        choices=['flat', 'indented'],
+        default='flat',
+        metavar='FORMAT',
+        dest='table_format',
+        help='Table layout for hierarchy CSV output (default: flat). '
+             '"flat" uses a depth column. '
+             '"indented" replaces the depth column with per-level columns (Depth 0, Depth 1, ...) '
+             'where the ticket key appears in the column matching its depth. '
+             'Applies to --get-children and --get-related.')
+    parser.add_argument(
         '--releases',
         nargs='?',
         const='*',
@@ -4605,11 +4858,12 @@ Date Filters:
     parser.add_argument(
         '--dump-format',
         type=str,
-        choices=['csv', 'json'],
+        choices=['csv', 'json', 'excel'],
         default='csv',
         dest='dump_format',
         metavar='FORMAT',
-        help='Output format for dump: csv or json (default: csv).')
+        help='Output format for dump: csv, json, or excel (default: csv). '
+             'Excel format produces .xlsx files with ticket IDs as clickable Jira hyperlinks.')
     
     # Bulk update arguments
     parser.add_argument(
@@ -4965,9 +5219,11 @@ Date Filters:
         parser.error('--hierarchy requires --get-related')
     if args.hierarchy is not None and args.hierarchy < -1:
         parser.error('--hierarchy DEPTH must be -1 (omit for unlimited) or a non-negative integer')
- 
-    # Validate --dump-file and --dump-format usage
- 
+
+    # Validate --table-format usage
+    if args.table_format != 'flat' and not (args.get_children or args.get_related):
+        parser.error('--table-format requires --get-children or --get-related')
+
     # Validate --dump-file and --dump-format usage
     # Allow dump-file with any command that produces tabular/list data
     dump_compatible = (args.get_tickets or jql_specified or release_tickets_specified or
@@ -5118,10 +5374,10 @@ def main():
             get_project_components(jira, args.project, args.date, args.dump_file, args.dump_format)
 
         if args.get_children:
-            get_children_hierarchy(jira, args.project, args.get_children, args.limit, args.dump_file, args.dump_format)
+            get_children_hierarchy(jira, args.project, args.get_children, args.limit, args.dump_file, args.dump_format, args.table_format)
 
         if args.get_related:
-            get_related_issues(jira, args.project, args.get_related, args.hierarchy, args.limit, args.dump_file, args.dump_format)
+            get_related_issues(jira, args.project, args.get_related, args.hierarchy, args.limit, args.dump_file, args.dump_format, args.table_format)
         
         if args.releases:
             if args.get_tickets:

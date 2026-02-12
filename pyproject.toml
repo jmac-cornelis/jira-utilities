@@ -20,6 +20,7 @@ dependencies = [
     "jira>=3.5.0",
     "python-dotenv>=1.0.0",
     "requests>=2.28.0",
+    "openpyxl>=3.1.0",
 ]
 
 # Optional: install the full agent pipeline deps
