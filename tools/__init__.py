@@ -44,6 +44,14 @@ from tools.file_tools import (
     list_directory,
     FileTools,
 )
+from tools.excel_tools import (
+    build_excel_map,
+    concat_excel,
+    excel_to_csv,
+    csv_to_excel,
+    diff_excel,
+    ExcelTools,
+)
 
 __all__ = [
     # Base
@@ -80,4 +88,11 @@ __all__ = [
     'write_file',
     'list_directory',
     'FileTools',
+    # Excel
+    'build_excel_map',
+    'concat_excel',
+    'excel_to_csv',
+    'csv_to_excel',
+    'diff_excel',
+    'ExcelTools',
 ]

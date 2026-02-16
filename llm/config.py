@@ -135,7 +135,8 @@ def get_llm_client(
     config: Optional[LLMConfig] = None,
     provider: Optional[LLMProvider] = None,
     model: Optional[str] = None,
-    for_vision: bool = False
+    for_vision: bool = False,
+    timeout: Optional[float] = None
 ) -> BaseLLM:
     '''
     Factory function to create an LLM client.
@@ -145,6 +146,7 @@ def get_llm_client(
         provider: Optional provider override.
         model: Optional model override.
         for_vision: If True, use vision-specific configuration.
+        timeout: Optional timeout override in seconds. Overrides config.timeout.
     
     Output:
         BaseLLM instance configured for the specified provider.
@@ -155,6 +157,10 @@ def get_llm_client(
     # Load config from environment if not provided
     if config is None:
         config = LLMConfig.from_env()
+    
+    # Apply timeout override if provided
+    if timeout is not None:
+        config.timeout = timeout
     
     # Determine provider and model
     if for_vision and config.vision_provider:

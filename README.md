@@ -12,7 +12,9 @@ An AI-powered agent pipeline for automating Jira release planning at Cornelis Ne
 - [Usage](#usage)
   - [Jira CLI (`jira_utils.py`)](#jira-cli-jira_utilspy)
   - [Draw.io CLI (`drawio_utilities.py`)](#drawio-cli-drawio_utilitiespy)
-  - [Agent Pipeline (`main.py`)](#agent-pipeline-mainpy)
+  - [Excel CLI (`excel_utils.py`)](#excel-cli-excel_utilspy)
+  - [Workflows (`--workflow`)](#workflows---workflow)
+  - [Agent Pipeline (`pm_agent.py`)](#agent-pipeline-pm_agentpy)
 - [Ticket Creation](#ticket-creation)
 - [Agent Pipeline](#agent-pipeline)
 - [Tools](#tools)
@@ -178,7 +180,7 @@ python3 jira_utils.py --list --env .env_prod
 python3 jira_utils.py --list --env .env_sandbox
 ```
 
-> **Note:** The `--env` flag only affects `jira_utils.py`. The agent pipeline (`main.py`) always loads `.env`.
+> **Note:** The `--env` flag only affects `jira_utils.py`. The agent pipeline (`pm_agent.py`) always loads `.env`.
 
 ### LLM Provider Options
 
@@ -449,30 +451,162 @@ python3 drawio_utilities.py --create-map tickets.csv
 
 ---
 
-### Agent Pipeline (`main.py`)
+### Excel CLI (`excel_utils.py`)
+
+Concatenate, convert, and diff Excel (`.xlsx`) workbooks from the command line.
+
+#### Concatenation
+
+```bash
+# Merge all rows from multiple files into a single sheet (columns are unioned)
+python3 excel_utils.py --concat fileA.xlsx fileB.xlsx --method merge-sheet --output merged.xlsx
+
+# Add each file as a separate sheet in the output workbook
+python3 excel_utils.py --concat fileA.xlsx fileB.xlsx --method add-sheet --output combined.xlsx
+
+# Merge all .xlsx files in the current directory
+python3 excel_utils.py --concat *.xlsx --method merge-sheet --output all_data.xlsx
+```
+
+| Flag | Description |
+|------|-------------|
+| `--concat FILE [FILE ...]` | Two or more `.xlsx` files to concatenate |
+| `--method merge-sheet\|add-sheet` | `merge-sheet` (default) merges all rows into one sheet; `add-sheet` creates a sheet per file |
+| `--output FILE` | Output filename (default: `concat_output.xlsx`) |
+
+#### Conversion
+
+```bash
+# Excel → CSV
+python3 excel_utils.py --convert-to-csv data.xlsx
+python3 excel_utils.py --convert-to-csv data.xlsx --output custom_name.csv
+
+# CSV → Excel (with header styling, conditional formatting, auto-fit columns)
+python3 excel_utils.py --convert-from-csv data.csv
+python3 excel_utils.py --convert-from-csv data.csv --output styled.xlsx
+```
+
+| Flag | Description |
+|------|-------------|
+| `--convert-to-csv FILE` | Convert `.xlsx` to comma-delimited `.csv` |
+| `--convert-from-csv FILE` | Convert `.csv` to styled `.xlsx` |
+| `--output FILE` | Override the default output filename |
+
+#### Diff
+
+```bash
+# Diff two files — produces a report with Summary and Diff sheets
+python3 excel_utils.py --diff fileA.xlsx fileB.xlsx --output changes.xlsx
+
+# Pairwise diff across three files (A→B, B→C)
+python3 excel_utils.py --diff v1.xlsx v2.xlsx v3.xlsx
+```
+
+Rows are matched by a key column (`key` if present, otherwise the first column). Each row is marked **ADDED**, **REMOVED**, **CHANGED**, or **SAME**.
+
+| Flag | Description |
+|------|-------------|
+| `--diff FILE [FILE ...]` | Two or more `.xlsx` files to diff |
+| `--output FILE` | Output filename (default: `diff_output.xlsx`) |
+
+#### Formatting Options
+
+All output workbooks include automatic styling by default:
+
+| Feature | Description |
+|---------|-------------|
+| Header styling | Bold white text on dark-blue background, centered, with borders |
+| Status conditional formatting | Cell fill color based on status value (e.g., green for Closed, red for Open) |
+| Priority conditional formatting | Red fill for P0-Stopper, yellow fill for P1-Critical |
+| Auto-fit columns | Column widths adjusted to content |
+| Frozen header row | First row stays visible when scrolling |
+| Auto-filter | Drop-down filters on every column |
+
+Use `--no-formatting` to disable all styling and produce a plain data-only workbook:
+
+```bash
+python3 excel_utils.py --convert-from-csv data.csv --no-formatting
+python3 excel_utils.py --concat *.xlsx --no-formatting
+```
+
+#### Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `-v`, `--verbose` | Enable verbose (DEBUG-level) output |
+| `-q`, `--quiet` | Minimal stdout output |
+| `--no-formatting` | Disable all Excel formatting (header styling, conditional formatting, auto-fit) |
+
+---
+
+### Workflows (`--workflow`)
+
+Multi-step automated pipelines that chain Jira queries, LLM analysis, and Excel formatting into a single command.
+
+#### Bug Report Workflow
+
+Generate a cleaned, enriched bug report from a Jira filter:
+
+```bash
+# Basic usage — looks up filter by name, pulls tickets, sends to LLM, converts to Excel
+python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800
+
+# With debug logging
+python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800 --debug
+
+# Custom prompt file
+python3 pm_agent.py --workflow bug-report --filter "My Filter" --prompt my_prompt.md --timeout 600
+```
+
+**Steps performed:**
+
+| Step | Action | Output |
+|------|--------|--------|
+| 1 | Connect to Jira | — |
+| 2 | Look up filter by name from favourite filters | Filter ID |
+| 3 | Run filter to get tickets with latest comments | Issues list |
+| 4 | Dump tickets to JSON | `<filter_name>.json` |
+| 5 | Send JSON + prompt to LLM for analysis | `llm_output.md` + extracted files |
+| 6 | Convert any extracted CSV to styled Excel | `<name>.xlsx` |
+
+#### Workflow Flags
+
+| Flag | Description |
+|------|-------------|
+| `--workflow NAME` | Workflow to run (currently: `bug-report`) |
+| `--filter NAME` | Jira filter name to look up (required for `bug-report`) |
+| `--prompt FILE` | LLM prompt file (default: `agents/prompts/cn5000_bugs_clean.md`) |
+| `--timeout SECS` | LLM request timeout in seconds |
+| `--limit N` | Max tickets to retrieve |
+| `--output FILE` | Override output filename |
+| `--debug` | Enable debug-level logging |
+
+---
+
+### Agent Pipeline (`pm_agent.py`)
 
 ```bash
 # Run full release planning workflow
-python main.py plan --project PROJ --roadmap slides.pptx --org-chart org.drawio
+python pm_agent.py plan --project PROJ --roadmap slides.pptx --org-chart org.drawio
 
 # Analyze Jira project state
-python main.py analyze --project PROJ --quick
+python pm_agent.py analyze --project PROJ --quick
 
 # Analyze roadmap files
-python main.py vision roadmap.png roadmap.xlsx
+python pm_agent.py vision roadmap.png roadmap.xlsx
 
 # List saved sessions
-python main.py sessions --list
+python pm_agent.py sessions --list
 
 # Resume a saved session
-python main.py resume --session abc123
+python pm_agent.py resume --session abc123
 ```
 
 #### Example Workflow
 
 ```bash
 # 1. Start release planning
-python main.py plan \
+python pm_agent.py plan \
   --project ENG \
   --roadmap "Q1_Roadmap.pptx" \
   --roadmap "Features.xlsx" \
@@ -643,7 +777,7 @@ cornelis-agent/
 ├── plans/                   # Architecture & conversation docs
 ├── jira_utils.py            # Standalone Jira CLI utility (→ jira-utils)
 ├── drawio_utilities.py      # Standalone draw.io CLI utility (→ drawio-utils)
-├── main.py                  # Agent pipeline entry point
+├── pm_agent.py                  # Agent pipeline entry point
 ├── pyproject.toml           # Package metadata & console_scripts (pipx)
 ├── .env.example             # Environment template
 └── requirements.txt         # Dependencies
@@ -683,23 +817,26 @@ pytest tests/test_tools/test_jira_tools.py
 
 ## Standalone Utilities
 
-The CLI utilities can be used standalone (without the agent pipeline). After a `pipx install` they are available globally as `jira-utils` and `drawio-utils`:
+The CLI utilities can be used standalone (without the agent pipeline). After a `pipx install` they are available globally as `jira-utils`, `drawio-utils`, and `excel-utils`:
 
 | Command | Source | Description |
 |---------|--------|-------------|
 | `jira-utils` | [`jira_utils.py`](jira_utils.py) | Full-featured Jira CLI (project queries, ticket creation, bulk ops, dashboards) |
 | `drawio-utils` | [`drawio_utilities.py`](drawio_utilities.py) | Draw.io diagram generator from Jira hierarchy CSV exports |
+| `excel-utils` | [`excel_utils.py`](excel_utils.py) | Excel workbook concatenation, CSV conversion, and diff reporting |
 
-Run either with `-h` for full help:
+Run any of them with `-h` for full help:
 
 ```bash
 # Via pipx (global)
 jira-utils -h
 drawio-utils -h
+excel-utils -h
 
 # Or directly from the repo
 python3 jira_utils.py -h
 python3 drawio_utilities.py -h
+python3 excel_utils.py -h
 ```
 
 ## License

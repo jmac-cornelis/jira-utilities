@@ -111,9 +111,9 @@ def output(message=''):
 
 def print_ticket_table_header():
     '''Print the header row for ticket tables.'''
-    output('-' * 170)
-    output(f'{"Key":<15} {"Type":<12} {"Status":<12} {"Priority":<10} {"Created":<12} {"Updated":<12} {"Fix Version":<15} {"Assignee":<18} {"Summary":<30}')
-    output('-' * 170)
+    output('-' * 195)
+    output(f'{"Key":<15} {"Type":<12} {"Status":<12} {"Priority":<10} {"Created":<12} {"Updated":<12} {"Fix Version":<15} {"Component":<20} {"Assignee":<18} {"Summary":<30}')
+    output('-' * 195)
 
 
 def print_ticket_row(issue):
@@ -149,6 +149,10 @@ def print_ticket_row(issue):
     fix_versions = fields.get('fixVersions', [])
     fix_version = ', '.join([v.get('name', '') for v in fix_versions]) if fix_versions else 'N/A'
     
+    # Extract components for console display
+    components = fields.get('components', [])
+    component = ', '.join([c.get('name', '') for c in components]) if components else 'N/A'
+    
     assignee = fields.get('assignee', {})
     assignee_name = assignee.get('displayName', 'Unassigned') if assignee else 'Unassigned'
     summary = fields.get('summary', 'N/A') or 'N/A'
@@ -162,17 +166,19 @@ def print_ticket_row(issue):
         priority = priority[:8] + '..'
     if len(fix_version) > 13:
         fix_version = fix_version[:13] + '..'
+    if len(component) > 18:
+        component = component[:18] + '..'
     if len(assignee_name) > 16:
         assignee_name = assignee_name[:16] + '..'
     if len(summary) > 28:
         summary = summary[:28] + '..'
     
-    output(f'{key:<15} {issue_type:<12} {status:<12} {priority:<10} {created:<12} {updated:<12} {fix_version:<15} {assignee_name:<18} {summary:<30}')
+    output(f'{key:<15} {issue_type:<12} {status:<12} {priority:<10} {created:<12} {updated:<12} {fix_version:<15} {component:<20} {assignee_name:<18} {summary:<30}')
 
 
 def print_ticket_table_footer(count):
     '''Print the footer row for ticket tables.'''
-    output('=' * 170)
+    output('=' * 195)
     output(f'Total: {count} tickets')
     output('')
 
@@ -269,6 +275,17 @@ def print_gadget_table_footer(count):
 
 # Store the last JQL query for display at end of operation
 _last_jql = None
+
+# Module-level flag: when set to 'all' or 'latest', 'comment' is added to
+# fields_to_fetch lists and dump_tickets_to_file includes parsed comments in
+# JSON output.  Set by main() when --get-comments is active.
+# None = off, 'all' = all comments, 'latest' = comments from the latest day.
+_include_comments = None
+
+# Module-level flag: when True, all Excel formatting (header styling,
+# conditional formatting, auto-fit columns) is suppressed.
+# Set by main() when --no-formatting is active.
+_no_formatting = False
 
 def show_jql(jql):
     '''
@@ -1369,14 +1386,141 @@ def match_pattern_with_exclusions(name, pattern):
     return not excluded
 
 
+def _get_children_data(jira, root_key, limit=None):
+    '''
+    Core data-gathering logic for get_children_hierarchy.
+    Recursively retrieves the full child hierarchy for a given ticket.
+
+    Traversal strategy:
+      - Uses JQL `parent = "<key>"` to find children (Advanced Roadmaps/parent links and subtasks).
+      - Recurses depth-first until no more children or the optional limit is reached.
+      - Includes the root ticket in the output.
+
+    Input:
+        jira: JIRA object with active connection.
+        root_key: Issue key to start from (required).
+        limit: Optional maximum number of tickets to return (including root).
+
+    Output:
+        List of dicts with keys: issue (raw dict), depth (int).
+        Does NOT print or dump to file.
+    '''
+    log.debug(f'Entering _get_children_data(root_key={root_key}, limit={limit})')
+
+    # Helper: fetch a single issue and return its raw dict (matches search API structure)
+    def _fetch_issue_raw(issue_key):
+        log.debug(f'Fetching root/child issue via jira.issue: {issue_key}')
+        issue_obj = jira.issue(issue_key)
+        return issue_obj.raw
+
+    # Helper: search for direct children of a parent key using the /rest/api/3/search/jql endpoint
+    def _fetch_children(parent_key, remaining_limit=None):
+        email, api_token = get_jira_credentials()
+        all_children = []
+        next_page_token = None
+        batch_size = 100
+        max_retries = 5
+
+        # Fields needed for display/dump; keep aligned with print_ticket_row/dump_tickets_to_file
+        fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'parent']
+        if _include_comments:
+            fields_to_fetch.append('comment')
+
+        while True:
+            if remaining_limit is not None and remaining_limit <= 0:
+                break
+
+            current_batch = batch_size
+            if remaining_limit is not None:
+                current_batch = min(batch_size, remaining_limit)
+
+            payload = {
+                'jql': f'parent = "{parent_key}"',
+                'maxResults': current_batch,
+                'fields': fields_to_fetch
+            }
+            if next_page_token:
+                payload['nextPageToken'] = next_page_token
+
+            # Record the top-level JQL (first page) for --show-jql visibility
+            if not next_page_token:
+                show_jql(payload['jql'])
+
+            for retry in range(max_retries):
+                response = requests.post(
+                    f'{JIRA_URL}/rest/api/3/search/jql',
+                    auth=(email, api_token),
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    json=payload
+                )
+
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+
+            if response.status_code != 200:
+                log.error(f'Child search failed for {parent_key}: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+
+            data = response.json()
+            issues = data.get('issues', [])
+            all_children.extend(issues)
+
+            next_page_token = data.get('nextPageToken')
+
+            if remaining_limit is not None:
+                remaining_limit -= len(issues)
+                if remaining_limit <= 0:
+                    break
+
+            if not next_page_token:
+                break
+
+        return all_children
+
+    visited = set()
+    ordered = []  # list of {'issue': issue_dict, 'depth': depth}
+
+    def _recurse(current_key, depth, remaining_limit):
+        if remaining_limit is not None and len(ordered) >= remaining_limit:
+            return
+
+        children = _fetch_children(current_key, None if remaining_limit is None else (remaining_limit - len(ordered)))
+
+        for child in children:
+            child_key = child.get('key')
+            if not child_key or child_key in visited:
+                continue
+
+            visited.add(child_key)
+            ordered.append({'issue': child, 'depth': depth + 1})
+
+            # Recurse further if limit not reached
+            _recurse(child_key, depth + 1, remaining_limit)
+
+    # Seed with root issue
+    root_issue = _fetch_issue_raw(root_key)
+    visited.add(root_key)
+    ordered.append({'issue': root_issue, 'depth': 0})
+
+    _recurse(root_key, 0, limit)
+
+    # Apply limit after traversal (in case root counts toward limit)
+    if limit is not None and len(ordered) > limit:
+        ordered = ordered[:limit]
+
+    log.debug(f'_get_children_data: found {len(ordered)} tickets for {root_key}')
+    return ordered
+
+
 def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, dump_file=None, dump_format='csv', table_format='flat'):
     '''
     Recursively retrieve and display the full child hierarchy for a given ticket.
 
-    Traversal strategy:
-      - Uses JQL `parent = "<key>"` to find children (Advanced Roadmaps/parent links and subtasks).
-      - Recurses depth-first until no more children or the optional --limit is reached.
-      - Includes the root ticket in the output.
+    Delegates data gathering to _get_children_data(), then handles display and file output.
 
     Input:
         jira: JIRA object with active connection.
@@ -1399,108 +1543,8 @@ def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, du
         raise ValueError('root_key is required for get_children_hierarchy')
 
     try:
-        # Helper: fetch a single issue and return its raw dict (matches search API structure)
-        def _fetch_issue_raw(issue_key):
-            log.debug(f'Fetching root/child issue via jira.issue: {issue_key}')
-            issue_obj = jira.issue(issue_key)
-            return issue_obj.raw
-
-        # Helper: search for direct children of a parent key using the /rest/api/3/search/jql endpoint
-        def _fetch_children(parent_key, remaining_limit=None):
-            email, api_token = get_jira_credentials()
-            all_children = []
-            next_page_token = None
-            batch_size = 100
-            max_retries = 5
-
-            # Fields needed for display/dump; keep aligned with print_ticket_row/dump_tickets_to_file
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'parent']
-
-            while True:
-                if remaining_limit is not None and remaining_limit <= 0:
-                    break
-
-                current_batch = batch_size
-                if remaining_limit is not None:
-                    current_batch = min(batch_size, remaining_limit)
-
-                payload = {
-                    'jql': f'parent = "{parent_key}"',
-                    'maxResults': current_batch,
-                    'fields': fields_to_fetch
-                }
-                if next_page_token:
-                    payload['nextPageToken'] = next_page_token
-
-                # Record the top-level JQL (first page) for --show-jql visibility
-                if not next_page_token:
-                    show_jql(payload['jql'])
-
-                for retry in range(max_retries):
-                    response = requests.post(
-                        f'{JIRA_URL}/rest/api/3/search/jql',
-                        auth=(email, api_token),
-                        headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
-                        json=payload
-                    )
-
-                    if response.status_code == 429:
-                        retry_after = int(response.headers.get('Retry-After', 5))
-                        log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
-                        time.sleep(retry_after)
-                        continue
-                    break
-
-                if response.status_code != 200:
-                    log.error(f'Child search failed for {parent_key}: {response.status_code} - {response.text}')
-                    raise Exception(f'Jira API error: {response.status_code} - {response.text}')
-
-                data = response.json()
-                issues = data.get('issues', [])
-                all_children.extend(issues)
-
-                next_page_token = data.get('nextPageToken')
-
-                if remaining_limit is not None:
-                    remaining_limit -= len(issues)
-                    if remaining_limit <= 0:
-                        break
-
-                if not next_page_token:
-                    break
-
-            return all_children
-
-        visited = set()
-        ordered = []  # list of {'issue': issue_dict, 'depth': depth}
-
-        def _recurse(current_key, depth, remaining_limit):
-            if remaining_limit is not None and len(ordered) >= remaining_limit:
-                return
-
-            children = _fetch_children(current_key, None if remaining_limit is None else (remaining_limit - len(ordered)))
-
-            for child in children:
-                child_key = child.get('key')
-                if not child_key or child_key in visited:
-                    continue
-
-                visited.add(child_key)
-                ordered.append({'issue': child, 'depth': depth + 1})
-
-                # Recurse further if limit not reached
-                _recurse(child_key, depth + 1, remaining_limit)
-
-        # Seed with root issue
-        root_issue = _fetch_issue_raw(root_key)
-        visited.add(root_key)
-        ordered.append({'issue': root_issue, 'depth': 0})
-
-        _recurse(root_key, 0, limit)
-
-        # Apply limit after traversal (in case root counts toward limit)
-        if limit is not None and len(ordered) > limit:
-            ordered = ordered[:limit]
+        # Delegate data gathering to the reusable inner function
+        ordered = _get_children_data(jira, root_key, limit=limit)
 
         # Output hierarchy view
         output('')
@@ -1544,294 +1588,324 @@ def get_children_hierarchy(jira, project_key=None, root_key=None, limit=None, du
                 }
                 for item in ordered
             }
-            dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras, table_format=table_format)
+            dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras, table_format=table_format, include_comments=_include_comments)
 
     except Exception as e:
         log.error(f'Failed to get children hierarchy: {e}')
         raise
 
 
+def _get_related_data(jira, root_key, hierarchy=None, limit=None):
+    '''
+    Core data-gathering logic for get_related_issues.
+    Retrieves related issues (links + children) for a given ticket.
+
+    Traversal strategy:
+      - Direct links + direct children when hierarchy is None.
+      - Depth-first traversal across both links and children when hierarchy is provided.
+      - Guards against cycles by tracking visited issue keys.
+      - Includes the root ticket in the output.
+
+    Input:
+        jira: JIRA object with active connection.
+        root_key: Issue key to start from (required).
+        hierarchy: None for direct-only, -1 for unlimited depth, or positive int for depth limit.
+        limit: Optional maximum number of tickets to return (including root).
+
+    Output:
+        List of dicts with keys: issue (raw dict), depth (int), via (str|None),
+        relation (str|None), from_key (str|None).
+        Does NOT print or dump to file.
+    '''
+    log.debug(f'Entering _get_related_data(root_key={root_key}, hierarchy={hierarchy}, limit={limit})')
+
+    fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'issuelinks']
+    if _include_comments:
+        fields_to_fetch.append('comment')
+
+    def _fetch_issue_raw(issue_key):
+        log.debug(f'Fetching issue for related traversal: {issue_key}')
+        issue_obj = jira.issue(issue_key, fields=','.join(fields_to_fetch))
+        return issue_obj.raw
+
+    def _collect_links(issue_raw):
+        links = issue_raw.get('fields', {}).get('issuelinks', []) or []
+        edges = []  # list of (target_key, via_label, relation)
+        for link in links:
+            link_type = link.get('type', {}) or {}
+            inward_label = link_type.get('inward') or link_type.get('name') or 'linked'
+            outward_label = link_type.get('outward') or link_type.get('name') or 'linked'
+
+            if 'outwardIssue' in link:
+                tgt = link.get('outwardIssue') or {}
+                tgt_key = tgt.get('key')
+                if tgt_key:
+                    edges.append((tgt_key, outward_label, 'link'))
+
+            if 'inwardIssue' in link:
+                tgt = link.get('inwardIssue') or {}
+                tgt_key = tgt.get('key')
+                if tgt_key:
+                    edges.append((tgt_key, inward_label, 'link'))
+        return edges
+
+    def _fetch_children_keys(parent_key, remaining_limit=None):
+        '''
+        Fetch direct children for a parent issue using JQL `parent = "<key>"`.
+
+        Note:
+            This mirrors the approach used in _get_children_data(), but returns only keys
+            so we can unify traversal across links + children without duplicating issue dicts.
+        '''
+        email, api_token = get_jira_credentials()
+        all_child_keys = []
+        next_page_token = None
+        batch_size = 100
+        max_retries = 5
+
+        while True:
+            if remaining_limit is not None and remaining_limit <= 0:
+                break
+
+            current_batch = batch_size
+            if remaining_limit is not None:
+                current_batch = min(batch_size, remaining_limit)
+
+            payload = {
+                'jql': f'parent = "{parent_key}"',
+                'maxResults': current_batch,
+                # We only need keys; keep fields minimal to reduce payload size.
+                'fields': ['summary']
+            }
+            if next_page_token:
+                payload['nextPageToken'] = next_page_token
+
+            # Record the top-level JQL (first page) for --show-jql visibility
+            if not next_page_token:
+                show_jql(payload['jql'])
+
+            for retry in range(max_retries):
+                response = requests.post(
+                    f'{JIRA_URL}/rest/api/3/search/jql',
+                    auth=(email, api_token),
+                    headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                    json=payload
+                )
+
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+
+            if response.status_code != 200:
+                log.error(f'Child search failed for {parent_key}: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+
+            data = response.json()
+            issues = data.get('issues', [])
+
+            for issue in issues:
+                child_key = issue.get('key')
+                if child_key:
+                    all_child_keys.append(child_key)
+
+            next_page_token = data.get('nextPageToken')
+
+            if remaining_limit is not None:
+                remaining_limit -= len(issues)
+                if remaining_limit <= 0:
+                    break
+
+            if not next_page_token:
+                break
+
+        return all_child_keys
+
+    def _collect_children(parent_key, remaining_limit=None):
+        # Children are modeled as edges from parent -> child
+        child_keys = _fetch_children_keys(parent_key, remaining_limit)
+        return [(k, 'child', 'child') for k in child_keys if k]
+
+    visited = set()
+    ordered = []  # list of {'issue': issue_dict, 'depth': depth, 'via': label, 'relation': str, 'from_key': str}
+
+    def _traverse(issue_key, issue_raw, depth, remaining_limit, remaining_depth):
+        if remaining_limit is not None and len(ordered) >= remaining_limit:
+            return
+        if remaining_depth is not None and remaining_depth <= 0:
+            return
+
+        # 1) Traverse linked issues (existing behavior)
+        edges = _collect_links(issue_raw)
+        for tgt_key, via, relation in edges:
+            if remaining_limit is not None and len(ordered) >= remaining_limit:
+                break
+            if tgt_key in visited:
+                continue
+
+            tgt_raw = _fetch_issue_raw(tgt_key)
+            visited.add(tgt_key)
+            ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via, 'relation': relation, 'from_key': issue_key})
+
+            if hierarchy is not None:
+                _traverse(tgt_key, tgt_raw, depth + 1, remaining_limit, None if remaining_depth is None else remaining_depth - 1)
+
+        # 2) Also traverse child tickets (parent -> child) according to the same hierarchy depth
+        if remaining_limit is None or len(ordered) < remaining_limit:
+            remaining_slots = None if remaining_limit is None else (remaining_limit - len(ordered))
+            child_edges = _collect_children(issue_key, remaining_slots)
+            for tgt_key, via, relation in child_edges:
+                if remaining_limit is not None and len(ordered) >= remaining_limit:
+                    break
+                if tgt_key in visited:
+                    continue
+
+                tgt_raw = _fetch_issue_raw(tgt_key)
+                visited.add(tgt_key)
+                ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via, 'relation': relation, 'from_key': issue_key})
+
+                if hierarchy is not None:
+                    _traverse(tgt_key, tgt_raw, depth + 1, remaining_limit, None if remaining_depth is None else remaining_depth - 1)
+
+    # Seed with root issue
+    root_issue = _fetch_issue_raw(root_key)
+    visited.add(root_key)
+    ordered.append({'issue': root_issue, 'depth': 0, 'via': None, 'relation': None, 'from_key': None})
+
+    if hierarchy is not None:
+        # hierarchy: None -> direct, -1 -> unlimited, n>0 -> depth-limited
+        depth_limit = None if hierarchy == -1 else hierarchy
+        _traverse(root_key, root_issue, 0, limit, depth_limit)
+    else:
+        # Only direct links + direct children
+        edges = _collect_links(root_issue)
+        for tgt_key, via, relation in edges:
+            if limit is not None and len(ordered) >= limit:
+                break
+            if tgt_key in visited:
+                continue
+            tgt_raw = _fetch_issue_raw(tgt_key)
+            visited.add(tgt_key)
+            ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via, 'relation': relation, 'from_key': root_key})
+
+        if limit is None or len(ordered) < limit:
+            remaining_slots = None if limit is None else (limit - len(ordered))
+            child_edges = _collect_children(root_key, remaining_slots)
+            for tgt_key, via, relation in child_edges:
+                if limit is not None and len(ordered) >= limit:
+                    break
+                if tgt_key in visited:
+                    continue
+                tgt_raw = _fetch_issue_raw(tgt_key)
+                visited.add(tgt_key)
+                ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via, 'relation': relation, 'from_key': root_key})
+
+    # Apply limit after traversal (in case root counts toward limit)
+    if limit is not None and len(ordered) > limit:
+        ordered = ordered[:limit]
+
+    log.debug(f'_get_related_data: found {len(ordered)} tickets for {root_key}')
+    return ordered
+
+
 def get_related_issues(jira, project_key=None, root_key=None, hierarchy=None, limit=None, dump_file=None, dump_format='csv', table_format='flat'):
-   '''
-   Retrieve related issues for a given ticket.
+    '''
+    Retrieve related issues for a given ticket.
 
-   "Related" includes:
-     - Linked issues (issuelinks)
-     - Children discovered via JQL `parent = "<key>"`
+    Delegates data gathering to _get_related_data(), then handles display and file output.
 
-   Traversal strategy:
-     - Direct links + direct children when --hierarchy is not provided.
-     - Depth-first traversal across both links and children when --hierarchy is provided.
-     - Guards against cycles by tracking visited issue keys.
-     - Includes the root ticket in the output.
+    "Related" includes:
+      - Linked issues (issuelinks)
+      - Children discovered via JQL `parent = "<key>"`
 
-   Input:
-       jira: JIRA object with active connection.
-       project_key: Optional project key (validated if provided).
-       root_key: Issue key to start from (required).
-       hierarchy: None for direct-only, -1 for unlimited depth, or positive int for depth limit.
-       limit: Optional maximum number of tickets to return (including root).
-       dump_file: Optional output filename (extension added automatically).
-       dump_format: Output format ('csv' or 'json').
+    Input:
+        jira: JIRA object with active connection.
+        project_key: Optional project key (validated if provided).
+        root_key: Issue key to start from (required).
+        hierarchy: None for direct-only, -1 for unlimited depth, or positive int for depth limit.
+        limit: Optional maximum number of tickets to return (including root).
+        dump_file: Optional output filename (extension added automatically).
+        dump_format: Output format ('csv' or 'json').
+        table_format: Table layout for CSV ('flat' or 'indented').
 
-   Output:
-       None; prints a linked view, a table, and optionally writes to file.
-       Use drawio_utilities.py --create-map on the CSV output to generate a draw.io diagram.
-   '''
-   log.debug(f'Entering get_related_issues(project_key={project_key}, root_key={root_key}, hierarchy={hierarchy}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+    Output:
+        None; prints a linked view, a table, and optionally writes to file.
+        Use drawio_utilities.py --create-map on the CSV output to generate a draw.io diagram.
+    '''
+    log.debug(f'Entering get_related_issues(project_key={project_key}, root_key={root_key}, hierarchy={hierarchy}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
 
-   if project_key:
-       validate_project(jira, project_key)
-   if not root_key:
-       raise ValueError('root_key is required for get_related_issues')
+    if project_key:
+        validate_project(jira, project_key)
+    if not root_key:
+        raise ValueError('root_key is required for get_related_issues')
 
-   log.info(f'Getting related tickets to {root_key}. May take some time...')
+    log.info(f'Getting related tickets to {root_key}. May take some time...')
 
-   try:
-       fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'issuelinks']
+    try:
+        # Delegate data gathering to the reusable inner function
+        ordered = _get_related_data(jira, root_key, hierarchy=hierarchy, limit=limit)
 
-       def _fetch_issue_raw(issue_key):
-           log.debug(f'Fetching issue for related traversal: {issue_key}')
-           issue_obj = jira.issue(issue_key, fields=','.join(fields_to_fetch))
-           return issue_obj.raw
+        # Output linked view
+        output('')
+        output('=' * 120)
+        output(f'Related Issues for: {root_key}')
+        if project_key:
+            output(f'Project: {project_key}')
+        if hierarchy is None:
+            output('Traversal: direct links + direct children')
+        elif hierarchy == -1:
+            output('Traversal: recursive across links + children (unlimited depth)')
+        else:
+            output(f'Traversal: recursive across links + children (depth <= {hierarchy})')
+        if limit:
+            output(f'Limit: {limit} (includes root)')
+        output('=' * 120)
 
-       def _collect_links(issue_raw):
-           links = issue_raw.get('fields', {}).get('issuelinks', []) or []
-           edges = []  # list of (target_key, via_label, relation)
-           for link in links:
-               link_type = link.get('type', {}) or {}
-               inward_label = link_type.get('inward') or link_type.get('name') or 'linked'
-               outward_label = link_type.get('outward') or link_type.get('name') or 'linked'
+        output('Related issues (depth-indented):')
+        for item in ordered:
+            issue = item['issue']
+            fields = issue.get('fields', {})
+            indent = '  ' * item['depth']
+            summary = fields.get('summary', 'N/A') or 'N/A'
+            issue_type = fields.get('issuetype', {}).get('name', 'N/A') if fields.get('issuetype') else 'N/A'
+            status = fields.get('status', {}).get('name', 'N/A') if fields.get('status') else 'N/A'
+            via = item.get('via')
+            via_label = f' via {via}' if via else ''
+            output(f'{indent}- {issue.get("key", "N/A")} [{issue_type} | {status}]{via_label} {summary}')
 
-               if 'outwardIssue' in link:
-                   tgt = link.get('outwardIssue') or {}
-                   tgt_key = tgt.get('key')
-                   if tgt_key:
-                       edges.append((tgt_key, outward_label, 'link'))
+        output('')
+        output('Table:')
+        print_ticket_table_header()
 
-               if 'inwardIssue' in link:
-                   tgt = link.get('inwardIssue') or {}
-                   tgt_key = tgt.get('key')
-                   if tgt_key:
-                       edges.append((tgt_key, inward_label, 'link'))
-           return edges
+        for item in ordered:
+            issue = item['issue']
+            fields = issue.get('fields', {})
+            summary = fields.get('summary', 'N/A') or 'N/A'
+            via = item.get('via')
+            if via:
+                summary = f'{summary} (via {via})'
+            fields['summary'] = f'{"  " * item["depth"]}{summary}'
+            print_ticket_row(issue)
 
-       def _fetch_children_keys(parent_key, remaining_limit=None):
-           '''
-           Fetch direct children for a parent issue using JQL `parent = "<key>"`.
+        print_ticket_table_footer(len(ordered))
 
-           Note:
-               This mirrors the approach used in get_children_hierarchy(), but returns only keys
-               so we can unify traversal across links + children without duplicating issue dicts.
-           '''
-           email, api_token = get_jira_credentials()
-           all_child_keys = []
-           next_page_token = None
-           batch_size = 100
-           max_retries = 5
+        if dump_file:
+            extras = {
+                item['issue'].get('key', ''): {
+                    'depth': item.get('depth'),
+                    'via': item.get('via'),
+                    'relation': item.get('relation'),
+                    'from_key': item.get('from_key'),
+                }
+                for item in ordered
+            }
+            dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras, table_format=table_format, include_comments=_include_comments)
 
-           while True:
-               if remaining_limit is not None and remaining_limit <= 0:
-                   break
-
-               current_batch = batch_size
-               if remaining_limit is not None:
-                   current_batch = min(batch_size, remaining_limit)
-
-               payload = {
-                   'jql': f'parent = "{parent_key}"',
-                   'maxResults': current_batch,
-                   # We only need keys; keep fields minimal to reduce payload size.
-                   'fields': ['summary']
-               }
-               if next_page_token:
-                   payload['nextPageToken'] = next_page_token
-
-               # Record the top-level JQL (first page) for --show-jql visibility
-               if not next_page_token:
-                   show_jql(payload['jql'])
-
-               for retry in range(max_retries):
-                   response = requests.post(
-                       f'{JIRA_URL}/rest/api/3/search/jql',
-                       auth=(email, api_token),
-                       headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
-                       json=payload
-                   )
-
-                   if response.status_code == 429:
-                       retry_after = int(response.headers.get('Retry-After', 5))
-                       log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
-                       time.sleep(retry_after)
-                       continue
-                   break
-
-               if response.status_code != 200:
-                   log.error(f'Child search failed for {parent_key}: {response.status_code} - {response.text}')
-                   raise Exception(f'Jira API error: {response.status_code} - {response.text}')
-
-               data = response.json()
-               issues = data.get('issues', [])
-
-               for issue in issues:
-                   child_key = issue.get('key')
-                   if child_key:
-                       all_child_keys.append(child_key)
-
-               next_page_token = data.get('nextPageToken')
-
-               if remaining_limit is not None:
-                   remaining_limit -= len(issues)
-                   if remaining_limit <= 0:
-                       break
-
-               if not next_page_token:
-                   break
-
-           return all_child_keys
-
-       def _collect_children(parent_key, remaining_limit=None):
-           # Children are modeled as edges from parent -> child
-           child_keys = _fetch_children_keys(parent_key, remaining_limit)
-           return [(k, 'child', 'child') for k in child_keys if k]
-
-       visited = set()
-       ordered = []  # list of {'issue': issue_dict, 'depth': depth, 'via': label, 'relation': str, 'from_key': str}
-
-       def _traverse(issue_key, issue_raw, depth, remaining_limit, remaining_depth):
-           if remaining_limit is not None and len(ordered) >= remaining_limit:
-               return
-           if remaining_depth is not None and remaining_depth <= 0:
-               return
-
-           # 1) Traverse linked issues (existing behavior)
-           edges = _collect_links(issue_raw)
-           for tgt_key, via, relation in edges:
-               if remaining_limit is not None and len(ordered) >= remaining_limit:
-                   break
-               if tgt_key in visited:
-                   continue
-
-               tgt_raw = _fetch_issue_raw(tgt_key)
-               visited.add(tgt_key)
-               ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via, 'relation': relation, 'from_key': issue_key})
-
-               if hierarchy is not None:
-                   _traverse(tgt_key, tgt_raw, depth + 1, remaining_limit, None if remaining_depth is None else remaining_depth - 1)
-
-           # 2) Also traverse child tickets (parent -> child) according to the same hierarchy depth
-           if remaining_limit is None or len(ordered) < remaining_limit:
-               remaining_slots = None if remaining_limit is None else (remaining_limit - len(ordered))
-               child_edges = _collect_children(issue_key, remaining_slots)
-               for tgt_key, via, relation in child_edges:
-                   if remaining_limit is not None and len(ordered) >= remaining_limit:
-                       break
-                   if tgt_key in visited:
-                       continue
-
-                   tgt_raw = _fetch_issue_raw(tgt_key)
-                   visited.add(tgt_key)
-                   ordered.append({'issue': tgt_raw, 'depth': depth + 1, 'via': via, 'relation': relation, 'from_key': issue_key})
-
-                   if hierarchy is not None:
-                       _traverse(tgt_key, tgt_raw, depth + 1, remaining_limit, None if remaining_depth is None else remaining_depth - 1)
-
-       # Seed with root issue
-       root_issue = _fetch_issue_raw(root_key)
-       visited.add(root_key)
-       ordered.append({'issue': root_issue, 'depth': 0, 'via': None, 'relation': None, 'from_key': None})
-
-       if hierarchy is not None:
-           # hierarchy: None -> direct, -1 -> unlimited, n>0 -> depth-limited
-           depth_limit = None if hierarchy == -1 else hierarchy
-           _traverse(root_key, root_issue, 0, limit, depth_limit)
-       else:
-           # Only direct links + direct children
-           edges = _collect_links(root_issue)
-           for tgt_key, via, relation in edges:
-               if limit is not None and len(ordered) >= limit:
-                   break
-               if tgt_key in visited:
-                   continue
-               tgt_raw = _fetch_issue_raw(tgt_key)
-               visited.add(tgt_key)
-               ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via, 'relation': relation, 'from_key': root_key})
-
-           if limit is None or len(ordered) < limit:
-               remaining_slots = None if limit is None else (limit - len(ordered))
-               child_edges = _collect_children(root_key, remaining_slots)
-               for tgt_key, via, relation in child_edges:
-                   if limit is not None and len(ordered) >= limit:
-                       break
-                   if tgt_key in visited:
-                       continue
-                   tgt_raw = _fetch_issue_raw(tgt_key)
-                   visited.add(tgt_key)
-                   ordered.append({'issue': tgt_raw, 'depth': 1, 'via': via, 'relation': relation, 'from_key': root_key})
-
-       # Apply limit after traversal (in case root counts toward limit)
-       if limit is not None and len(ordered) > limit:
-           ordered = ordered[:limit]
-
-       # Output linked view
-       output('')
-       output('=' * 120)
-       output(f'Related Issues for: {root_key}')
-       if project_key:
-           output(f'Project: {project_key}')
-       if hierarchy is None:
-           output('Traversal: direct links + direct children')
-       elif hierarchy == -1:
-           output('Traversal: recursive across links + children (unlimited depth)')
-       else:
-           output(f'Traversal: recursive across links + children (depth <= {hierarchy})')
-       if limit:
-           output(f'Limit: {limit} (includes root)')
-       output('=' * 120)
-
-       output('Related issues (depth-indented):')
-       for item in ordered:
-           issue = item['issue']
-           fields = issue.get('fields', {})
-           indent = '  ' * item['depth']
-           summary = fields.get('summary', 'N/A') or 'N/A'
-           issue_type = fields.get('issuetype', {}).get('name', 'N/A') if fields.get('issuetype') else 'N/A'
-           status = fields.get('status', {}).get('name', 'N/A') if fields.get('status') else 'N/A'
-           via = item.get('via')
-           via_label = f' via {via}' if via else ''
-           output(f'{indent}- {issue.get("key", "N/A")} [{issue_type} | {status}]{via_label} {summary}')
-
-       output('')
-       output('Table:')
-       print_ticket_table_header()
-
-       for item in ordered:
-           issue = item['issue']
-           fields = issue.get('fields', {})
-           summary = fields.get('summary', 'N/A') or 'N/A'
-           via = item.get('via')
-           if via:
-               summary = f'{summary} (via {via})'
-           fields['summary'] = f'{"  " * item["depth"]}{summary}'
-           print_ticket_row(issue)
-
-       print_ticket_table_footer(len(ordered))
-
-       if dump_file:
-           extras = {
-               item['issue'].get('key', ''): {
-                   'depth': item.get('depth'),
-                   'via': item.get('via'),
-                   'relation': item.get('relation'),
-                   'from_key': item.get('from_key'),
-               }
-               for item in ordered
-           }
-           dump_tickets_to_file([item['issue'] for item in ordered], dump_file, dump_format, extras, table_format=table_format)
-
-   except Exception as e:
-       log.error(f'Failed to get related issues: {e}')
-       raise
+    except Exception as e:
+        log.error(f'Failed to get related issues: {e}')
+        raise
 
 
 def get_releases(jira, project_key, pattern=None, dump_file=None, dump_format='csv'):
@@ -2034,7 +2108,9 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            if _include_comments:
+                fields_to_fetch.append('comment')
             if dump_file:
                 fields_to_fetch.extend(['reporter', 'resolutiondate'])
             
@@ -2115,7 +2191,7 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
         print_ticket_table_footer(len(all_issues))
         
         if dump_file:
-            dump_tickets_to_file(all_issues, dump_file, dump_format)
+            dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
         
     except JiraProjectError:
         raise
@@ -2211,7 +2287,9 @@ def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, s
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            if _include_comments:
+                fields_to_fetch.append('comment')
             if dump_file:
                 fields_to_fetch.extend(['reporter', 'resolutiondate'])
             
@@ -2289,7 +2367,7 @@ def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, s
         
         # Dump to file if requested
         if dump_file and all_issues:
-            dump_tickets_to_file(all_issues, dump_file, dump_format)
+            dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
         
     except JiraProjectError:
         raise
@@ -2368,7 +2446,9 @@ def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, d
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            if _include_comments:
+                fields_to_fetch.append('comment')
             if dump_file:
                 fields_to_fetch.extend(['reporter', 'resolutiondate'])
             
@@ -2449,7 +2529,7 @@ def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, d
         print_ticket_table_footer(len(all_issues))
         
         if dump_file:
-            dump_tickets_to_file(all_issues, dump_file, dump_format)
+            dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
         
     except JiraProjectError:
         raise
@@ -2646,7 +2726,9 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
                 current_batch = batch_size
             
             # Build request payload - include extra fields if dumping
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            if _include_comments:
+                fields_to_fetch.append('comment')
             if dump_file:
                 fields_to_fetch.extend(['reporter', 'resolutiondate'])
             
@@ -2733,7 +2815,7 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
         
         # Dump to file if requested
         if dump_file:
-            dump_tickets_to_file(all_issues, dump_file, dump_format)
+            dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
         
     except JiraProjectError:
         raise
@@ -2743,6 +2825,128 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
     except Exception as e:
         log.error(f'Failed to get tickets: {e}')
         raise
+
+
+# Status-to-fill color mapping for Excel conditional formatting.
+# These are embedded as dynamic Excel rules so they update if the user edits
+# status values in the spreadsheet.
+STATUS_FILL_COLORS = {
+    'Open':        'CCE5FF',   # Light blue
+    'In Progress': 'CCFFCC',   # Light green
+    'Verify':      'E5CCFF',   # Light purple
+    'Ready':       'FFFFCC',   # Light yellow
+    'Closed':      'FFFFFF',   # White
+}
+
+# Priority-to-fill/font color mapping for Excel conditional formatting.
+# Each entry maps a priority value to (fill_hex, font_hex).
+PRIORITY_FILL_COLORS = {
+    'P0-Stopper':  ('FF0000', 'FFFFFF'),   # Red fill, white text
+    'P1-Critical': ('FFFF00', '000000'),   # Yellow fill, black text
+}
+
+
+def _apply_status_conditional_formatting(ws, fieldnames):
+    '''
+    Add Excel conditional formatting rules to the status column.
+
+    Each rule highlights the status cell with a fill color based on its value.
+    Rules are dynamic — they are evaluated by Excel/LibreOffice when the file
+    is opened, so they update if the user edits status values.
+
+    Input:
+        ws: openpyxl Worksheet object (already populated with data).
+        fieldnames: List of column header names (to locate the status column).
+
+    Side Effects:
+        Adds conditional formatting rules to the worksheet.
+    '''
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import PatternFill
+    from openpyxl.utils import get_column_letter
+
+    # Find the status column index (1-based)
+    status_col_idx = None
+    for idx, name in enumerate(fieldnames, 1):
+        if name.lower() == 'status':
+            status_col_idx = idx
+            break
+
+    if status_col_idx is None:
+        log.debug('No "status" column found — skipping conditional formatting')
+        return
+
+    col_letter = get_column_letter(status_col_idx)
+    # Apply rules from row 2 (skip header) to the last data row
+    last_row = ws.max_row
+    if last_row < 2:
+        return
+
+    cell_range = f'{col_letter}2:{col_letter}{last_row}'
+    log.debug(f'Applying status conditional formatting to range {cell_range}')
+
+    for status_value, hex_color in STATUS_FILL_COLORS.items():
+        fill = PatternFill(start_color=hex_color, end_color=hex_color, fill_type='solid')
+        rule = CellIsRule(
+            operator='equal',
+            formula=[f'"{status_value}"'],
+            fill=fill,
+        )
+        ws.conditional_formatting.add(cell_range, rule)
+
+    log.debug(f'Added {len(STATUS_FILL_COLORS)} conditional formatting rules for status column')
+
+
+def _apply_priority_conditional_formatting(ws, fieldnames):
+    '''
+    Add Excel conditional formatting rules to the priority column.
+
+    Highlights priority cells based on their value:
+      - P0-Stopper:  red fill, white text
+      - P1-Critical: yellow fill, black text
+
+    Input:
+        ws: openpyxl Worksheet object (already populated with data).
+        fieldnames: List of column header names (to locate the priority column).
+
+    Side Effects:
+        Adds conditional formatting rules to the worksheet.
+    '''
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import PatternFill, Font
+    from openpyxl.utils import get_column_letter
+
+    # Find the priority column index (1-based)
+    priority_col_idx = None
+    for idx, name in enumerate(fieldnames, 1):
+        if name.lower() == 'priority':
+            priority_col_idx = idx
+            break
+
+    if priority_col_idx is None:
+        log.debug('No "priority" column found — skipping priority conditional formatting')
+        return
+
+    col_letter = get_column_letter(priority_col_idx)
+    last_row = ws.max_row
+    if last_row < 2:
+        return
+
+    cell_range = f'{col_letter}2:{col_letter}{last_row}'
+    log.debug(f'Applying priority conditional formatting to range {cell_range}')
+
+    for priority_value, (fill_hex, font_hex) in PRIORITY_FILL_COLORS.items():
+        fill = PatternFill(start_color=fill_hex, end_color=fill_hex, fill_type='solid')
+        font = Font(color=font_hex)
+        rule = CellIsRule(
+            operator='equal',
+            formula=[f'"{priority_value}"'],
+            fill=fill,
+            font=font,
+        )
+        ws.conditional_formatting.add(cell_range, rule)
+
+    log.debug(f'Added {len(PRIORITY_FILL_COLORS)} conditional formatting rules for priority column')
 
 
 def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
@@ -2780,7 +2984,7 @@ def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
     # ---------------------------------------------------------------
     base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary',
                    'assignee', 'reporter', 'created', 'updated', 'resolved',
-                   'fix_version', 'affects_version']
+                   'fix_version', 'affects_version', 'component']
 
     is_indented = (table_format == 'indented' and any('depth' in r for r in rows))
 
@@ -2814,7 +3018,7 @@ def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
         fieldnames = base_fields + extra_columns
 
     # ---------------------------------------------------------------
-    # Header row styling
+    # Header row styling (skipped when --no-formatting is active)
     # ---------------------------------------------------------------
     header_font = Font(bold=True, color='FFFFFF')
     header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
@@ -2830,10 +3034,11 @@ def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
     # Write header
     for col_idx, field in enumerate(fieldnames, 1):
         cell = ws.cell(row=1, column=col_idx, value=field)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_alignment
-        cell.border = thin_border
+        if not _no_formatting:
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = thin_border
 
     # ---------------------------------------------------------------
     # Data rows
@@ -2849,7 +3054,8 @@ def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
 
             for col_idx, field in enumerate(fieldnames, 1):
                 cell = ws.cell(row=row_idx, column=col_idx)
-                cell.border = thin_border
+                if not _no_formatting:
+                    cell.border = thin_border
 
                 if field in depth_columns:
                     # Only populate the depth column matching this row's depth
@@ -2867,7 +3073,8 @@ def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
             # Flat row
             for col_idx, field in enumerate(fieldnames, 1):
                 cell = ws.cell(row=row_idx, column=col_idx)
-                cell.border = thin_border
+                if not _no_formatting:
+                    cell.border = thin_border
                 value = row_data.get(field, '')
 
                 if field == 'key' and value:
@@ -2879,42 +3086,58 @@ def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
                     cell.value = value
 
     # ---------------------------------------------------------------
-    # Auto-fit column widths (approximate)
+    # Auto-fit column widths, freeze header, auto-filter
+    # (skipped when --no-formatting is active)
     # ---------------------------------------------------------------
-    for col_idx, field in enumerate(fieldnames, 1):
-        # Start with header width
-        max_len = len(str(field))
-        # Sample up to 50 data rows for width estimation
-        for row_idx in range(2, min(len(rows) + 2, 52)):
-            cell_val = ws.cell(row=row_idx, column=col_idx).value
-            if cell_val is not None:
-                max_len = max(max_len, len(str(cell_val)))
-        # Cap at 50 characters, minimum 10
-        adjusted_width = min(max(max_len + 2, 10), 50)
-        ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = adjusted_width
+    if not _no_formatting:
+        for col_idx, field in enumerate(fieldnames, 1):
+            # Start with header width
+            max_len = len(str(field))
+            # Sample up to 50 data rows for width estimation
+            for row_idx in range(2, min(len(rows) + 2, 52)):
+                cell_val = ws.cell(row=row_idx, column=col_idx).value
+                if cell_val is not None:
+                    max_len = max(max_len, len(str(cell_val)))
+            # Cap at 50 characters, minimum 10
+            adjusted_width = min(max(max_len + 2, 10), 50)
+            ws.column_dimensions[ws.cell(row=1, column=col_idx).column_letter].width = adjusted_width
 
-    # Freeze the header row
-    ws.freeze_panes = 'A2'
+        # Freeze the header row
+        ws.freeze_panes = 'A2'
 
-    # Enable auto-filter on the header row
-    ws.auto_filter.ref = ws.dimensions
+        # Enable auto-filter on the header row
+        ws.auto_filter.ref = ws.dimensions
+
+    # ------------------------------------------------------------------
+    # Conditional formatting on the status and priority columns.
+    # These are dynamic Excel rules — evaluated by Excel/LibreOffice when
+    # the file is opened, so they update if the user edits values.
+    # Skipped when --no-formatting is active.
+    # ------------------------------------------------------------------
+    if not _no_formatting:
+        _apply_status_conditional_formatting(ws, fieldnames)
+        _apply_priority_conditional_formatting(ws, fieldnames)
 
     wb.save(output_path)
     log.info(f'Wrote {len(rows)} tickets (excel, table_format={table_format}) to: {output_path}')
 
 
-def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, table_format='flat'):
+def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, table_format='flat', include_comments=None):
     '''
     Write tickets to a file in the specified format.
 
     Input:
         issues: List of issue dicts from Jira API.
         dump_file: Output filename (without extension).
-        dump_format: Output format ('csv' or 'json').
+        dump_format: Output format ('csv', 'json', or 'excel').
         extra_fields: Optional mapping of issue key -> dict of additional fields to include (e.g., {'depth': 1, 'via': 'blocks'}).
         table_format: Table layout for CSV ('flat' or 'indented'). 'flat' uses a depth column.
                       'indented' replaces the depth column with per-level columns (Depth 0, Depth 1, ...)
                       where the ticket key appears in the column matching its depth.
+        include_comments: Comment extraction mode.  None = off, 'all' = include every
+                          comment, 'latest' = include only comments from the most recent
+                          day (if several comments share the latest date, all are kept).
+                          Only meaningful for JSON format (forced by --get-comments).
 
     Output:
         None; writes to file.
@@ -2922,7 +3145,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
     Side Effects:
         Creates or overwrites the output file.
     '''
-    log.debug(f'Entering dump_tickets_to_file(issues_count={len(issues)}, dump_file={dump_file}, dump_format={dump_format}, extra_fields_provided={extra_fields is not None}, table_format={table_format})')
+    log.debug(f'Entering dump_tickets_to_file(issues_count={len(issues)}, dump_file={dump_file}, dump_format={dump_format}, extra_fields_provided={extra_fields is not None}, table_format={table_format}, include_comments={include_comments})')
     # Add extension if not present
     # Excel uses .xlsx extension rather than .excel
     ext = 'xlsx' if dump_format == 'excel' else dump_format
@@ -2946,6 +3169,10 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
         affects_versions = fields.get('versions', [])
         affects_version_str = ', '.join([v.get('name', '') for v in affects_versions]) if affects_versions else ''
         
+        # Extract components
+        components = fields.get('components', [])
+        component_str = ', '.join([c.get('name', '') for c in components]) if components else ''
+        
         # Extract common fields
         row = {
             'key': issue.get('key', ''),
@@ -2961,7 +3188,58 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
             'resolved': '',
             'fix_version': fix_version_str,
             'affects_version': affects_version_str,
+            'component': component_str,
         }
+
+        # ── Comment extraction (only when --get-comments is active) ──────
+        if include_comments:
+            comment_field = fields.get('comment', {})
+            raw_comments = comment_field.get('comments', []) if isinstance(comment_field, dict) else []
+            parsed_comments = []
+            for c in raw_comments:
+                # Extract the plain-text body from ADF (Atlassian Document Format)
+                body_adf = c.get('body', {})
+                body_text = ''
+                if isinstance(body_adf, dict):
+                    # Walk top-level content nodes and concatenate text
+                    for node in body_adf.get('content', []):
+                        for inline in node.get('content', []):
+                            if inline.get('type') == 'text':
+                                body_text += inline.get('text', '')
+                        body_text += '\n'
+                    body_text = body_text.strip()
+                elif isinstance(body_adf, str):
+                    body_text = body_adf
+
+                parsed_comments.append({
+                    'id': c.get('id', ''),
+                    'author': (c.get('author') or {}).get('displayName', ''),
+                    'created': c.get('created', ''),
+                    'updated': c.get('updated', ''),
+                    'body': body_text,
+                })
+
+            # ── "latest" mode: keep only comments from the most recent day ──
+            if include_comments == 'latest' and parsed_comments:
+                def _comment_date(comment):
+                    '''Return the date portion (YYYY-MM-DD) of a comment's created timestamp.'''
+                    ts = comment.get('created', '')
+                    if not ts:
+                        return ''
+                    try:
+                        # Jira timestamps: "2025-06-15T10:30:00.000+0000" or ISO variants
+                        return datetime.fromisoformat(ts.replace('Z', '+00:00')).strftime('%Y-%m-%d')
+                    except (ValueError, TypeError):
+                        # Fallback: take the first 10 chars (YYYY-MM-DD)
+                        return ts[:10]
+
+                # Find the latest day across all comments
+                latest_day = max(_comment_date(c) for c in parsed_comments)
+                # Keep every comment whose date matches the latest day
+                parsed_comments = [c for c in parsed_comments if _comment_date(c) == latest_day]
+                log.debug(f'  {issue.get("key", "?")}: filtered to {len(parsed_comments)} comment(s) from latest day ({latest_day})')
+
+            row['comments'] = parsed_comments
 
         # Optional extra fields (e.g., hierarchy depth, link type, traversal metadata)
         if extra_fields:
@@ -3007,7 +3285,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
         if rows:
             base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary',
                            'assignee', 'reporter', 'created', 'updated', 'resolved',
-                           'fix_version', 'affects_version']
+                           'fix_version', 'affects_version', 'component']
 
             # ------------------------------------------------------------------
             # "indented" table format: replace the depth column with per-level
@@ -3071,7 +3349,8 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
                     writer.writerows(indented_rows)
 
                 log.info(f'Wrote {len(indented_rows)} tickets (indented format, max depth {max_depth}) to: {output_path}')
-                return
+                # Return the resolved output path so callers can chain subsequent steps.
+                return output_path
 
             # ------------------------------------------------------------------
             # "flat" table format (default): depth is a regular column
@@ -3100,6 +3379,10 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
                                  'fix_version', 'affects_version'])
     
     log.info(f'Wrote {len(rows)} tickets to: {output_path}')
+
+    # Return the resolved output path so callers (e.g., workflow automation) can
+    # chain subsequent steps without re-deriving the filename.
+    return output_path
 
 
 def load_tickets_from_csv(input_file):
@@ -3639,7 +3922,9 @@ def run_jql_query(jira, jql_query, limit=None, dump_file=None, dump_format='csv'
                 current_batch = batch_size
             
             # Build request payload - include extra fields if dumping
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            if _include_comments:
+                fields_to_fetch.append('comment')
             if dump_file:
                 fields_to_fetch.extend(['reporter', 'resolutiondate'])
             
@@ -3710,10 +3995,299 @@ def run_jql_query(jira, jql_query, limit=None, dump_file=None, dump_format='csv'
         
         # Dump to file if requested
         if dump_file:
-            dump_tickets_to_file(all_issues, dump_file, dump_format)
+            dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
         
+        # Return the issues list so callers can use the data programmatically
+        return all_issues
+
     except Exception as e:
         log.error(f'Failed to run JQL query: {e}')
+        raise
+
+
+# ****************************************************************************************
+# Filter Management Functions
+# ****************************************************************************************
+
+def list_filters(jira, owner=None, favourite_only=False):
+    '''
+    List accessible saved filters (Jira "favourite filters" or all visible filters).
+
+    Uses the REST API endpoint GET /rest/api/3/filter/search which returns
+    filters the authenticated user can see.
+
+    Input:
+        jira: JIRA object with active connection.
+        owner: Filter by owner display name or email (use "me" for current user), or None for all.
+        favourite_only: If True, show only the user's favourite/starred filters.
+
+    Output:
+        None; prints filter list to stdout.
+
+    Side Effects:
+        Logs query information and prints formatted filter table.
+    '''
+    log.debug(f'Entering list_filters(owner={owner}, favourite_only={favourite_only})')
+
+    try:
+        email, api_token = get_jira_credentials()
+
+        all_filters = []
+        start_at = 0
+        max_retries = 5
+
+        while True:
+            # Build query parameters
+            # GET /rest/api/3/filter/search supports: filterName, accountId,
+            # owner (deprecated), groupname, projectId, orderBy, startAt, maxResults,
+            # expand (description, favourite, favouritedCount, jql, owner, searchUrl, sharePermissions, editPermissions, isWritable, subscriptions)
+            params = {
+                'maxResults': 50,
+                'startAt': start_at,
+                'expand': 'description,jql,owner,favourite',
+            }
+
+            if favourite_only:
+                # The /rest/api/3/filter/favourite endpoint returns only starred filters
+                # but /filter/search with favouritedByMe is not directly supported.
+                # We'll use the dedicated favourite endpoint instead.
+                pass
+
+            for retry in range(max_retries):
+                if favourite_only:
+                    # Use the dedicated favourite filters endpoint
+                    response = requests.get(
+                        f'{JIRA_URL}/rest/api/3/filter/favourite',
+                        auth=(email, api_token),
+                        headers={'Accept': 'application/json'},
+                    )
+                else:
+                    response = requests.get(
+                        f'{JIRA_URL}/rest/api/3/filter/search',
+                        auth=(email, api_token),
+                        headers={'Accept': 'application/json'},
+                        params=params,
+                    )
+
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get('Retry-After', 5))
+                    log.warning(f'Rate limited. Waiting {retry_after} seconds (retry {retry + 1}/{max_retries})...')
+                    time.sleep(retry_after)
+                    continue
+                break
+
+            if response.status_code != 200:
+                log.error(f'Filter API request failed: {response.status_code} - {response.text}')
+                raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+
+            data = response.json()
+
+            if favourite_only:
+                # /filter/favourite returns a flat list (no pagination wrapper)
+                all_filters = data if isinstance(data, list) else data.get('values', [])
+                break
+            else:
+                filters = data.get('values', [])
+                all_filters.extend(filters)
+
+                total = data.get('total', 0)
+                if start_at + len(filters) >= total:
+                    break
+                start_at += len(filters)
+
+        # Optionally filter by owner display name or email
+        if owner:
+            owner_lower = owner.lower()
+            if owner_lower == 'me':
+                # Match against the authenticated user's email
+                filtered = [f for f in all_filters
+                            if f.get('owner', {}).get('emailAddress', '').lower() == email.lower()
+                            or f.get('owner', {}).get('accountId', '') == 'me']
+            else:
+                filtered = [f for f in all_filters
+                            if owner_lower in f.get('owner', {}).get('displayName', '').lower()
+                            or owner_lower in f.get('owner', {}).get('emailAddress', '').lower()]
+            all_filters = filtered
+
+        log.debug(f'Retrieved {len(all_filters)} filters')
+
+        # Print results
+        output('')
+        output('=' * 140)
+        output('Saved Filters')
+        if owner:
+            output(f'Owner filter: {owner}')
+        if favourite_only:
+            output('Showing: Favourite filters only')
+        output('=' * 140)
+
+        # Table header
+        output('-' * 140)
+        output(f'{"ID":<10} {"Name":<35} {"Owner":<25} {"Fav":<5} {"JQL":<60}')
+        output('-' * 140)
+
+        for f in all_filters:
+            fid = str(f.get('id', ''))
+            fname = f.get('name', '')
+            fowner = f.get('owner', {}).get('displayName', '') if f.get('owner') else ''
+            is_fav = 'Yes' if f.get('favourite', False) else 'No'
+            fjql = f.get('jql', '')
+
+            # Truncate for display
+            if len(fname) > 33:
+                fname = fname[:33] + '..'
+            if len(fowner) > 23:
+                fowner = fowner[:23] + '..'
+            if len(fjql) > 58:
+                fjql = fjql[:58] + '..'
+
+            output(f'{fid:<10} {fname:<35} {fowner:<25} {is_fav:<5} {fjql:<60}')
+
+        output('=' * 140)
+        output(f'Total: {len(all_filters)} filters')
+        output('')
+
+        # Return the filter list so callers can use the data programmatically
+        return all_filters
+
+    except Exception as e:
+        log.error(f'Failed to list filters: {e}')
+        raise
+
+
+def get_filter(jira, filter_id):
+    '''
+    Get details of a single saved filter by ID.
+
+    Input:
+        jira: JIRA object with active connection.
+        filter_id: String or int filter ID.
+
+    Output:
+        dict: The raw filter JSON from the API.
+
+    Side Effects:
+        Prints filter details to stdout.
+    '''
+    log.debug(f'Entering get_filter(filter_id={filter_id})')
+
+    try:
+        email, api_token = get_jira_credentials()
+
+        response = requests.get(
+            f'{JIRA_URL}/rest/api/3/filter/{filter_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'},
+            params={'expand': 'description,jql,owner,favourite,sharePermissions'},
+        )
+
+        if response.status_code == 404:
+            log.error(f'Filter {filter_id} not found')
+            raise Exception(f'Filter {filter_id} not found. Check the ID and your permissions.')
+        if response.status_code != 200:
+            log.error(f'Filter API request failed: {response.status_code} - {response.text}')
+            raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+
+        f = response.json()
+
+        # Print details
+        output('')
+        output('=' * 100)
+        output(f'Filter Details: {f.get("name", "N/A")}')
+        output('=' * 100)
+        output(f'  ID:          {f.get("id", "N/A")}')
+        output(f'  Name:        {f.get("name", "N/A")}')
+        output(f'  Owner:       {f.get("owner", {}).get("displayName", "N/A")}')
+        output(f'  Favourite:   {"Yes" if f.get("favourite", False) else "No"}')
+        output(f'  Description: {f.get("description", "") or "(none)"}')
+        output(f'  JQL:         {f.get("jql", "N/A")}')
+        output(f'  View URL:    {f.get("viewUrl", "N/A")}')
+        output(f'  Search URL:  {f.get("searchUrl", "N/A")}')
+
+        # Share permissions
+        perms = f.get('sharePermissions', [])
+        if perms:
+            perm_strs = []
+            for p in perms:
+                ptype = p.get('type', '')
+                if ptype == 'global':
+                    perm_strs.append('Global (anyone)')
+                elif ptype == 'project':
+                    proj = p.get('project', {})
+                    perm_strs.append(f'Project: {proj.get("key", "")} ({proj.get("name", "")})')
+                elif ptype == 'group':
+                    perm_strs.append(f'Group: {p.get("group", {}).get("name", "")}')
+                elif ptype == 'authenticated':
+                    perm_strs.append('Authenticated users')
+                else:
+                    perm_strs.append(ptype)
+            output(f'  Shared with: {"; ".join(perm_strs)}')
+        else:
+            output(f'  Shared with: Private')
+
+        output('=' * 100)
+        output('')
+
+        return f
+
+    except Exception as e:
+        log.error(f'Failed to get filter {filter_id}: {e}')
+        raise
+
+
+def run_filter(jira, filter_id, limit=None, dump_file=None, dump_format='csv'):
+    '''
+    Run a saved filter by ID: fetch its JQL, then execute it via run_jql_query().
+
+    Input:
+        jira: JIRA object with active connection.
+        filter_id: String or int filter ID.
+        limit: Maximum number of tickets to retrieve, or None for all.
+        dump_file: Output filename for dumping tickets, or None to skip.
+        dump_format: Output format ('csv', 'json', or 'excel').
+
+    Output:
+        None; prints ticket list to stdout and optionally writes to file.
+
+    Side Effects:
+        Logs filter information and delegates to run_jql_query().
+    '''
+    log.debug(f'Entering run_filter(filter_id={filter_id}, limit={limit}, dump_file={dump_file}, dump_format={dump_format})')
+
+    try:
+        email, api_token = get_jira_credentials()
+
+        # Fetch the filter to get its JQL
+        response = requests.get(
+            f'{JIRA_URL}/rest/api/3/filter/{filter_id}',
+            auth=(email, api_token),
+            headers={'Accept': 'application/json'},
+        )
+
+        if response.status_code == 404:
+            log.error(f'Filter {filter_id} not found')
+            raise Exception(f'Filter {filter_id} not found. Check the ID and your permissions.')
+        if response.status_code != 200:
+            log.error(f'Filter API request failed: {response.status_code} - {response.text}')
+            raise Exception(f'Jira API error: {response.status_code} - {response.text}')
+
+        f = response.json()
+        filter_name = f.get('name', 'Unknown')
+        jql = f.get('jql', '')
+
+        if not jql:
+            raise Exception(f'Filter {filter_id} ("{filter_name}") has no JQL query defined.')
+
+        output('')
+        output(f'Running filter: {filter_name} (ID: {filter_id})')
+        output(f'JQL: {jql}')
+        output('')
+
+        # Delegate to the existing JQL runner and return its result
+        return run_jql_query(jira, jql, limit=limit, dump_file=dump_file, dump_format=dump_format)
+
+    except Exception as e:
+        log.error(f'Failed to run filter {filter_id}: {e}')
         raise
 
 
@@ -5046,7 +5620,49 @@ Date Filters:
         metavar='JSON',
         dest='gadget_properties',
         help='Gadget properties as JSON object.')
-    
+
+    # ── Filter management arguments ──────────────────────────────────────
+    parser.add_argument(
+        '--list-filters',
+        action='store_true',
+        dest='list_filters',
+        help='List accessible saved filters.')
+    parser.add_argument(
+        '--get-filter',
+        type=str,
+        metavar='ID',
+        dest='get_filter',
+        help='Get details of a saved filter by ID.')
+    parser.add_argument(
+        '--run-filter',
+        type=str,
+        metavar='ID',
+        dest='run_filter',
+        help='Run a saved filter by ID (executes its JQL query).')
+    parser.add_argument(
+        '--favourite',
+        action='store_true',
+        dest='favourite_only',
+        help='With --list-filters, show only favourite/starred filters.')
+
+    # ── Comment extraction argument ──────────────────────────────────────
+    parser.add_argument(
+        '--get-comments',
+        choices=['all', 'latest'],
+        default=None,
+        dest='get_comments',
+        help='Include comments in ticket output.  "all" includes every comment; '
+             '"latest" includes only comments from the most recent day.  '
+             'Forces --dump-format to json.')
+
+    # ── Formatting control ───────────────────────────────────────────────
+    parser.add_argument(
+        '--no-formatting',
+        action='store_true',
+        dest='no_formatting',
+        help='Disable all Excel formatting (header styling, conditional formatting, '
+             'auto-fit columns). Produces a plain data-only workbook.')
+
     args = parser.parse_args()
 
     # If user selected a non-default dotenv file, load it now.
@@ -5192,8 +5808,8 @@ Date Filters:
     # Validate --date and --limit usage
     if args.date and not (args.total or args.get_tickets or release_tickets_specified or args.no_release or args.get_components):
         parser.error('--date requires --total, --get-tickets, --release-tickets, --no-release, or --get-components')
-    if args.limit and not (args.get_tickets or jql_specified or release_tickets_specified or args.no_release or args.get_children or args.get_related):
-        parser.error('--limit requires --get-tickets, --jql, --release-tickets, --no-release, --get-children, or --get-related')
+    if args.limit and not (args.get_tickets or jql_specified or release_tickets_specified or args.no_release or args.get_children or args.get_related or args.run_filter):
+        parser.error('--limit requires --get-tickets, --jql, --release-tickets, --no-release, --get-children, --get-related, or --run-filter')
 
     # Validate ticket creation arguments
     if args.create_ticket is not None:
@@ -5227,7 +5843,7 @@ Date Filters:
     # Validate --dump-file and --dump-format usage
     # Allow dump-file with any command that produces tabular/list data
     dump_compatible = (args.get_tickets or jql_specified or release_tickets_specified or
-                       args.no_release or args.releases or args.get_versions or args.get_components or args.get_children or args.get_related)
+                       args.no_release or args.releases or args.get_versions or args.get_components or args.get_children or args.get_related or args.run_filter)
     if (args.dump_file or args.dump_format != 'csv') and not dump_compatible:
         parser.error('--dump-file and --dump-format require a command that produces data (e.g., --get-tickets, --jql, --releases, --get-versions, --get-components, --get-children, --get-related)')
     
@@ -5275,8 +5891,8 @@ Date Filters:
                         args.gadgets, args.add_gadget, args.remove_gadget, args.update_gadget]
     
     # --owner and --shared only valid with --dashboards
-    if (args.owner or args.shared) and not args.dashboards:
-        parser.error('--owner and --shared require --dashboards')
+    if (args.owner or args.shared) and not (args.dashboards or args.list_filters):
+        parser.error('--owner and --shared require --dashboards or --list-filters')
     
     # --description only valid with dashboard create/update/copy
     if args.description and not (args.create_dashboard or args.update_dashboard or args.copy_dashboard):
@@ -5310,8 +5926,37 @@ Date Filters:
     if args.gadget_properties and not args.add_gadget:
         parser.error('--gadget-properties requires --add-gadget')
     
+    # Validate --get-comments: requires a ticket-fetching action
+    ticket_fetching = (args.get_tickets or jql_specified or release_tickets_specified or
+                       args.no_release or children_specified or related_specified or args.run_filter)
+    if args.get_comments is not None and not ticket_fetching:
+        parser.error('--get-comments requires a ticket-fetching action (--get-tickets, --jql, --release-tickets, --no-release, --get-children, --get-related, or --run-filter)')
+
+    # When --get-comments is active, force dump-format to json and ensure dump-file is set
+    if args.get_comments is not None:
+        if args.dump_format != 'json':
+            log.debug(f'--get-comments {args.get_comments}: overriding --dump-format from "{args.dump_format}" to "json"')
+            args.dump_format = 'json'
+        if not args.dump_file:
+            # Auto-generate a dump filename so the user doesn't have to specify one
+            args.dump_file = 'tickets_with_comments'
+        # Set the module-level flag so all fields_to_fetch lists include 'comment'
+        # and dump_tickets_to_file knows which mode to use ('all' or 'latest')
+        global _include_comments
+        _include_comments = args.get_comments
+
+    # Set the module-level no-formatting flag
+    if args.no_formatting:
+        global _no_formatting
+        _no_formatting = True
+
+    # Validate filter arguments
+    filter_actions = [args.list_filters, args.get_filter, args.run_filter]
+    if args.favourite_only and not args.list_filters:
+        parser.error('--favourite requires --list-filters')
+
     # Validate that at least one action is specified
-    if not args.list_projects and not any(project_actions) and not jql_specified and not (args.bulk_update or args.bulk_delete) and not any(dashboard_actions) and not children_specified and not related_specified:
+    if not args.list_projects and not any(project_actions) and not jql_specified and not (args.bulk_update or args.bulk_delete) and not any(dashboard_actions) and not any(filter_actions) and not children_specified and not related_specified:
         parser.print_help()
         sys.exit(1)
     
@@ -5327,7 +5972,17 @@ Date Filters:
     log.info(f'+  Jira URL: {JIRA_URL}')
     if args.project:
         log.info(f'+  Project: {args.project}')
-    log.info('++++++++++++++++++++++++++++++++++++++++++++++')        
+    if args.list_filters:
+        log.info(f'+  Action: list-filters (favourite={args.favourite_only})')
+    if args.get_filter:
+        log.info(f'+  Action: get-filter (ID={args.get_filter})')
+    if args.run_filter:
+        log.info(f'+  Action: run-filter (ID={args.run_filter})')
+    if args.get_comments is not None:
+        log.info(f'+  Option: --get-comments {args.get_comments} (dump-format forced to json)')
+    if args.no_formatting:
+        log.info(f'+  Option: --no-formatting (plain data-only Excel)')
+    log.info('++++++++++++++++++++++++++++++++++++++++++++++')
 
     return args
 
@@ -5468,6 +6123,16 @@ def main():
         
         if args.gadgets:
             list_gadgets(jira, args.gadgets)
+        
+        # Filter management operations
+        if args.list_filters:
+            list_filters(jira, args.owner, args.favourite_only)
+        
+        if args.get_filter:
+            get_filter(jira, args.get_filter)
+        
+        if args.run_filter:
+            run_filter(jira, args.run_filter, args.limit, args.dump_file, args.dump_format)
             
     except JiraCredentialsError as e:
         log.error(e.message)

@@ -14,7 +14,7 @@ authors = [
 ]
 
 # Runtime dependencies — only what the CLI utilities need.
-# The agent pipeline (main.py, agents/, llm/, tools/) has heavier deps
+# The agent pipeline (pm_agent.py, agents/, llm/, tools/) has heavier deps
 # that are NOT required for the standalone CLIs.
 dependencies = [
     "jira>=3.5.0",
@@ -37,12 +37,14 @@ agents = [
 
 [project.scripts]
 # Console entry points — these become commands on your PATH
+pm-agent = "pm_agent:main"
 jira-utils = "jira_utils:main"
 drawio-utils = "drawio_utilities:main"
+excel-utils = "excel_utils:main"
 
 [tool.setuptools]
 # Include top-level .py modules (not packages)
-py-modules = ["jira_utils", "drawio_utilities"]
+py-modules = ["jira_utils", "drawio_utilities", "excel_utils", "pm_agent"]
 
 [tool.setuptools.package-data]
 # Include template files so --create-ticket can reference them
