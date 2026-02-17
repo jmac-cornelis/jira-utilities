@@ -499,10 +499,21 @@ def cmd_build_excel_map(args):
             for merged_range in src_ws.merged_cells.ranges:
                 dest_ws.merge_cells(str(merged_range))
 
-            # Copy conditional formatting rules
+            # Copy conditional formatting rules.
+            # openpyxl's add() expects a cell-range string *or* a
+            # MultiCellRange, depending on the version.  Using the
+            # sqref attribute (which is already a MultiCellRange) is
+            # the safest approach; fall back to str() for older builds.
             for cf_rule in src_ws.conditional_formatting:
+                try:
+                    cell_range = cf_rule.sqref          # MultiCellRange
+                except AttributeError:
+                    cell_range = str(cf_rule)            # fallback
                 for rule in cf_rule.rules:
-                    dest_ws.conditional_formatting.add(str(cf_rule), rule)
+                    try:
+                        dest_ws.conditional_formatting.add(cell_range, rule)
+                    except Exception as cf_err:
+                        log.debug(f'Skipping conditional formatting rule: {cf_err}')
 
             # Copy freeze panes
             if src_ws.freeze_panes:
