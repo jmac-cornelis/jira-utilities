@@ -687,7 +687,7 @@ def convert_to_csv(input_file, output_file=None):
     output('')
 
 
-def convert_from_csv(input_file, output_file=None):
+def convert_from_csv(input_file, output_file=None, jira_base_url=None):
     '''
     Convert a comma-delimited CSV file to an Excel (.xlsx) file.
 
@@ -695,19 +695,27 @@ def convert_from_csv(input_file, output_file=None):
     auto-fit columns, frozen header row, auto-filter, and status
     conditional formatting (if a status column is present).
 
+    When jira_base_url is provided, any column whose header contains "key"
+    (case-insensitive) will have its cells rendered as clickable Jira
+    hyperlinks (e.g. https://cornelisnetworks.atlassian.net/browse/STL-76582).
+
     Input:
         input_file: Path to the .csv file.
         output_file: Optional path for the output .xlsx file. If None, the
                      output filename is derived from the input filename by
                      replacing the extension with .xlsx.
+        jira_base_url: Optional Jira instance URL (e.g.
+                       "https://cornelisnetworks.atlassian.net"). When set,
+                       ticket-key cells become clickable hyperlinks.
 
     Output:
-        None; writes the Excel file to disk.
+        str: The resolved output file path.
 
     Raises:
         ExcelFileError: If the input file cannot be read.
     '''
-    log.debug(f'Entering convert_from_csv(input_file={input_file}, output_file={output_file})')
+    log.debug(f'Entering convert_from_csv(input_file={input_file}, output_file={output_file}, '
+              f'jira_base_url={jira_base_url})')
 
     if not os.path.exists(input_file):
         raise ExcelFileError(f'File not found: {input_file}')
@@ -735,6 +743,21 @@ def convert_from_csv(input_file, output_file=None):
 
     log.debug(f'Writing {len(rows)} rows to Excel: {output_file}')
 
+    # Normalise the Jira base URL (strip trailing slash) when provided so we
+    # can build browse links like  <base>/browse/STL-76582.
+    jira_url = jira_base_url.rstrip('/') if jira_base_url else None
+
+    # Identify which column indices (0-based) hold Jira ticket keys.
+    # Convention: any header whose lowered name is exactly "key" qualifies.
+    key_col_indices = {
+        idx for idx, h in enumerate(headers) if h.strip().lower() == 'key'
+    }
+    if jira_url and key_col_indices:
+        log.debug(f'Jira hyperlink columns (0-based): {sorted(key_col_indices)}')
+
+    # Font style for hyperlink cells (blue, underlined)
+    link_font = Font(color='0563C1', underline='single')
+
     wb = Workbook()
     ws = wb.active
     ws.title = os.path.splitext(os.path.basename(input_file))[0][:31]
@@ -743,11 +766,17 @@ def convert_from_csv(input_file, output_file=None):
     for col_idx, col_name in enumerate(headers, 1):
         ws.cell(row=1, column=col_idx, value=col_name)
 
-    # Write data rows
+    # Write data rows — ticket-key cells become clickable Jira links when
+    # jira_base_url was supplied and the column header is "key".
     for row_idx, row_data in enumerate(rows, 2):
         for col_idx, col_name in enumerate(headers, 1):
             value = row_data.get(col_name, '')
-            ws.cell(row=row_idx, column=col_idx, value=value)
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+
+            # Render ticket key as a clickable hyperlink
+            if jira_url and (col_idx - 1) in key_col_indices and value:
+                cell.hyperlink = f'{jira_url}/browse/{value}'
+                cell.font = link_font
 
     # Apply styling (unless --no-formatting)
     if not _no_formatting:
@@ -1134,6 +1163,16 @@ Examples:
         help='Disable all Excel formatting (header styling, conditional formatting, '
              'auto-fit columns). Produces a plain data-only workbook.')
 
+    parser.add_argument(
+        '--jira-url',
+        type=str,
+        metavar='URL',
+        dest='jira_url',
+        default=None,
+        help='Jira instance URL (e.g. https://cornelisnetworks.atlassian.net). '
+             'When set, "key" columns in --convert-from-csv become clickable '
+             'hyperlinks to the Jira ticket.')
+
     args = parser.parse_args()
 
     # Configure stdout logging based on arguments (always add handler, level varies)
@@ -1271,7 +1310,8 @@ def main():
             convert_to_csv(args.convert_to_csv, args.output_file)
 
         elif args.convert_from_csv:
-            convert_from_csv(args.convert_from_csv, args.output_file)
+            convert_from_csv(args.convert_from_csv, args.output_file,
+                             jira_base_url=getattr(args, 'jira_url', None))
 
         elif args.diff:
             diff_files(args.diff, args.output_file)
