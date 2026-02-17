@@ -1296,6 +1296,46 @@ def _workflow_bug_report(args):
     output('')
     output(f'Step 6/6: Converting CSV output to Excel...')
     csv_files = [sf for sf in saved_files if sf.lower().endswith('.csv')]
+
+    # Deduplicate: when the LLM emits multiple CSV blocks (e.g. an original
+    # and a "corrected" version), keep only the LAST one — it is typically the
+    # most complete / corrected.  Rename it to the canonical output name
+    # derived from the filter so the final deliverable has a clean filename.
+    if len(csv_files) > 1:
+        canonical_csv = f'{dump_basename}.csv'
+        keep = csv_files[-1]           # last CSV is the corrected one
+        discard = csv_files[:-1]
+        log.info(f'LLM emitted {len(csv_files)} CSV files; keeping last: {keep}')
+        for d in discard:
+            try:
+                os.remove(d)
+                log.info(f'Removed duplicate CSV: {d}')
+            except OSError as rm_err:
+                log.warning(f'Could not remove {d}: {rm_err}')
+            # Also remove from all_created_files tracking
+            all_created_files[:] = [
+                (f, desc) for f, desc in all_created_files if f != d]
+            # Remove from saved_files so it won't appear later
+            saved_files = [sf for sf in saved_files if sf != d]
+
+        # Rename the kept file to the canonical name if different
+        if keep != canonical_csv:
+            try:
+                os.rename(keep, canonical_csv)
+                log.info(f'Renamed {keep} -> {canonical_csv}')
+                # Update tracking lists
+                all_created_files[:] = [
+                    (canonical_csv if f == keep else f, desc)
+                    for f, desc in all_created_files]
+                saved_files = [
+                    canonical_csv if sf == keep else sf for sf in saved_files]
+                keep = canonical_csv
+            except OSError as ren_err:
+                log.warning(f'Could not rename {keep} -> {canonical_csv}: {ren_err}')
+
+        csv_files = [keep]
+        output(f'  Deduplicated: keeping {keep}')
+
     if not csv_files:
         output('  No CSV files found in LLM output — skipping Excel conversion.')
         log.info('No CSV files to convert to Excel')
