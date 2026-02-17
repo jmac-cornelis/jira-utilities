@@ -1307,12 +1307,15 @@ def _workflow_bug_report(args):
     output(f'Step 6/6: Converting CSV output to Excel...')
     csv_files = [sf for sf in saved_files if sf.lower().endswith('.csv')]
 
+    # Canonical CSV name derived from the filter / output basename.
+    # We always rename the final CSV to this so the deliverable has a
+    # predictable, clean filename regardless of what the LLM chose.
+    canonical_csv = f'{dump_basename}.csv'
+
     # Deduplicate: when the LLM emits multiple CSV blocks (e.g. an original
     # and a "corrected" version), keep only the LAST one — it is typically the
-    # most complete / corrected.  Rename it to the canonical output name
-    # derived from the filter so the final deliverable has a clean filename.
+    # most complete / corrected.
     if len(csv_files) > 1:
-        canonical_csv = f'{dump_basename}.csv'
         keep = csv_files[-1]           # last CSV is the corrected one
         discard = csv_files[:-1]
         log.info(f'LLM emitted {len(csv_files)} CSV files; keeping last: {keep}')
@@ -1328,23 +1331,27 @@ def _workflow_bug_report(args):
             # Remove from saved_files so it won't appear later
             saved_files = [sf for sf in saved_files if sf != d]
 
-        # Rename the kept file to the canonical name if different
-        if keep != canonical_csv:
-            try:
-                os.rename(keep, canonical_csv)
-                log.info(f'Renamed {keep} -> {canonical_csv}')
-                # Update tracking lists
-                all_created_files[:] = [
-                    (canonical_csv if f == keep else f, desc)
-                    for f, desc in all_created_files]
-                saved_files = [
-                    canonical_csv if sf == keep else sf for sf in saved_files]
-                keep = canonical_csv
-            except OSError as ren_err:
-                log.warning(f'Could not rename {keep} -> {canonical_csv}: {ren_err}')
-
         csv_files = [keep]
         output(f'  Deduplicated: keeping {keep}')
+
+    # Rename the surviving CSV to the canonical name so the deliverable
+    # filename is predictable (e.g. sw_1211_p0p1_bugs.csv) regardless of
+    # whatever name the LLM invented for the file.
+    if len(csv_files) == 1 and csv_files[0] != canonical_csv:
+        keep = csv_files[0]
+        try:
+            os.rename(keep, canonical_csv)
+            log.info(f'Renamed {keep} -> {canonical_csv}')
+            # Update tracking lists
+            all_created_files[:] = [
+                (canonical_csv if f == keep else f, desc)
+                for f, desc in all_created_files]
+            saved_files = [
+                canonical_csv if sf == keep else sf for sf in saved_files]
+            csv_files = [canonical_csv]
+            output(f'  Renamed: {keep} -> {canonical_csv}')
+        except OSError as ren_err:
+            log.warning(f'Could not rename {keep} -> {canonical_csv}: {ren_err}')
 
     if not csv_files:
         output('  No CSV files found in LLM output — skipping Excel conversion.')
