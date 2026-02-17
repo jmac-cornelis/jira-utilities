@@ -533,6 +533,7 @@ python3 excel_utils.py --concat *.xlsx --no-formatting
 
 | Flag | Description |
 |------|-------------|
+| `-m MODEL`, `--model MODEL` | LLM model name override (e.g. `developer-opus`, `gpt-4o`). Overrides the env-var default for this run. |
 | `-v`, `--verbose` | Enable verbose (DEBUG-level) output |
 | `-q`, `--quiet` | Minimal stdout output |
 | `--no-formatting` | Disable all Excel formatting (header styling, conditional formatting, auto-fit) |
@@ -553,6 +554,9 @@ python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --time
 
 # With verbose logging
 python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800 --verbose
+
+# Override the LLM model for this run (useful from Jenkins Choice Parameter)
+python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --model developer-opus --timeout 800
 
 # Custom prompt file
 python3 pm_agent.py --workflow bug-report --filter "My Filter" --prompt my_prompt.md --timeout 600
@@ -579,6 +583,7 @@ python3 pm_agent.py --workflow bug-report --filter "My Filter" --prompt my_promp
 | `--timeout SECS` | LLM request timeout in seconds |
 | `--limit N` | Max tickets to retrieve |
 | `--output FILE` | Override output filename |
+| `--model MODEL`, `-m` | LLM model name override (e.g. `developer-opus`, `gpt-4o`). Overrides the env-var default for this run. |
 | `--verbose`, `-v` | Enable verbose (debug-level) logging |
 
 ---

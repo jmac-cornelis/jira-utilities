@@ -818,7 +818,7 @@ def _extract_and_save_files(response_text):
     return written
 
 
-def _invoke_llm(prompt_text, attachments=None, timeout=None):
+def _invoke_llm(prompt_text, attachments=None, timeout=None, model=None):
     '''
     Send a prompt to the configured LLM with optional file attachments.
 
@@ -829,6 +829,8 @@ def _invoke_llm(prompt_text, attachments=None, timeout=None):
         prompt_text: The prompt string to send.
         attachments: Optional list of file paths to attach.
         timeout: Optional timeout in seconds.
+        model: Optional model name override.  When provided, this overrides
+               the CORNELIS_LLM_MODEL / OPENAI_MODEL / etc. env-var default.
 
     Output:
         Tuple of (response_content, saved_files, token_info) where:
@@ -841,7 +843,7 @@ def _invoke_llm(prompt_text, attachments=None, timeout=None):
         Exception if the LLM call fails.
     '''
     log.debug(f'Entering _invoke_llm(prompt_len={len(prompt_text)}, '
-              f'attachments={attachments}, timeout={timeout})')
+              f'attachments={attachments}, timeout={timeout}, model={model})')
 
     import base64
     import mimetypes
@@ -900,14 +902,16 @@ def _invoke_llm(prompt_text, attachments=None, timeout=None):
     timeout_display = f'{timeout}s' if timeout else 'default'
     output(f'Sending to LLM... ({total_chars} chars, timeout={timeout_display})')
 
-    # Use vision client if images are present, otherwise standard client
+    # Use vision client if images are present, otherwise standard client.
+    # When a model override is supplied via --model, pass it through to the
+    # factory so it takes precedence over the env-var default.
     if image_data_uris:
-        client = get_llm_client(for_vision=True, timeout=timeout)
+        client = get_llm_client(for_vision=True, timeout=timeout, model=model)
         log.info(f'+  Using LLM model: {client.model}')
         output(f'Using vision model: {client.model} ({len(image_data_uris)} image(s))')
         messages = [Message.user(prompt_text)]
     else:
-        client = get_llm_client(timeout=timeout)
+        client = get_llm_client(timeout=timeout, model=model)
         log.info(f'+  Using LLM model: {client.model}')
         output(f'Using model: {client.model}')
         messages = [Message.user(prompt_text)]
@@ -1101,9 +1105,12 @@ def cmd_invoke_llm(args):
         output(f'Using inline prompt ({len(prompt_text)} chars)')
 
     # ---- delegate to shared helper ------------------------------------------
+    # Pass --model override if the user provided one on the CLI
+    model_override = getattr(args, 'model', None)
     try:
         response_content, saved_files, token_info = _invoke_llm(
-            prompt_text, attachments=args.attachments, timeout=args.timeout)
+            prompt_text, attachments=args.attachments, timeout=args.timeout,
+            model=model_override)
         return 0
     except Exception as e:
         log.error(f'LLM invocation failed: {e}', exc_info=True)
@@ -1278,8 +1285,11 @@ def _workflow_bug_report(args):
         log.info(f'Loaded prompt from {prompt_path} ({len(prompt_text)} chars)')
         output(f'  Prompt: {prompt_path} ({len(prompt_text)} chars)')
 
+        # Pass --model override if the user provided one on the CLI
+        model_override = getattr(args, 'model', None)
         response_content, saved_files, token_info = _invoke_llm(
-            prompt_text, attachments=[dump_path], timeout=args.timeout)
+            prompt_text, attachments=[dump_path], timeout=args.timeout,
+            model=model_override)
 
         # Track llm_output.md if it was created
         if os.path.isfile('llm_output.md'):
@@ -1553,6 +1563,14 @@ Examples:
                        help='File(s) to attach (images via vision API, text inlined; used by --invoke-llm)')
     parser.add_argument('--timeout', type=float, default=None,
                        help='LLM request timeout in seconds (default: 120; used by --invoke-llm)')
+    
+    # ---- Global LLM model override ---------------------------------------------
+    # Allows the user (or a Jenkins Choice Parameter) to select a model at
+    # run-time without editing the .env file.  Overrides CORNELIS_LLM_MODEL /
+    # OPENAI_MODEL / etc.
+    parser.add_argument('--model', '-m', default=None, metavar='MODEL',
+                       help='LLM model name override (e.g. developer-opus, gpt-4o). '
+                            'Overrides the env-var default for this run.')
     
     # ---- Global verbose flag ---------------------------------------------------
     parser.add_argument('--verbose', '-v', action='store_true',
