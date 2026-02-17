@@ -134,13 +134,23 @@ def build_excel_map(
                     seen_keys.add(issue_key)
                     merged_data.append(item)
 
-        # Write Tickets sheet to temp file — flat format (no depth columns)
+        # Write Tickets sheet to temp file — indented format with Depth 0 /
+        # Depth 1 columns, but only first-level data (hierarchy=1).
         map_temp = os.path.join(temp_dir, '_map_temp.xlsx')
         temp_files.append(map_temp)
 
+        map_extras = {
+            item['issue'].get('key', ''): {
+                'depth': item.get('depth'),
+                'via': item.get('via'),
+                'relation': item.get('relation'),
+                'from_key': item.get('from_key'),
+            }
+            for item in merged_data
+        }
         jira_utils.dump_tickets_to_file(
             [item['issue'] for item in merged_data],
-            map_temp, 'excel', table_format='flat'
+            map_temp, 'excel', map_extras, table_format='indented'
         )
 
         # Step 3: Get children for each depth=1 ticket

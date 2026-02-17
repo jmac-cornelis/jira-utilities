@@ -4,7 +4,7 @@
 
 A subcommand in `pm_agent.py` that orchestrates a multi-step Jira data gathering and Excel assembly pipeline. It produces a single `.xlsx` workbook with:
 
-- **Sheet 1 ("Tickets")**: A flat overview of root ticket(s) and their first-level children only (`hierarchy=1`). No depth/via columns — just a simple table.
+- **Sheet 1 ("Tickets")**: An indented overview of root ticket(s) and their first-level children only (`hierarchy=1`). Uses Depth 0 / Depth 1 columns to show the parent-child relationship.
 - **Sheets 2..N (per ticket key)**: Each first-level child gets its own sheet with unlimited child hierarchy (indented format with depth columns).
 
 Designed as a deterministic pipeline in `pm_agent.py` (subcommand `build-excel-map`) that imports from `jira_utils.py` for Jira data gathering and `_write_excel()` for Excel output. Also wrapped as an agent tool in `tools/excel_tools.py`.
@@ -21,7 +21,7 @@ flowchart TD
     F --> G[Step 3: For each depth=1 key, _get_children_data limit=None — unlimited depth]
     G --> H[Write each as temp .xlsx with indented format]
     H --> I[Step 4: Assemble final workbook]
-    I --> J[Sheet 1 = Tickets — flat overview]
+    I --> J[Sheet 1 = Tickets — indented Depth 0/1 overview]
     I --> K[Sheet 2..N = Per-ticket children — indented]
     J --> L[Final output: root_key.xlsx]
     K --> L
@@ -38,9 +38,9 @@ flowchart TD
 ### Step 2: Get First-Level Related Issues
 
 - For each root ticket, calls `_get_related_data(jira, root_key, hierarchy=1, limit=limit)`.
-- **Always uses `hierarchy=1`** regardless of any CLI flag — the overview sheet is always flat.
+- **Always uses `hierarchy=1`** — the overview sheet shows only root + first-level children.
 - Merges results across multiple root tickets, deduplicating by issue key.
-- Writes the merged data to a temp `.xlsx` file using `dump_tickets_to_file()` with `table_format='flat'` (no depth/via columns).
+- Writes the merged data to a temp `.xlsx` file using `dump_tickets_to_file()` with `table_format='indented'` and depth/via/relation/from_key extras — producing Depth 0 / Depth 1 columns.
 
 ### Step 3: Get Children for Each First-Level Ticket
 
@@ -51,7 +51,7 @@ flowchart TD
 ### Step 4: Assemble Final Workbook
 
 - Creates the final output workbook using openpyxl.
-- **Sheet 1 ("Tickets")**: Flat overview copied from Step 2 temp file. Preserves formatting, hyperlinks, conditional formatting.
+- **Sheet 1 ("Tickets")**: Indented overview (Depth 0 / Depth 1 columns) copied from Step 2 temp file. Preserves formatting, hyperlinks, conditional formatting.
 - **Sheets 2..N**: Each named after the ticket key (e.g., "STL-73989"). Copied from Step 3 temp files. Preserves formatting.
 - Saves to `{root_key}.xlsx` (or `--output` if specified).
 
@@ -112,7 +112,7 @@ def cmd_build_excel_map(args):
         3. Merge into one flat "Tickets" sheet (deduplicating by key)
         4. For each depth=1 ticket, _get_children_data(limit=None) — unlimited depth
         5. Write each as a temp .xlsx via dump_tickets_to_file
-        6. Assemble all into one workbook: Tickets (flat) + per-ticket sheets (indented)
+        6. Assemble all into one workbook: Tickets (indented depth 0-1) + per-ticket sheets (indented unlimited)
         7. Cleanup temp files
     '''
     ...
@@ -129,8 +129,8 @@ def build_excel_map(
 ) -> ToolResult:
     '''
     Build a multi-sheet Excel workbook mapping one or more tickets and their
-    related issues' child hierarchies.  Sheet 1 is a flat overview of root +
-    first-level children.  Sheets 2..N are per-ticket children with unlimited
+    related issues' child hierarchies.  Sheet 1 is an indented overview
+    (Depth 0 / Depth 1) of root + first-level children.  Sheets 2..N are per-ticket children with unlimited
     depth (indented format).
     '''
     ...
@@ -151,8 +151,8 @@ Root ticket(s) (STL-74071, STL-76297)
     │         ...
     │       ]
     │
-    ├── dump_tickets_to_file(merged, table_format='flat')
-    │   └── Sheet "Tickets": key | project | issue_type | status | priority | summary | ...
+    ├── dump_tickets_to_file(merged, extras, table_format='indented')
+    │   └── Sheet "Tickets": Depth 0 | Depth 1 | project | issue_type | status | ...
     │
     ├── For each depth=1 key:
     │   ├── _get_children_data(STL-73989, limit=None) → temp_STL-73989.xlsx (indented)
@@ -161,7 +161,7 @@ Root ticket(s) (STL-74071, STL-76297)
     │   └── ... (one per depth=1 ticket)
     │
     └── Assemble final workbook:
-        ├── Sheet 1: "Tickets" (flat overview — root + first-level only)
+        ├── Sheet 1: "Tickets" (indented overview — Depth 0 / Depth 1 columns)
         ├── Sheet 2: "STL-73989" (indented children, unlimited depth)
         ├── Sheet 3: "STL-74843" (indented children, unlimited depth)
         ├── Sheet 4: "STL-76300" (indented children, unlimited depth)

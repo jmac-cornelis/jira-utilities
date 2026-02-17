@@ -283,17 +283,18 @@ def cmd_build_excel_map(args):
     their related issues' child hierarchies.
 
     Accepts a list of ticket keys. For each ticket, calls _get_related_data()
-    with hierarchy=1 to get the first-level children only.  These go into a
-    flat "Tickets" overview sheet.  Then each first-level child gets its own
-    sheet with unlimited child hierarchy via _get_children_data().
+    with hierarchy=1 to get the first-level children only.  These go into an
+    indented "Tickets" overview sheet with Depth 0 / Depth 1 columns.  Then
+    each first-level child gets its own sheet with unlimited child hierarchy
+    via _get_children_data().
 
     Steps:
         1. Connect to Jira
         2. For each root ticket, _get_related_data(hierarchy=1) — first level only
-        3. Merge into one flat "Tickets" sheet (deduplicating by key)
+        3. Merge into one "Tickets" sheet with Depth 0/1 columns (deduplicating by key)
         4. For each depth=1 ticket, _get_children_data(limit=None) — unlimited depth
         5. Write each as a temp .xlsx via dump_tickets_to_file
-        6. Assemble all into one workbook: Tickets (flat) + per-ticket sheets (indented)
+        6. Assemble all into one workbook: Tickets (indented depth 0-1) + per-ticket sheets (indented unlimited)
         7. Cleanup temp files
 
     Uses jira_utils functions:
@@ -389,16 +390,25 @@ def cmd_build_excel_map(args):
 
         output(f'  Merged total: {len(merged_data)} unique issues')
 
-        # Write Map sheet to temp file — flat format (no depth columns)
-        # so the overview is a simple table of root + first-level tickets.
+        # Write Map sheet to temp file — indented format with Depth 0 /
+        # Depth 1 columns, but only first-level data (hierarchy=1).
         map_temp = os.path.join(temp_dir, '_map_temp.xlsx')
         temp_files.append(map_temp)
 
+        map_extras = {
+            item['issue'].get('key', ''): {
+                'depth': item.get('depth'),
+                'via': item.get('via'),
+                'relation': item.get('relation'),
+                'from_key': item.get('from_key'),
+            }
+            for item in merged_data
+        }
         jira_utils.dump_tickets_to_file(
             [item['issue'] for item in merged_data],
-            map_temp, 'excel', table_format='flat'
+            map_temp, 'excel', map_extras, table_format='indented'
         )
-        output(f'  Map sheet: {len(merged_data)} rows, flat format')
+        output(f'  Map sheet: {len(merged_data)} rows, indented format (depth 0-1)')
 
         # ---------------------------------------------------------------
         # Step 3: Get children for each depth=1 ticket (unlimited depth)
