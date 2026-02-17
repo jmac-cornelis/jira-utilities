@@ -556,6 +556,77 @@ def cmd_build_excel_map(args):
     return 0
 
 
+def _validate_and_repair_csv(filepath):
+    '''
+    Validate a CSV file and repair rows that have more columns than the header.
+
+    LLMs sometimes emit CSV with unquoted commas inside fields — for example
+    a summary like ``12.1.0.0.72,78, 12.1.0.1.4 - hfi1_0: CPORT …`` ends up
+    split across multiple columns.  This function detects such rows and merges
+    the excess columns back into the widest text field (heuristically the
+    "summary" or the longest-valued column in that row).
+
+    The file is rewritten in-place only if repairs were needed.
+
+    Returns the filepath (unchanged).
+    '''
+    import csv as _csv
+
+    with open(filepath, 'r', encoding='utf-8') as f:
+        reader = _csv.reader(f)
+        header = next(reader, None)
+        if not header:
+            return filepath
+        expected = len(header)
+        rows = []
+        needs_repair = False
+        for row in reader:
+            if len(row) > expected:
+                needs_repair = True
+                # Find the best column to merge excess into.
+                # Prefer 'summary' if it exists; otherwise pick the column
+                # with the longest value in this row.
+                summary_idx = None
+                for i, h in enumerate(header):
+                    if h.strip().lower() == 'summary':
+                        summary_idx = i
+                        break
+                if summary_idx is None:
+                    # Fallback: pick the column with the longest value
+                    summary_idx = max(range(min(expected, len(row))),
+                                      key=lambda i: len(row[i]))
+
+                # Merge: take the first `expected` cells, but fold the extra
+                # cells into the summary column by joining with commas.
+                extra_count = len(row) - expected
+                # The extra cells are the ones that were split out of the
+                # summary column.  They sit right after summary_idx.
+                merged_value = ','.join(
+                    row[summary_idx : summary_idx + 1 + extra_count])
+                repaired = (row[:summary_idx]
+                            + [merged_value]
+                            + row[summary_idx + 1 + extra_count:])
+                log.debug(
+                    f'CSV repair: row had {len(row)} cols, merged '
+                    f'{extra_count} extra into column "{header[summary_idx]}"')
+                rows.append(repaired)
+            elif len(row) < expected:
+                # Pad short rows with empty strings
+                needs_repair = True
+                rows.append(row + [''] * (expected - len(row)))
+            else:
+                rows.append(row)
+
+    if needs_repair:
+        log.info(f'Repairing CSV: {filepath} ({len(rows)} data rows)')
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = _csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(rows)
+
+    return filepath
+
+
 def _extract_and_save_files(response_text):
     '''
     Parse fenced code blocks from an LLM response and save any that specify
@@ -729,6 +800,14 @@ def _extract_and_save_files(response_text):
                 # Ensure file ends with a newline
                 if content and not content.endswith('\n'):
                     f.write('\n')
+
+            # ---- CSV validation: repair rows with wrong column count --------
+            # LLMs sometimes emit CSV with unquoted commas inside fields
+            # (e.g. "12.1.0.0.72,78" in a summary).  Detect and repair by
+            # re-reading with the csv module and merging excess columns back
+            # into the widest text field (typically 'summary').
+            if filepath.lower().endswith('.csv'):
+                filepath = _validate_and_repair_csv(filepath)
 
             written.append(filepath)
             log.info(f'Saved extracted file: {filepath} ({len(content)} chars)')
