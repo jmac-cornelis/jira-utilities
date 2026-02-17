@@ -1357,9 +1357,13 @@ def _workflow_bug_report(args):
         output('  No CSV files found in LLM output — skipping Excel conversion.')
         log.info('No CSV files to convert to Excel')
     else:
+        # Pass the Jira base URL so ticket-key cells become clickable links
+        # in the Excel output (e.g. https://cornelisnetworks.atlassian.net/browse/STL-76582).
+        jira_base_url = getattr(jira_utils, 'JIRA_URL', None)
         for csv_path in csv_files:
             try:
-                xlsx_path = excel_utils.convert_from_csv(csv_path)
+                xlsx_path = excel_utils.convert_from_csv(
+                    csv_path, jira_base_url=jira_base_url)
                 log.info(f'Converted {csv_path} -> {xlsx_path}')
                 output(f'  Converted: {csv_path} -> {xlsx_path}')
                 all_created_files.append((xlsx_path, 'Excel workbook'))

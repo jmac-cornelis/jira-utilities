@@ -484,12 +484,16 @@ python3 excel_utils.py --convert-to-csv data.xlsx --output custom_name.csv
 # CSV → Excel (with header styling, conditional formatting, auto-fit columns)
 python3 excel_utils.py --convert-from-csv data.csv
 python3 excel_utils.py --convert-from-csv data.csv --output styled.xlsx
+
+# CSV → Excel with clickable Jira ticket links in the "key" column
+python3 excel_utils.py --convert-from-csv data.csv --jira-url https://cornelisnetworks.atlassian.net
 ```
 
 | Flag | Description |
 |------|-------------|
 | `--convert-to-csv FILE` | Convert `.xlsx` to comma-delimited `.csv` |
 | `--convert-from-csv FILE` | Convert `.csv` to styled `.xlsx` |
+| `--jira-url URL` | Jira instance URL — makes "key" columns clickable hyperlinks (e.g. `STL-76582` → browse link) |
 | `--output FILE` | Override the default output filename |
 
 #### Diff
@@ -518,6 +522,7 @@ All output workbooks include automatic styling by default:
 | Header styling | Bold white text on dark-blue background, centered, with borders |
 | Status conditional formatting | Cell fill color based on status value (e.g., green for Closed, red for Open) |
 | Priority conditional formatting | Red fill for P0-Stopper, yellow fill for P1-Critical |
+| Jira ticket hyperlinks | "key" columns become clickable links to the Jira ticket (when `--jira-url` or `JIRA_URL` is set) |
 | Auto-fit columns | Column widths adjusted to content |
 | Frozen header row | First row stays visible when scrolling |
 | Auto-filter | Drop-down filters on every column |
@@ -537,6 +542,7 @@ python3 excel_utils.py --concat *.xlsx --no-formatting
 | `-v`, `--verbose` | Enable verbose (DEBUG-level) output |
 | `-q`, `--quiet` | Minimal stdout output |
 | `--no-formatting` | Disable all Excel formatting (header styling, conditional formatting, auto-fit) |
+| `--jira-url URL` | Jira instance URL — makes "key" columns clickable hyperlinks (auto-set in workflows from `JIRA_URL` env var) |
 
 ---
 
