@@ -551,8 +551,8 @@ Generate a cleaned, enriched bug report from a Jira filter:
 # Basic usage — looks up filter by name, pulls tickets, sends to LLM, converts to Excel
 python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800
 
-# With debug logging
-python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800 --debug
+# With verbose logging
+python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800 --verbose
 
 # Custom prompt file
 python3 pm_agent.py --workflow bug-report --filter "My Filter" --prompt my_prompt.md --timeout 600
@@ -579,7 +579,7 @@ python3 pm_agent.py --workflow bug-report --filter "My Filter" --prompt my_promp
 | `--timeout SECS` | LLM request timeout in seconds |
 | `--limit N` | Max tickets to retrieve |
 | `--output FILE` | Override output filename |
-| `--debug` | Enable debug-level logging |
+| `--verbose`, `-v` | Enable verbose (debug-level) logging |
 
 ---
 

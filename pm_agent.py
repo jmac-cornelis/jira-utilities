@@ -1554,23 +1554,23 @@ Examples:
     parser.add_argument('--timeout', type=float, default=None,
                        help='LLM request timeout in seconds (default: 120; used by --invoke-llm)')
     
-    # ---- Global debug flag -----------------------------------------------------
-    parser.add_argument('--debug', action='store_true',
-                       help='Enable debug-level logging to stdout')
+    # ---- Global verbose flag ---------------------------------------------------
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='Enable verbose (debug-level) logging to stdout')
     
     args = parser.parse_args()
     
     if args.quiet:
         _quiet_mode = True
     
-    # ---- Debug mode: add a stdout handler so debug messages appear on console --
-    if args.debug:
+    # ---- Verbose mode: add a stdout handler so debug messages appear on console
+    if args.verbose:
         sh = logging.StreamHandler(sys.stdout)
         sh.setLevel(logging.DEBUG)
         sh.setFormatter(logging.Formatter(
             '%(asctime)-15s [%(funcName)25s:%(lineno)-5s] %(levelname)-8s %(message)s'))
         log.addHandler(sh)
-        log.debug('Debug mode enabled (--debug)')
+        log.debug('Verbose mode enabled (--verbose)')
     
     # ---- Determine which command was requested ---------------------------------
     # Count how many command flags were set to enforce mutual exclusivity

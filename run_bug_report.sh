@@ -185,7 +185,7 @@ python3 pm_agent.py \
     --invoke-llm "$PROMPT" \
     --attachments "${DUMP_FILE}.json" \
     --timeout "$LLM_TIMEOUT" \
-    --debug
+    --verbose
 
 # The LLM agent saves extracted files (e.g. cn_bug_report.csv) and llm_output.md
 if [[ -f "llm_output.md" ]]; then
