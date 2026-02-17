@@ -55,18 +55,17 @@ except ImportError:
 
 @tool(
     description='Build a multi-sheet Excel workbook mapping one or more root tickets and '
-                'all their related issues child hierarchies. Sheet 1 ("Tickets") is the '
-                'merged get-related overview. Sheets 2..N are per-ticket get-children results.',
+                'all their related issues child hierarchies.  Sheet 1 ("Tickets") is a '
+                'flat overview of root + first-level children.  Sheets 2..N are per-ticket '
+                'children with unlimited depth (indented format).',
     parameters={
         'ticket_keys': 'List of root Jira ticket keys (e.g., ["STL-74071", "STL-76297"])',
-        'hierarchy_depth': 'Depth for related issue traversal (default: 1)',
         'limit': 'Optional max tickets per step',
         'output_file': 'Output filename (default: {ticket_key}.xlsx)',
     }
 )
 def build_excel_map(
     ticket_keys: List[str],
-    hierarchy_depth: int = 1,
     limit: int = None,
     output_file: str = None,
 ) -> ToolResult:
@@ -75,14 +74,13 @@ def build_excel_map(
     related issues' child hierarchies.
 
     Orchestrates:
-      1. For each root ticket, _get_related_data() and merge results (dedup by key)
-      2. Writes Tickets sheet (indented format) from merged data
-      3. _get_children_data() for each depth=1 ticket
+      1. For each root ticket, _get_related_data(hierarchy=1) — first level only
+      2. Writes flat "Tickets" overview sheet from merged data
+      3. _get_children_data(limit=None) for each depth=1 ticket — unlimited depth
       4. Assembles all sheets into one workbook
 
     Input:
         ticket_keys: List of root Jira ticket keys.
-        hierarchy_depth: Depth for related issue traversal (default 1).
         limit: Optional max tickets per step.
         output_file: Output filename (default: {first_key}.xlsx or combined).
 
@@ -122,19 +120,22 @@ def build_excel_map(
         # Step 1: Connect to Jira
         jira = jira_utils.connect_to_jira()
 
-        # Step 2: Get related issues for each root ticket, merge with dedup
+        # Step 2: Get first-level related issues for each root ticket.
+        #         Always hierarchy=1 so the overview sheet is flat (root +
+        #         direct children only).  Merge results, dedup by key.
         merged_data = []
         seen_keys = set()
 
         for root_key in keys:
-            related_data = jira_utils._get_related_data(jira, root_key, hierarchy=hierarchy_depth, limit=limit)
+            related_data = jira_utils._get_related_data(jira, root_key, hierarchy=1, limit=limit)
             for item in related_data:
                 issue_key = item['issue'].get('key', '')
                 if issue_key and issue_key not in seen_keys:
                     seen_keys.add(issue_key)
                     merged_data.append(item)
 
-        # Write Tickets sheet to temp file
+        # Write Tickets sheet to temp file — indented format with Depth 0 /
+        # Depth 1 columns, but only first-level data (hierarchy=1).
         map_temp = os.path.join(temp_dir, '_map_temp.xlsx')
         temp_files.append(map_temp)
 
@@ -212,9 +213,20 @@ def build_excel_map(
             for merged_range in src_ws.merged_cells.ranges:
                 dest_ws.merge_cells(str(merged_range))
 
+            # Copy conditional formatting rules.
+            # openpyxl's add() expects a plain string for the cell range.
+            # Passing a MultiCellRange directly causes a 'to_tree'
+            # AttributeError at save time.
             for cf_rule in src_ws.conditional_formatting:
+                try:
+                    cell_range = str(cf_rule.sqref)
+                except AttributeError:
+                    cell_range = str(cf_rule)
                 for rule in cf_rule.rules:
-                    dest_ws.conditional_formatting.add(str(cf_rule), rule)
+                    try:
+                        dest_ws.conditional_formatting.add(cell_range, rule)
+                    except Exception as cf_err:
+                        log.debug(f'Skipping conditional formatting rule: {cf_err}')
 
             if src_ws.freeze_panes:
                 dest_ws.freeze_panes = src_ws.freeze_panes

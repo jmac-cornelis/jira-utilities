@@ -283,17 +283,18 @@ def cmd_build_excel_map(args):
     their related issues' child hierarchies.
 
     Accepts a list of ticket keys. For each ticket, calls _get_related_data()
-    and merges the results into a single Map sheet (deduplicating by key).
-    Then gets children for every depth=1 ticket and adds each as a separate
-    sheet.
+    with hierarchy=1 to get the first-level children only.  These go into an
+    indented "Tickets" overview sheet with Depth 0 / Depth 1 columns.  Then
+    each first-level child gets its own sheet with unlimited child hierarchy
+    via _get_children_data().
 
     Steps:
         1. Connect to Jira
-        2. For each root ticket, _get_related_data() with given hierarchy depth
-        3. Merge all results into one Map sheet (indented format)
-        4. For each depth=1 ticket, _get_children_data() (unlimited depth)
+        2. For each root ticket, _get_related_data(hierarchy=1) — first level only
+        3. Merge into one "Tickets" sheet with Depth 0/1 columns (deduplicating by key)
+        4. For each depth=1 ticket, _get_children_data(limit=None) — unlimited depth
         5. Write each as a temp .xlsx via dump_tickets_to_file
-        6. Assemble all into one workbook: Tickets (Map) + per-ticket sheets
+        6. Assemble all into one workbook: Tickets (indented depth 0-1) + per-ticket sheets (indented unlimited)
         7. Cleanup temp files
 
     Uses jira_utils functions:
@@ -359,18 +360,21 @@ def cmd_build_excel_map(args):
             jira_utils.validate_project(jira, args.project)
 
         # ---------------------------------------------------------------
-        # Step 2: Get related issues for each root ticket (in-memory)
-        #         Merge results, deduplicating by issue key while
-        #         preserving insertion order.
+        # Step 2: Get first-level related issues for each root ticket.
+        #         Always use hierarchy=1 so the overview sheet contains
+        #         only the root(s) and their direct children — not the
+        #         full recursive tree.  Merge results, deduplicating by
+        #         issue key while preserving insertion order.
         # ---------------------------------------------------------------
-        output(f'Step 2/4: Getting related issues for {len(ticket_keys)} root ticket(s) (hierarchy={hierarchy_depth})...')
+        output(f'Step 2/4: Getting first-level issues for {len(ticket_keys)} root ticket(s)...')
 
         merged_data = []       # combined ordered list (deduplicated)
         seen_keys = set()      # track keys already in merged_data
 
         for root_key in ticket_keys:
             output(f'  Fetching related for {root_key}...')
-            related_data = jira_utils._get_related_data(jira, root_key, hierarchy=hierarchy_depth, limit=limit)
+            # hierarchy=1 → root + direct children only (flat overview)
+            related_data = jira_utils._get_related_data(jira, root_key, hierarchy=1, limit=limit)
 
             added = 0
             for item in related_data:
@@ -386,11 +390,11 @@ def cmd_build_excel_map(args):
 
         output(f'  Merged total: {len(merged_data)} unique issues')
 
-        # Write Map sheet to temp file
+        # Write Map sheet to temp file — indented format with Depth 0 /
+        # Depth 1 columns, but only first-level data (hierarchy=1).
         map_temp = os.path.join(temp_dir, '_map_temp.xlsx')
         temp_files.append(map_temp)
 
-        # Build extras dict for dump_tickets_to_file (depth + via metadata)
         map_extras = {
             item['issue'].get('key', ''): {
                 'depth': item.get('depth'),
@@ -404,10 +408,10 @@ def cmd_build_excel_map(args):
             [item['issue'] for item in merged_data],
             map_temp, 'excel', map_extras, table_format='indented'
         )
-        output(f'  Map sheet: {len(merged_data)} rows, indented format')
+        output(f'  Map sheet: {len(merged_data)} rows, indented format (depth 0-1)')
 
         # ---------------------------------------------------------------
-        # Step 3: Get children for each depth=1 ticket
+        # Step 3: Get children for each depth=1 ticket (unlimited depth)
         # ---------------------------------------------------------------
         depth1_keys = [item['issue'].get('key', '') for item in merged_data if item['depth'] == 1]
         output(f'Step 3/4: Getting children for {len(depth1_keys)} depth=1 tickets...')
@@ -499,10 +503,21 @@ def cmd_build_excel_map(args):
             for merged_range in src_ws.merged_cells.ranges:
                 dest_ws.merge_cells(str(merged_range))
 
-            # Copy conditional formatting rules
+            # Copy conditional formatting rules.
+            # openpyxl's add() expects a plain string for the cell range
+            # (e.g. "A2:A100").  Internally it wraps the string into a
+            # MultiCellRange.  Passing a MultiCellRange directly causes
+            # a 'to_tree' AttributeError at save time.
             for cf_rule in src_ws.conditional_formatting:
+                try:
+                    cell_range = str(cf_rule.sqref)
+                except AttributeError:
+                    cell_range = str(cf_rule)
                 for rule in cf_rule.rules:
-                    dest_ws.conditional_formatting.add(str(cf_rule), rule)
+                    try:
+                        dest_ws.conditional_formatting.add(cell_range, rule)
+                    except Exception as cf_err:
+                        log.debug(f'Skipping conditional formatting rule: {cf_err}')
 
             # Copy freeze panes
             if src_ws.freeze_panes:
