@@ -500,15 +500,15 @@ def cmd_build_excel_map(args):
                 dest_ws.merge_cells(str(merged_range))
 
             # Copy conditional formatting rules.
-            # openpyxl's add() expects a cell-range string *or* a
-            # MultiCellRange, depending on the version.  Using the
-            # sqref attribute (which is already a MultiCellRange) is
-            # the safest approach; fall back to str() for older builds.
+            # openpyxl's add() expects a plain string for the cell range
+            # (e.g. "A2:A100").  Internally it wraps the string into a
+            # MultiCellRange.  Passing a MultiCellRange directly causes
+            # a 'to_tree' AttributeError at save time.
             for cf_rule in src_ws.conditional_formatting:
                 try:
-                    cell_range = cf_rule.sqref          # MultiCellRange
+                    cell_range = str(cf_rule.sqref)
                 except AttributeError:
-                    cell_range = str(cf_rule)            # fallback
+                    cell_range = str(cf_rule)
                 for rule in cf_rule.rules:
                     try:
                         dest_ws.conditional_formatting.add(cell_range, rule)
