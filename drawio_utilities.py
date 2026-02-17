@@ -95,6 +95,9 @@ LINK_COLORS = {
     'is related to': '0000FF',       # Blue for related
     'is caused by': 'FFCC00',        # Yellow for causes
     'causes': 'FFCC00',              # Yellow for causes
+
+    # jira_utils.py export uses link_via='child' for parent->child edges
+    'child': '00AA00',               # Green for parent/child
     'is child of': '00AA00',         # Green for parent/child
     'is parent of': '00AA00',        # Green for parent/child
 }
@@ -112,6 +115,9 @@ BOX_FILL_COLORS = {
     'clones': 'FFE5CC',              # Light orange
     'is caused by': 'FFFFCC',        # Light yellow
     'causes': 'FFFFCC',              # Light yellow
+
+    # jira_utils.py export uses link_via='child' for parent->child edges
+    'child': 'E6FFE6',               # Light green
 }
 
 # Default box fill color
@@ -119,6 +125,51 @@ DEFAULT_BOX_FILL = 'FFFFFF'  # White
 
 # Root node color (depth 0)
 ROOT_BOX_FILL = 'E6FFE6'  # Light green
+
+
+# ****************************************************************************************
+# Status badge configuration
+# ****************************************************************************************
+
+# Note: Jira status names vary by project/workflow. We classify common keywords
+# into a small set of emoji badges so the diagram can show status without using
+# box fill colors (already reserved for relationship encoding).
+#
+# The badge is rendered directly in the vertex label (HTML), so it survives
+# export/import and works in both diagrams.net and the VS Code draw.io plugin.
+STATUS_EMOJI_DEFAULT = '⚪'
+STATUS_EMOJI_KEYWORDS = [
+    # (keywords, emoji)
+    (['blocked', 'impediment'], '⛔'),
+    (['in progress', 'implement', 'doing', 'wip'], '🚧'),
+    (['review', 'code review', 'pr review'], '🔍'),
+    (['qa', 'test', 'testing', 'verify', 'verification'], '🧪'),
+    (['done', 'closed', 'resolved', 'complete', 'completed'], '✅'),
+    (['to do', 'todo', 'backlog', 'open', 'ready'], '⏳'),
+]
+
+
+def get_status_emoji(status: str) -> str:
+    '''
+    Map a Jira status string to an emoji badge.
+
+    Input:
+        status: Jira status name (free-form, varies by project).
+
+    Output:
+        Emoji string suitable for embedding in draw.io HTML labels.
+    '''
+    if not status:
+        return STATUS_EMOJI_DEFAULT
+
+    status_lower = status.lower().strip()
+
+    for keywords, emoji in STATUS_EMOJI_KEYWORDS:
+        for kw in keywords:
+            if kw in status_lower:
+                return emoji
+
+    return STATUS_EMOJI_DEFAULT
 
 
 # ****************************************************************************************
@@ -318,6 +369,7 @@ def create_drawio_xml(tickets, title='Jira Dependency Map'):
         depth = ticket.get('depth', 0)
         link_via = ticket.get('link_via', '')
         summary = ticket.get('summary', '').strip()
+        status = (ticket.get('status') or '').strip()
 
         # Clean up summary - remove leading spaces and "(via ...)" suffix
         if summary.startswith('  '):
@@ -341,13 +393,31 @@ def create_drawio_xml(tickets, title='Jira Dependency Map'):
         # Build the ticket URL
         ticket_url = f'{JIRA_URL}/browse/{key}'
 
+        # Status badge (emoji + optional text) embedded into the label.
+        # This avoids using box fill colors for status (those are reserved for relationship type).
+        status_emoji = get_status_emoji(status)
+        status_suffix = f' <font style="font-size:9px;color:#666">({status})</font>' if status else ''
+
         # Create the cell
         cell = ET.SubElement(root, 'mxCell')
         cell.set('id', cell_id)
+
         # Value contains the label with link - use HTML format
-        label = f'<a href="{ticket_url}" target="_blank">{key}</a><br/><font style="font-size:10px">{summary}</font>'
+        # Layout: top-left aligned so the emoji reads like a "corner badge".
+        label = (
+            f'{status_emoji} '
+            f'<a href="{ticket_url}" target="_blank">{key}</a>'
+            f'{status_suffix}'
+            f'<br/><font style="font-size:10px">{summary}</font>'
+        )
+
         cell.set('value', label)
-        cell.set('style', f'rounded=1;whiteSpace=wrap;html=1;fillColor=#{fill_color};strokeColor=#{stroke_color};strokeWidth=2;')
+        cell.set(
+            'style',
+            f'rounded=1;whiteSpace=wrap;html=1;'
+            f'fillColor=#{fill_color};strokeColor=#{stroke_color};strokeWidth=2;'
+            f'align=left;verticalAlign=top;spacingLeft=6;spacingTop=4;'
+        )
         cell.set('vertex', '1')
         cell.set('parent', '1')
 
@@ -358,43 +428,47 @@ def create_drawio_xml(tickets, title='Jira Dependency Map'):
         geometry.set('height', str(box_height))
         geometry.set('as', 'geometry')
 
-    # Create edges (connections) between parent and child tickets
-    # We connect each non-root ticket to its parent (the root or previous depth level)
-    # For simplicity, connect each ticket at depth N to the first ticket at depth N-1
-    # A more sophisticated approach would track actual parent relationships
+    # Create edges (connections) between related tickets.
+    #
+    # Preferred behavior:
+    #   - Use explicit relationship metadata from jira_utils.py export:
+    #       - from_key: source issue key
+    #       - key: target issue key
+    #       - link_via: relationship label
+    #
+    # Backward compatible behavior:
+    #   - If from_key is missing in the CSV, fall back to the legacy depth-based
+    #     "connect each depth N node to the first depth N-1 node".
 
-    # Build parent mapping: for each depth level, connect to tickets at previous level
-    # Since we don't have explicit parent info, we'll connect based on depth ordering
-    for depth in sorted(by_depth.keys()):
-        if depth == 0:
-            continue  # Root has no parent
+    has_explicit_edges = any((t.get('from_key') or '').strip() for t in tickets)
 
-        tickets_at_depth = by_depth[depth]
-        parent_tickets = by_depth.get(depth - 1, [])
+    if has_explicit_edges:
+        created_edges = set()  # (source_id, target_id, label)
 
-        if not parent_tickets:
-            continue
+        for ticket in tickets:
+            child_key = ticket.get('key')
+            parent_key = (ticket.get('from_key') or '').strip()
+            link_via = (ticket.get('link_via') or '').strip()
 
-        # For now, connect all tickets at this depth to the first parent
-        # (In a real scenario, you'd track the actual parent relationship)
-        parent_key = parent_tickets[0]['key']
-        parent_id = cell_ids.get(parent_key)
+            if not parent_key:
+                continue  # root (or unknown source)
 
-        if not parent_id:
-            continue
-
-        for ticket in tickets_at_depth:
-            child_key = ticket['key']
+            parent_id = cell_ids.get(parent_key)
             child_id = cell_ids.get(child_key)
-            link_via = ticket.get('link_via', '')
 
-            if not child_id:
+            if not parent_id or not child_id:
                 continue
+            if parent_id == child_id:
+                continue
+
+            edge_key = (parent_id, child_id, link_via)
+            if edge_key in created_edges:
+                continue
+            created_edges.add(edge_key)
 
             edge_id = str(cell_counter)
             cell_counter += 1
 
-            # Get edge color based on link type
             edge_color = get_stroke_color(link_via)
 
             edge = ET.SubElement(root, 'mxCell')
@@ -409,6 +483,50 @@ def create_drawio_xml(tickets, title='Jira Dependency Map'):
             geometry = ET.SubElement(edge, 'mxGeometry')
             geometry.set('relative', '1')
             geometry.set('as', 'geometry')
+
+    else:
+        # Legacy fallback: no explicit parent relationship, only depth.
+        for depth in sorted(by_depth.keys()):
+            if depth == 0:
+                continue  # Root has no parent
+
+            tickets_at_depth = by_depth[depth]
+            parent_tickets = by_depth.get(depth - 1, [])
+
+            if not parent_tickets:
+                continue
+
+            parent_key = parent_tickets[0]['key']
+            parent_id = cell_ids.get(parent_key)
+
+            if not parent_id:
+                continue
+
+            for ticket in tickets_at_depth:
+                child_key = ticket['key']
+                child_id = cell_ids.get(child_key)
+                link_via = ticket.get('link_via', '')
+
+                if not child_id:
+                    continue
+
+                edge_id = str(cell_counter)
+                cell_counter += 1
+
+                edge_color = get_stroke_color(link_via)
+
+                edge = ET.SubElement(root, 'mxCell')
+                edge.set('id', edge_id)
+                edge.set('value', link_via if link_via else '')
+                edge.set('style', f'edgeStyle=none;rounded=0;html=1;strokeColor=#{edge_color};strokeWidth=2;endArrow=classic;endFill=1;')
+                edge.set('edge', '1')
+                edge.set('parent', '1')
+                edge.set('source', parent_id)
+                edge.set('target', child_id)
+
+                geometry = ET.SubElement(edge, 'mxGeometry')
+                geometry.set('relative', '1')
+                geometry.set('as', 'geometry')
 
     # Convert to string
     xml_str = ET.tostring(mxfile, encoding='unicode')

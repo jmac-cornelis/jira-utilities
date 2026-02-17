@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "jira_utils.py --create-ticket [FILE] schema",
+  "description": "Schema for JSON input accepted by jira_utils.py via --create-ticket FILE when creating a ticket.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["project", "summary", "issue_type"],
+  "properties": {
+    "project": {
+      "type": "string",
+      "description": "Jira project key (e.g., PROJ). Equivalent to CLI --project."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Issue summary. Equivalent to CLI --summary."
+    },
+    "issue_type": {
+      "type": "string",
+      "description": "Issue type name (e.g., Task, Bug, Story). Equivalent to CLI --issue-type."
+    },
+    "description": {
+      "type": "string",
+      "description": "Plain-text description. Will be converted to Jira Cloud ADF. Equivalent to CLI --ticket-description."
+    },
+    "assignee_id": {
+      "type": "string",
+      "description": "Assignee accountId (Jira Cloud). Equivalent to CLI --assignee-id."
+    },
+    "components": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Component names to set. Equivalent to CLI --components."
+    },
+    "fix_versions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Fix version(s) to set. Equivalent to CLI --fix-versions."
+    },
+    "labels": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Labels to set. Equivalent to CLI --labels."
+    },
+    "parent": {
+      "type": "string",
+      "description": "Parent issue key (e.g., PROJ-123). Equivalent to CLI --parent."
+    }
+  },
+  "examples": [
+    {
+      "project": "PROJ",
+      "summary": "Investigate intermittent link flap",
+      "issue_type": "Task",
+      "description": "Repro steps...",
+      "components": ["Firmware"],
+      "labels": ["triage"],
+      "fix_versions": ["12.3.0"],
+      "parent": "PROJ-123"
+    }
+  ]
+}

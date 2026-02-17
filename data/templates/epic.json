@@ -1,0 +1,12 @@
+{
+  "name": "Epic Template",
+  "description": "Template for creating Epic tickets",
+  "fields": {
+    "issue_type": "Epic",
+    "summary_prefix": "",
+    "description_template": "## Overview\n\n{description}\n\n## Goals\n\n- {goals}\n\n## Acceptance Criteria\n\n- [ ] {criteria}\n\n## Dependencies\n\n{dependencies}",
+    "default_labels": ["epic"],
+    "default_priority": "Medium"
+  },
+  "child_types": ["Story", "Task", "Bug"]
+}

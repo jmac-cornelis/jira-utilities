@@ -1,0 +1,15 @@
+{
+  "project": "STLSB",
+  "issue_type": "Story",
+  "summary": "As a user, I want to do X so that I can achieve Y",
+  "description": "## User Story\n\nAs a <user/persona>, I want to <do something> so that <benefit>.\n\n## Acceptance Criteria\n\n- [ ] Given <context>, when <action>, then <outcome>\n- [ ] Given <context>, when <action>, then <outcome>\n\n## Notes\n\n- Links: <paste links here>\n- Technical notes: <paste notes here>\n",
+  "components": [
+    "Driver"
+  ],
+  "labels": [
+    "created-by-cli"
+  ],
+  "fix_versions": [
+    "12.3.0"
+  ]
+}

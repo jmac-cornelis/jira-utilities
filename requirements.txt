@@ -1,3 +1,25 @@
-jira>=3.5.0
-python-dotenv>=1.0.0
-requests>=2.28.0
+# Cornelis Agent Pipeline - Python Dependencies
+
+# Core dependencies
+jira>=3.5.0                    # Jira API client
+python-dotenv>=1.0.0           # Environment variable management
+requests>=2.28.0               # HTTP client
+
+# LLM dependencies
+openai>=1.0.0                  # OpenAI SDK (also used for OpenAI-compatible APIs)
+litellm>=1.0.0                 # Multi-provider LLM interface
+
+# Google ADK (Agent Development Kit)
+google-adk>=0.1.0              # Google Agent Development Kit
+
+# Document processing
+python-pptx>=0.6.21            # PowerPoint file processing
+openpyxl>=3.1.0                # Excel file processing
+Pillow>=10.0.0                 # Image processing
+
+# Data handling
+pyyaml>=6.0                    # YAML file support
+
+# Optional: For enhanced features
+# anthropic>=0.18.0            # Anthropic SDK (if using Claude directly)
+# google-generativeai>=0.3.0   # Google Gemini SDK

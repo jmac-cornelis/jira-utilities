@@ -1,758 +1,853 @@
-# Jira Utilities
+# Cornelis Agent Pipeline
 
-A command-line tool for interacting with Cornelis Networks' Jira instance. This utility provides various functions for querying projects, tickets, releases, and performing bulk updates.
+An AI-powered agent pipeline for automating Jira release planning at Cornelis Networks. Built with Google ADK architecture patterns and supporting custom LLM endpoints.
 
 ## Table of Contents
 
-- [Requirements](#requirements)
+- [Overview](#overview)
+- [Architecture](#architecture)
 - [Installation](#installation)
-- [Authentication](#authentication)
+  - [Global CLI Install (pipx)](#global-cli-install-pipx)
+- [Configuration](#configuration)
 - [Usage](#usage)
-- [Command Reference](#command-reference)
-- [Examples](#examples)
-- [Output Formats](#output-formats)
-- [Date Filters](#date-filters)
-- [Dashboard Management](#dashboard-management)
-- [Draw.io Diagram Generation](#drawio-diagram-generation)
+  - [Jira CLI (`jira_utils.py`)](#jira-cli-jira_utilspy)
+  - [Draw.io CLI (`drawio_utilities.py`)](#drawio-cli-drawio_utilitiespy)
+  - [Excel CLI (`excel_utils.py`)](#excel-cli-excel_utilspy)
+  - [Workflows (`--workflow`)](#workflows---workflow)
+  - [Agent Pipeline (`pm_agent.py`)](#agent-pipeline-pm_agentpy)
+- [Ticket Creation](#ticket-creation)
+- [Agent Pipeline](#agent-pipeline)
+- [Tools](#tools)
+- [Standalone Utilities](#standalone-utilities)
+- [Development](#development)
 
-## Requirements
+## Overview
+
+The Cornelis Agent Pipeline automates the process of creating Jira release structures from roadmap documents. Given roadmap slides, org charts, and the current Jira state, the agent:
+
+1. **Analyzes** roadmap documents (PowerPoint, Excel, images)
+2. **Examines** current Jira project state
+3. **Creates** a release plan with tickets and assignments
+4. **Reviews** the plan with human approval
+5. **Executes** approved changes in Jira
+
+### Key Features
+
+- **Multi-agent architecture** — Specialized agents for different tasks
+- **Human-in-the-loop** — Approval workflow before any Jira modifications
+- **Custom LLM support** — Works with Cornelis internal LLM or external providers
+- **Session persistence** — Resume interrupted workflows
+- **Vision capabilities** — Extract data from images and slides
+- **Ticket creation** — Create Jira tickets from CLI flags or JSON files
+- **Draw.io diagrams** — Generate dependency diagrams from Jira hierarchy exports
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Release Planning Orchestrator                 │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │   Vision     │  │    Jira      │  │   Planning   │          │
+│  │  Analyzer    │  │   Analyst    │  │    Agent     │          │
+│  └──────────────┘  └──────────────┘  └──────────────┘          │
+│                                                                  │
+│  ┌──────────────┐                                               │
+│  │   Review     │                                               │
+│  │    Agent     │                                               │
+│  └──────────────┘                                               │
+├─────────────────────────────────────────────────────────────────┤
+│                         Tools Layer                              │
+│  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐   │
+│  │ Jira Tools │ │Draw.io Tools│ │Vision Tools│ │ File Tools │   │
+│  └────────────┘ └────────────┘ └────────────┘ └────────────┘   │
+├─────────────────────────────────────────────────────────────────┤
+│                      LLM Abstraction Layer                       │
+│  ┌────────────────────┐  ┌────────────────────┐                 │
+│  │   Cornelis LLM     │  │   LiteLLM Client   │                 │
+│  │  (Internal API)    │  │ (OpenAI/Anthropic) │                 │
+│  └────────────────────┘  └────────────────────┘                 │
+├─────────────────────────────────────────────────────────────────┤
+│                     Standalone CLI Utilities                      │
+│  ┌────────────────────┐  ┌────────────────────┐                 │
+│  │   jira_utils.py    │  │ drawio_utilities.py│                 │
+│  └────────────────────┘  └────────────────────┘                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Installation
+
+### Prerequisites
 
 - Python 3.9 or higher
 - Access to Cornelis Networks Jira instance
 - Jira API token
+- Access to Cornelis internal LLM (or external LLM API key)
 
-### Python Dependencies
+### Setup
 
-- `jira` - Jira API client library
-- `python-dotenv` - Load environment variables from .env file
-- `requests` - HTTP library for API calls
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd cornelis-agent
+   ```
 
-## Installation
-
-1. Clone or download this repository
-
-2. Create and activate a virtual environment:
+2. **Create virtual environment**
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    ```
 
-3. Install dependencies:
+3. **Install dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-   Or install manually:
-   ```bash
-   pip install jira python-dotenv requests
-   ```
-
-## Authentication
-
-This script uses Jira API tokens for authentication. You need to configure your credentials before running.
-
-### Option 1: Using a .env File (Recommended)
-
-The script automatically loads credentials from a `.env` file in the project directory.
-
-1. Copy the example file:
+4. **Configure environment**
    ```bash
    cp .env.example .env
+   # Edit .env with your credentials
    ```
 
-2. Edit `.env` and fill in your credentials:
-   ```bash
-   JIRA_EMAIL=your.email@cornelisnetworks.com
-   JIRA_API_TOKEN=your_api_token_here
-   ```
+### Global CLI Install (pipx)
 
-3. Generate an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
-
-> **Note:** The `.env` file is gitignored for security - your credentials will not be committed to version control.
-
-### Option 2: Using Environment Variables
-
-Alternatively, you can set environment variables directly:
+To make `jira-utils` and `drawio-utils` available as commands in **any** directory (without activating a venv), use [pipx](https://pipx.pypa.io/):
 
 ```bash
-export JIRA_EMAIL="your.email@cornelisnetworks.com"
-export JIRA_API_TOKEN="your_api_token_here"
+# Install pipx (macOS)
+brew install pipx
+pipx ensurepath          # adds ~/.local/bin to PATH (restart terminal)
+
+# Editable install from the repo — changes to source are reflected immediately
+pipx install /path/to/this/repo --editable
+
+# Verify
+jira-utils -h
+drawio-utils -h
 ```
 
-> **IMPORTANT:** Never commit credentials to version control.
+This creates an isolated virtualenv with only the CLI dependencies (`jira`, `python-dotenv`, `requests`). The agent pipeline extras (`openai`, `litellm`, etc.) are **not** installed by default; add them with:
+
+```bash
+pipx install /path/to/this/repo --editable --pip-args='.[agents]'
+```
+
+To uninstall:
+
+```bash
+pipx uninstall cornelis-jira-tools
+```
+
+> **Note:** The `--editable` flag means the installed commands point back to your working copy. Any edits to `jira_utils.py` or `drawio_utilities.py` take effect immediately — no reinstall needed.
+
+## Configuration
+
+### Environment Variables
+
+Copy `.env.example` to `.env` and configure:
+
+```bash
+# Jira credentials
+JIRA_EMAIL=your.email@cornelisnetworks.com
+JIRA_API_TOKEN=your_api_token
+JIRA_URL=https://cornelisnetworks.atlassian.net
+
+# Cornelis internal LLM
+CORNELIS_LLM_BASE_URL=http://internal-llm.cornelis.com/v1
+CORNELIS_LLM_API_KEY=your_internal_key
+CORNELIS_LLM_MODEL=cornelis-default
+
+# External LLM (fallback/vision)
+OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=your_anthropic_key
+
+# Provider selection
+DEFAULT_LLM_PROVIDER=cornelis
+VISION_LLM_PROVIDER=cornelis
+FALLBACK_ENABLED=true
+```
+
+### Multiple Environment Files
+
+You can maintain separate `.env` files for different Jira instances (e.g., sandbox vs. production) and select one at runtime with `--env`:
+
+```bash
+# Default: loads .env
+python3 jira_utils.py --list
+
+# Load a specific env file
+python3 jira_utils.py --list --env .env_prod
+python3 jira_utils.py --list --env .env_sandbox
+```
+
+> **Note:** The `--env` flag only affects `jira_utils.py`. The agent pipeline (`pm_agent.py`) always loads `.env`.
+
+### LLM Provider Options
+
+| Provider | Use Case | Configuration |
+|----------|----------|---------------|
+| `cornelis` | Default, internal LLM | `CORNELIS_LLM_*` variables |
+| `openai` | GPT-4, GPT-4o | `OPENAI_API_KEY` |
+| `anthropic` | Claude models | `ANTHROPIC_API_KEY` |
 
 ## Usage
 
-Basic syntax:
+### Jira CLI (`jira_utils.py`)
+
+The standalone Jira CLI provides project inspection, ticket queries, ticket creation, bulk operations, and dashboard management.
+
+#### Project & Metadata
+
 ```bash
-python jira_utils.py [OPTIONS]
+# List all accessible projects
+python3 jira_utils.py --list
+
+# Project metadata
+python3 jira_utils.py --project PROJ --get-workflow
+python3 jira_utils.py --project PROJ --get-issue-types
+python3 jira_utils.py --project PROJ --get-fields
+python3 jira_utils.py --project PROJ --get-versions
+python3 jira_utils.py --project PROJ --get-components
 ```
 
-With virtual environment:
+#### Ticket Queries
+
 ```bash
-source venv/bin/activate && python jira_utils.py [OPTIONS]
+# Get tickets with filters
+python3 jira_utils.py --project PROJ --get-tickets
+python3 jira_utils.py --project PROJ --get-tickets --issue-types Bug Story --status Open --limit 50
+
+# Release tickets
+python3 jira_utils.py --project PROJ --releases "12.*"
+python3 jira_utils.py --project PROJ --release-tickets "12.3*" --issue-types Bug Story Task
+
+# Tickets with no release
+python3 jira_utils.py --project PROJ --no-release --issue-types Bug --status Open
+
+# Ticket totals
+python3 jira_utils.py --project PROJ --total --issue-types Bug --status Open "In Progress"
+
+# Custom JQL
+python3 jira_utils.py --jql "project = PROJ AND status = Open" --limit 20
+
+# Hierarchy & relationships
+python3 jira_utils.py --get-children PROJ-100
+python3 jira_utils.py --get-related PROJ-100 --hierarchy
+python3 jira_utils.py --get-related PROJ-100 --hierarchy 2   # depth-limited
 ```
 
-> **Note:** The script automatically loads credentials from `.env` - no need to source it manually.
+#### Date Filters
 
-## Command Reference
+All ticket queries accept `--date`:
 
-### Global Options
+| Value | Meaning |
+|-------|---------|
+| `today` | Created today |
+| `week` | Last 7 days |
+| `month` | Last 30 days |
+| `year` | Last 365 days |
+| `all` | No date filter |
+| `MM-DD-YYYY:MM-DD-YYYY` | Custom date range |
 
-| Option | Description |
-|--------|-------------|
-| `-h, --help` | Show help message and exit |
-| `-v, --verbose` | Enable verbose/debug output to stdout |
-| `-q, --quiet` | Minimal stdout output |
-| `--show-jql` | Print the equivalent JQL statement and save to `jql.txt` |
-
-### Project Information
-
-| Option | Description |
-|--------|-------------|
-| `--list` | List all available Jira projects |
-| `--project KEY` | Specify project key to operate on (required for most commands; optional for `--get-children` and `--get-related` when a ticket key is provided) |
-| `--get-workflow` | Display workflow statuses for the specified project |
-| `--get-issue-types` | Display issue types for the specified project |
-| `--get-fields [TYPE ...]` | Display create/edit/transition fields. Optionally filter by issue types |
-| `--get-versions` | Display versions (releases) with detailed info |
-| `--get-components` | List all components for the project |
-| `--get-children KEY` | Display full child hierarchy for the given ticket (recurses via parent links; project is optional) |
-| `--get-related KEY` | Display linked issues for the given ticket; add `--hierarchy [DEPTH]` to recurse across links (project is optional) |
-| `--hierarchy [DEPTH]` | When used with `--get-related`, traverse linked issues recursively. Omit DEPTH or use `-1` for unlimited depth; use a positive integer to limit depth (e.g., 1 = direct links only, 2 = links of links). |
-
-### Release Management
-
-| Option | Description |
-|--------|-------------|
-| `--releases [PATTERN]` | List releases for the project. Optional glob pattern (e.g., `"12.*"`) |
-| `--release-tickets RELEASE` | Get tickets associated with a specific release (supports glob patterns like `"12.1*"`) |
-| `--no-release` | Get tickets with no release assigned |
-
-### Ticket Queries
-
-| Option | Description |
-|--------|-------------|
-| `--total` | Show ticket count |
-| `--get-tickets` | Get tickets |
-| `--jql QUERY` | Run a custom JQL query |
-
-### Query Filters
-
-| Option | Description |
-|--------|-------------|
-| `--issue-types TYPE [TYPE ...]` | Filter by issue types (e.g., Bug Story Task Sub-task) |
-| `--status STATUS [STATUS ...]` | Filter by status (case-insensitive). Multiple statuses allowed. Use `^` prefix to exclude (e.g., `^Closed`) |
-| `--date FILTER` | Date filter (see [Date Filters](#date-filters)) |
-| `--limit N` | Limit the number of tickets retrieved |
-
-### Output Options
-
-| Option | Description |
-|--------|-------------|
-| `--dump-file FILE` | Output filename for dumping tickets (extension added automatically) |
-| `--dump-format FORMAT` | Output format: `csv` (default) or `json` |
-
-### Bulk Update Operations
-
-| Option | Description |
-|--------|-------------|
-| `--bulk-update` | Perform bulk update on tickets from input file |
-| `--input-file FILE` | Input CSV file containing ticket keys for bulk update |
-| `--set-release RELEASE` | Set the release/fixVersion on tickets |
-| `--remove-release` | Remove all releases from tickets |
-| `--transition STATUS` | Transition tickets to the specified status |
-| `--assign USER` | Assign tickets to user (email or "unassigned") |
-| `--dry-run` | Preview changes without applying them (default: True) |
-| `--execute` | Execute the bulk update (disables dry-run) |
-| `--max-updates N` | Maximum number of tickets to update |
-
-## Examples
-
-### List Projects
 ```bash
-python jira_utils.py --list
+python3 jira_utils.py --project PROJ --get-tickets --date month
+python3 jira_utils.py --project PROJ --get-tickets --date 01-01-2025:06-30-2025
 ```
 
-### Project Information
+#### Dump to File
+
+Any query can be dumped to CSV or JSON:
+
 ```bash
-# Show workflow statuses
-python jira_utils.py --project PROJ --get-workflow
-
-# Show issue types
-python jira_utils.py --project PROJ --get-issue-types
-
-# Show all fields for all issue types
-python jira_utils.py --project PROJ --get-fields
-
-# Show fields for specific issue types
-python jira_utils.py --project PROJ --get-fields --issue-types Bug Task
-
-# Show versions/releases
-python jira_utils.py --project PROJ --get-versions
-# Show components
-python jira_utils.py --project PROJ --get-components
-
-# Show full child hierarchy for a ticket (project optional when key is provided)
-python jira_utils.py --get-children PROJ-123
-
-# Get linked issues (direct links only)
-python jira_utils.py --get-related PROJ-123
-
-# Recursively traverse linked issues (unlimited depth)
-python jira_utils.py --get-related PROJ-123 --hierarchy
-
-# Traverse linked issues up to depth 2
-python jira_utils.py --get-related PROJ-123 --hierarchy 2
-
-# Scope hierarchy to a project explicitly (optional)
-python jira_utils.py --project PROJ --get-children PROJ-123
-
-# Limit hierarchy results to 20 issues and dump to JSON
-python jira_utils.py --get-children PROJ-123 --limit 20 --dump-file children --dump-format json
-
-# Combine linked traversal with limit and JSON dump (depth-limited)
-python jira_utils.py --get-related PROJ-123 --hierarchy 3 --limit 50 --dump-file related --dump-format json
-
-# Combine hierarchy with limit and CSV dump
-python jira_utils.py --get-children PROJ-123 --limit 50 --dump-file children
-
-# Show only components with tickets created in the last 2 weeks
-python jira_utils.py --project PROJ --get-components --date week
-
-# Show components with activity this month
-python jira_utils.py --project PROJ --get-components --date month
-
-# Dump components to file
-python jira_utils.py --project PROJ --get-components --dump-file components
-
-# Dump active components with ticket counts
-python jira_utils.py --project PROJ --get-components --date week --dump-file active_components
-
-# Show all project info at once
-python jira_utils.py --project PROJ --get-workflow --get-issue-types --get-fields --get-versions --get-components
+python3 jira_utils.py --project PROJ --get-tickets --dump-file tickets
+python3 jira_utils.py --project PROJ --get-tickets --dump-file tickets --dump-format json
+python3 jira_utils.py --jql "project = PROJ" --dump-file results --dump-format csv
 ```
 
-### Release Queries
-```bash
-# List all releases
-python jira_utils.py --project PROJ --releases
+#### Bulk Update
 
-# List releases matching a pattern
-python jira_utils.py --project PROJ --releases "12.*"
-
-# Dump releases to file
-python jira_utils.py --project PROJ --releases --dump-file all_releases
-python jira_utils.py --project PROJ --releases "12.*" --dump-file 12x_releases
-
-# List releases with exclusions (12.* but not containing "Samples")
-python jira_utils.py --project PROJ --releases "12.*,^*Samples*"
-
-# Multiple exclusions
-python jira_utils.py --project PROJ --releases "12.*,^*Samples*,^*Test*"
-
-# Multiple includes with exclusions
-python jira_utils.py --project PROJ --releases "12.*,13.*,^*Samples*"
-
-# Get tickets for a specific release
-python jira_utils.py --project PROJ --release-tickets "v1.0"
-
-# Get tickets for all releases matching a pattern
-python jira_utils.py --project PROJ --releases "12.*" --get-tickets
-
-# Get tickets for releases with exclusions
-python jira_utils.py --project PROJ --releases "12.*,^*Samples*" --get-tickets
-
-# Get Open tickets for 12.x releases and dump to file
-python jira_utils.py --project PROJ --releases "12.*" --get-tickets --status Open --dump-file 12x_tickets
-
-# Get tickets with no release assigned
-python jira_utils.py --project PROJ --no-release
-
-# Get Open Bugs with no release
-python jira_utils.py --project PROJ --no-release --issue-types Bug --status Open
-```
-
-### Ticket Counts
-```bash
-# Total ticket count
-python jira_utils.py --project PROJ --total
-
-# Count for specific issue types
-python jira_utils.py --project PROJ --total --issue-types Bug Task
-
-# Count for Open tickets
-python jira_utils.py --project PROJ --total --status Open
-
-# Count for Open/In Progress Bugs
-python jira_utils.py --project PROJ --total --issue-types Bug --status Open "In Progress"
-
-# Count for tickets created this week
-python jira_utils.py --project PROJ --total --date week
-```
-
-### Get Tickets
-```bash
-# Get all tickets
-python jira_utils.py --project PROJ --get-tickets
-
-# Get up to 50 Open Bugs
-python jira_utils.py --project PROJ --get-tickets --issue-types Bug --status Open --limit 50
-
-# Get Closed tickets from this month
-python jira_utils.py --project PROJ --get-tickets --status Closed --date month
-
-# Get tickets created in date range
-python jira_utils.py --project PROJ --get-tickets --date 01-01-2024:12-31-2024
-
-# Dump all tickets to CSV
-python jira_utils.py --project PROJ --get-tickets --dump-file tickets
-
-# Dump Open Bugs to JSON
-python jira_utils.py --project PROJ --get-tickets --issue-types Bug --status Open --dump-file bugs --dump-format json
-```
-
-### Custom JQL Queries
-```bash
-# Run a custom JQL query
-python jira_utils.py --jql "project = PROJ AND status = Open"
-
-# JQL with limit
-python jira_utils.py --jql "assignee = currentUser() AND status != Done" --limit 20
-
-# Dump JQL results to CSV
-python jira_utils.py --jql "project = PROJ" --dump-file results --dump-format csv
-```
-
-### Show Equivalent JQL
-```bash
-# Show the JQL that would be generated
-python jira_utils.py --project PROJ --get-tickets --issue-types Bug --status Open --show-jql
-
-# The JQL is displayed at the end and saved to jql.txt
-```
-
-### Bulk Updates
 ```bash
 # Step 1: Find tickets and dump to CSV
-python jira_utils.py --jql "project = PROJ AND fixVersion is EMPTY" --dump-file orphans
+python3 jira_utils.py --jql "project = PROJ AND fixVersion is EMPTY" --dump-file orphans
 
-# Step 2: Preview bulk update (dry-run is default)
-python jira_utils.py --bulk-update --input-file orphans.csv --set-release "12.1.1.x"
+# Step 2: Preview (dry-run is default)
+python3 jira_utils.py --bulk-update --input-file orphans.csv --set-release "12.3.0"
 
-# Step 3: Execute bulk update
-python jira_utils.py --bulk-update --input-file orphans.csv --set-release "12.1.1.x" --execute
+# Step 3: Execute
+python3 jira_utils.py --bulk-update --input-file orphans.csv --set-release "12.3.0" --execute
 
-# Transition tickets to Closed
-python jira_utils.py --bulk-update --input-file tickets.csv --transition "Closed" --execute
-
-# Assign tickets to a user
-python jira_utils.py --bulk-update --input-file tickets.csv --assign "user@email.com" --execute
-
-# Remove releases from tickets
-python jira_utils.py --bulk-update --input-file tickets.csv --remove-release --execute
-
-# Limit number of updates
-python jira_utils.py --bulk-update --input-file tickets.csv --set-release "v2.0" --max-updates 10 --execute
+# Other bulk operations
+python3 jira_utils.py --bulk-update --input-file tickets.csv --transition "Closed" --execute
+python3 jira_utils.py --bulk-update --input-file tickets.csv --assign "user@email.com" --execute
+python3 jira_utils.py --bulk-update --input-file tickets.csv --remove-release --execute
 ```
 
-## Output Formats
-
-### CSV Format
-The default output format. Includes columns:
-- Key
-- Project
-- Type
-- Status
-- Priority
-- Summary
-- Assignee
-- Reporter
-- Created
-- Updated
-- Resolved
-- Fix Version
-- Affects Version (for bugs)
-
-### Console Output
-The console table displays:
-- Key
-- Type
-- Status
-- Priority
-- Created
-- Updated
-- Fix Version
-- Assignee
-- Summary
-
-### JSON Format
-Use `--dump-format json` for JSON output. Each ticket is a JSON object with full field data.
-
-## Release Pattern Syntax
-
-The `--releases` option supports glob patterns with exclusions:
-
-| Pattern | Description |
-|---------|-------------|
-| `*` | Match all releases |
-| `12.*` | Match releases starting with "12." |
-| `*beta*` | Match releases containing "beta" |
-| `12.*,^*Samples*` | Match 12.* but exclude those containing "Samples" |
-| `12.*,^*Samples*,^*Test*` | Multiple exclusions |
-| `12.*,13.*` | Match either 12.* or 13.* |
-| `12.*,13.*,^*Samples*` | Multiple includes with exclusion |
-
-### Pattern Rules
-
-- Use `*` as a wildcard (matches any characters)
-- Use `?` to match a single character
-- Separate multiple patterns with commas
-- Prefix exclusion patterns with `^`
-- Exclusions apply to all include patterns
-
-### Examples
+#### Bulk Delete
 
 ```bash
-# All 12.x releases except samples
-python jira_utils.py --project PROJ --releases "12.*,^*Samples*"
+# Preview deletes (dry-run)
+python3 jira_utils.py --bulk-delete --input-file to_delete.csv
 
-# All 12.x and 13.x releases except test releases
-python jira_utils.py --project PROJ --releases "12.*,13.*,^*Test*,^*test*"
+# Execute deletes (requires interactive confirmation)
+python3 jira_utils.py --bulk-delete --input-file to_delete.csv --execute
 
-# Get tickets for filtered releases
-python jira_utils.py --project PROJ --releases "12.*,^*Samples*" --get-tickets --dump-file filtered_tickets
+# Delete parents and their subtasks
+python3 jira_utils.py --bulk-delete --input-file parents.csv --delete-subtasks --execute
+
+# Skip confirmation (DANGEROUS)
+python3 jira_utils.py --bulk-delete --input-file to_delete.csv --execute --force
 ```
 
-## Date Filters
-
-The `--date` option supports the following filters:
-
-| Filter | Description |
-|--------|-------------|
-| `today` | Tickets created today |
-| `week` | Tickets created in the last 7 days |
-| `month` | Tickets created in the last 30 days |
-| `year` | Tickets created in the last 365 days |
-| `all` | All tickets (no date filter) |
-| `MM-DD-YYYY:MM-DD-YYYY` | Tickets created within date range |
-
-### Date Range Examples
-```bash
-# Tickets created in January 2024
-python jira_utils.py --project PROJ --get-tickets --date 01-01-2024:01-31-2024
-
-# Tickets created in Q1 2024
-python jira_utils.py --project PROJ --get-tickets --date 01-01-2024:03-31-2024
-```
-
-## Logging
-
-The script maintains two types of output:
-
-1. **stdout** - Clean, formatted tables and user-facing messages
-2. **Log file** (`jira_utils.log`) - Detailed logging with timestamps, function names, and line numbers
-
-Use `-v` (verbose) for debug-level output to stdout, or `-q` (quiet) for minimal output.
-
-## Files Generated
-
-| File | Description |
-|------|-------------|
-| `jira_utils.log` | Detailed execution log (overwritten each run) |
-| `jql.txt` | Last JQL query when using `--show-jql` |
-| `*.csv` / `*.json` | Ticket dumps when using `--dump-file` |
-
-## Configuration Files
-
-| File | Description |
-|------|-------------|
-| `.env` | Your local credentials (gitignored, never committed) |
-| `.env.example` | Template showing required environment variables |
-| `requirements.txt` | Python package dependencies |
-
-## Error Handling
-
-The script handles common errors gracefully:
-
-- **Missing credentials** - Prompts to set environment variables
-- **Invalid project** - Lists available projects
-- **Invalid issue type/status** - Shows valid options
-- **Rate limiting** - Automatic retry with backoff
-- **Network errors** - Clear error messages
-
-## Dashboard Management
-
-Dashboard management features allow you to create, update, delete, and copy Jira dashboards, as well as manage gadgets on those dashboards.
-
-### Dashboard Options
-
-| Option | Description |
-|--------|-------------|
-| `--dashboards` | List all accessible dashboards |
-| `--dashboard ID` | Get dashboard details by ID |
-| `--owner USER` | Filter dashboards by owner (use "me" for current user) |
-| `--shared` | Show only dashboards shared with current user |
-| `--create-dashboard NAME` | Create a new dashboard with the specified name |
-| `--update-dashboard ID` | Update an existing dashboard by ID |
-| `--delete-dashboard ID` | Delete a dashboard by ID |
-| `--copy-dashboard ID` | Copy/clone an existing dashboard |
-| `--description TEXT` | Dashboard description (for create/update) |
-| `--name NAME` | New name for update or copy operations |
-| `--share-permissions JSON` | Share permissions as JSON array |
-| `--force` | Skip confirmation prompt for delete operations |
-
-### Gadget Management Options
-
-| Option | Description |
-|--------|-------------|
-| `--gadgets DASHBOARD_ID` | List all gadgets on a dashboard |
-| `--add-gadget MODULE_KEY` | Add a gadget to a dashboard (requires `--dashboard`) |
-| `--remove-gadget GADGET_ID` | Remove a gadget from a dashboard (requires `--dashboard`) |
-| `--update-gadget GADGET_ID` | Update a gadget on a dashboard (requires `--dashboard`) |
-| `--position ROW,COL` | Gadget position (row and column) |
-| `--color COLOR` | Gadget chrome color |
-| `--gadget-properties JSON` | Gadget properties as JSON object |
-
-#### Available Gadget Colors
-
-- `blue`
-- `red`
-- `yellow`
-- `green`
-- `cyan`
-- `purple`
-- `gray`
-- `white`
-
-### Dashboard Examples
-
-#### Listing Dashboards
+#### Dashboard Management
 
 ```bash
-# List all accessible dashboards
-python jira_utils.py --dashboards
+# List dashboards
+python3 jira_utils.py --dashboards
+python3 jira_utils.py --dashboards --owner user@email.com
+python3 jira_utils.py --dashboards --shared
 
-# Get details for a specific dashboard
-python jira_utils.py --dashboard 10001
+# Get dashboard details & gadgets
+python3 jira_utils.py --dashboard 12345
+python3 jira_utils.py --gadgets 12345
 
-# List dashboards owned by current user
-python jira_utils.py --dashboards --owner me
+# Create / copy / update / delete
+python3 jira_utils.py --create-dashboard "My Dashboard" --description "desc"
+python3 jira_utils.py --copy-dashboard 12345 --name "Copy of Dashboard"
+python3 jira_utils.py --update-dashboard 12345 --name "New Name"
+python3 jira_utils.py --delete-dashboard 12345 --force
 
-# List dashboards owned by a specific user
-python jira_utils.py --dashboards --owner "user@cornelisnetworks.com"
-
-# List dashboards shared with current user
-python jira_utils.py --dashboards --shared
+# Gadget management
+python3 jira_utils.py --add-gadget com.atlassian.jira.gadgets:filter-results-gadget --dashboard 12345
+python3 jira_utils.py --remove-gadget 67890 --dashboard 12345
+python3 jira_utils.py --update-gadget 67890 --dashboard 12345 --position 0,1 --color blue
 ```
 
-#### Creating Dashboards
+---
+
+### Ticket Creation
+
+Create Jira tickets from the CLI using `--create-ticket`. All creates are **dry-run by default**; add `--execute` to actually create the ticket.
+
+There are two modes:
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| **CLI flags** | `--create-ticket` | Supply all fields via CLI arguments |
+| **JSON file** | `--create-ticket path/to/file.json` | Load fields from a JSON file |
+
+When both a JSON file and CLI flags are provided, **CLI flags override** the JSON values.
+
+#### Required Fields
+
+| Field | CLI Flag | JSON Key |
+|-------|----------|----------|
+| Project | `--project KEY` | `project` |
+| Summary | `--summary TEXT` | `summary` |
+| Issue type | `--issue-type TYPE` | `issue_type` |
+
+#### Optional Fields
+
+| Field | CLI Flag | JSON Key |
+|-------|----------|----------|
+| Description | `--ticket-description TEXT` | `description` |
+| Assignee | `--assignee-id ACCOUNT_ID` | `assignee_id` |
+| Components | `--components NAME [NAME ...]` | `components` |
+| Fix versions | `--fix-versions VERSION [VERSION ...]` | `fix_versions` |
+| Labels | `--labels LABEL [LABEL ...]` | `labels` |
+| Parent | `--parent KEY` | `parent` |
+
+#### Examples — CLI Flags
 
 ```bash
-# Create a simple dashboard
-python jira_utils.py --create-dashboard "My Dashboard"
+# Dry-run (preview only)
+python3 jira_utils.py --create-ticket \
+  --project PROJ --summary "Fix login timeout" --issue-type Bug
 
-# Create a dashboard with description
-python jira_utils.py --create-dashboard "Sprint Dashboard" --description "Dashboard for tracking sprint progress"
-
-# Create a dashboard with share permissions
-python jira_utils.py --create-dashboard "Team Dashboard" --share-permissions '[{"type": "project", "projectId": "10000"}]'
+# Execute (actually create the ticket)
+python3 jira_utils.py --create-ticket \
+  --project PROJ --summary "Fix login timeout" --issue-type Bug \
+  --components Platform --labels triage --fix-versions 12.3.0 \
+  --execute
 ```
 
-#### Updating Dashboards
+#### Examples — JSON File
 
 ```bash
-# Update dashboard name
-python jira_utils.py --update-dashboard 10001 --name "New Dashboard Name"
+# Dry-run from JSON
+python3 jira_utils.py --create-ticket data/templates/create_story.json
 
-# Update dashboard description
-python jira_utils.py --update-dashboard 10001 --description "Updated description"
+# Execute from JSON
+python3 jira_utils.py --create-ticket data/templates/create_story.json --execute
 
-# Update both name and description
-python jira_utils.py --update-dashboard 10001 --name "Renamed Dashboard" --description "New description"
+# JSON file + CLI override (override the summary)
+python3 jira_utils.py --create-ticket data/templates/create_story.json \
+  --summary "Override summary from CLI" --execute
 ```
 
-#### Deleting Dashboards
+#### JSON Input Format
 
-```bash
-# Delete a dashboard (with confirmation prompt)
-python jira_utils.py --delete-dashboard 10001
+See [`data/templates/create_ticket_input.schema.json`](data/templates/create_ticket_input.schema.json) for the full JSON Schema.
 
-# Delete a dashboard without confirmation
-python jira_utils.py --delete-dashboard 10001 --force
-```
-
-#### Copying Dashboards
-
-```bash
-# Copy a dashboard with a new name
-python jira_utils.py --copy-dashboard 10001 --name "Copy of Dashboard"
-
-# Copy a dashboard with new name and description
-python jira_utils.py --copy-dashboard 10001 --name "My Copy" --description "Copied dashboard for personal use"
-```
-
-### Gadget Examples
-
-> **Note:** Gadget management is primarily supported on Jira Cloud. Some features may not be available on Jira Server/Data Center.
-
-#### Listing Gadgets
-
-```bash
-# List all gadgets on a dashboard
-python jira_utils.py --gadgets 10001
-```
-
-#### Adding Gadgets
-
-```bash
-# Add a filter results gadget
-python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:filter-results-gadget"
-
-# Add a gadget at a specific position
-python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:pie-chart-gadget" --position 0,1
-
-# Add a gadget with a specific color
-python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:assigned-to-me-gadget" --color blue
-
-# Add a gadget with properties
-python jira_utils.py --dashboard 10001 --add-gadget "com.atlassian.jira.gadgets:filter-results-gadget" --gadget-properties '{"filterId": "10000", "num": "10"}'
-```
-
-#### Updating Gadgets
-
-```bash
-# Update gadget position
-python jira_utils.py --dashboard 10001 --update-gadget 10050 --position 1,0
-
-# Update gadget color
-python jira_utils.py --dashboard 10001 --update-gadget 10050 --color green
-
-# Update gadget properties
-python jira_utils.py --dashboard 10001 --update-gadget 10050 --gadget-properties '{"num": "20"}'
-```
-
-#### Removing Gadgets
-
-```bash
-# Remove a gadget from a dashboard
-python jira_utils.py --dashboard 10001 --remove-gadget 10050
-```
-
-### Common Gadget Module Keys
-
-| Module Key | Description |
-|------------|-------------|
-| `com.atlassian.jira.gadgets:filter-results-gadget` | Displays issues from a saved filter |
-| `com.atlassian.jira.gadgets:pie-chart-gadget` | Pie chart visualization of issues |
-| `com.atlassian.jira.gadgets:created-vs-resolved-gadget` | Chart comparing created vs resolved issues |
-| `com.atlassian.jira.gadgets:assigned-to-me-gadget` | Shows issues assigned to current user |
-| `com.atlassian.jira.gadgets:activity-stream-gadget` | Activity stream showing recent updates |
-
-### Share Permissions Format
-
-Share permissions are specified as a JSON array. Common permission types:
+Example (`data/templates/create_ticket_input.example.json`):
 
 ```json
-[
-  {"type": "user", "user": {"accountId": "user-account-id"}},
-  {"type": "project", "projectId": "10000"},
-  {"type": "group", "group": {"name": "jira-users"}},
-  {"type": "loggedin"},
-  {"type": "global"}
-]
+{
+  "project": "PROJ",
+  "summary": "Example ticket created via jira_utils.py",
+  "issue_type": "Task",
+  "description": "Plain-text description. Converted to Jira Cloud ADF on create.",
+  "assignee_id": "5b10ac8d82e05b22cc7d4ef5",
+  "components": ["Platform"],
+  "fix_versions": ["12.3.0"],
+  "labels": ["temp", "created-by-cli"],
+  "parent": "PROJ-123"
+}
 ```
 
-| Type | Description |
+A Story-specific template is also provided at [`data/templates/create_story.json`](data/templates/create_story.json).
+
+#### Template Files
+
+| File | Purpose |
+|------|---------|
+| [`data/templates/create_ticket_input.schema.json`](data/templates/create_ticket_input.schema.json) | JSON Schema (draft 2020-12) for the `--create-ticket FILE` input format |
+| [`data/templates/create_ticket_input.example.json`](data/templates/create_ticket_input.example.json) | Generic Task example |
+| [`data/templates/create_story.json`](data/templates/create_story.json) | Story template with acceptance criteria |
+
+---
+
+### Draw.io CLI (`drawio_utilities.py`)
+
+Generate draw.io dependency diagrams from Jira hierarchy CSV exports.
+
+```bash
+# Basic usage
+python3 drawio_utilities.py --create-map tickets.csv
+
+# Custom output file and title
+python3 drawio_utilities.py --create-map tickets.csv --output diagram.drawio --title "Release 12.2 Dependencies"
+```
+
+#### End-to-End Workflow
+
+```bash
+# 1. Export hierarchy from Jira
+python3 jira_utils.py --get-related PROJ-100 --hierarchy --dump-file tickets
+
+# 2. Generate draw.io diagram
+python3 drawio_utilities.py --create-map tickets.csv
+
+# 3. Open the .drawio file in draw.io or VS Code
+```
+
+#### Color Coding
+
+| Link Type | Border | Fill |
+|-----------|--------|------|
+| Root ticket | — | Light green |
+| `is blocked by` / `blocks` | Red | Light red |
+| `relates to` | Blue | Light blue |
+| Other | Gray | White |
+
+---
+
+### Excel CLI (`excel_utils.py`)
+
+Concatenate, convert, and diff Excel (`.xlsx`) workbooks from the command line.
+
+#### Concatenation
+
+```bash
+# Merge all rows from multiple files into a single sheet (columns are unioned)
+python3 excel_utils.py --concat fileA.xlsx fileB.xlsx --method merge-sheet --output merged.xlsx
+
+# Add each file as a separate sheet in the output workbook
+python3 excel_utils.py --concat fileA.xlsx fileB.xlsx --method add-sheet --output combined.xlsx
+
+# Merge all .xlsx files in the current directory
+python3 excel_utils.py --concat *.xlsx --method merge-sheet --output all_data.xlsx
+```
+
+| Flag | Description |
 |------|-------------|
-| `user` | Share with a specific user |
-| `project` | Share with all users in a project |
-| `group` | Share with a Jira group |
-| `loggedin` | Share with all logged-in users |
-| `global` | Share with everyone (public) |
+| `--concat FILE [FILE ...]` | Two or more `.xlsx` files to concatenate |
+| `--method merge-sheet\|add-sheet` | `merge-sheet` (default) merges all rows into one sheet; `add-sheet` creates a sheet per file |
+| `--output FILE` | Output filename (default: `concat_output.xlsx`) |
 
-## Draw.io Diagram Generation
-
-The `drawio_utilities.py` script generates draw.io diagrams from Jira hierarchy CSV exports. This creates visual dependency maps that can be opened in draw.io desktop, VS Code, or the online editor.
-
-### Installation
-
-No additional dependencies required - uses Python standard library only.
-
-### Usage
+#### Conversion
 
 ```bash
-python drawio_utilities.py --create-map INPUT_CSV [--output FILE] [--title TITLE]
+# Excel → CSV
+python3 excel_utils.py --convert-to-csv data.xlsx
+python3 excel_utils.py --convert-to-csv data.xlsx --output custom_name.csv
+
+# CSV → Excel (with header styling, conditional formatting, auto-fit columns)
+python3 excel_utils.py --convert-from-csv data.csv
+python3 excel_utils.py --convert-from-csv data.csv --output styled.xlsx
 ```
 
-### Options
+| Flag | Description |
+|------|-------------|
+| `--convert-to-csv FILE` | Convert `.xlsx` to comma-delimited `.csv` |
+| `--convert-from-csv FILE` | Convert `.csv` to styled `.xlsx` |
+| `--output FILE` | Override the default output filename |
 
-| Option | Description |
-|--------|-------------|
-| `--create-map CSV_FILE` | Create a draw.io diagram from a Jira hierarchy CSV file |
-| `--output FILE`, `-o` | Output filename for the .drawio file (default: input file with .drawio extension) |
-| `--title TITLE`, `-t` | Title for the diagram (default: derived from root ticket) |
-| `-v`, `--verbose` | Enable verbose output |
-| `-q`, `--quiet` | Minimal output |
-
-### Workflow
-
-1. **Export hierarchy from Jira:**
-   ```bash
-   python jira_utils.py --get-related STL-74071 --hierarchy --dump-file tickets
-   ```
-
-2. **Generate draw.io diagram:**
-   ```bash
-   python drawio_utilities.py --create-map tickets.csv
-   ```
-
-3. **Open the diagram:**
-   - draw.io desktop app: https://www.diagrams.net/
-   - VS Code with Draw.io Integration extension
-   - Online at https://app.diagrams.net/
-
-### Examples
+#### Diff
 
 ```bash
-# Basic usage - creates tickets.drawio from tickets.csv
-python drawio_utilities.py --create-map tickets.csv
+# Diff two files — produces a report with Summary and Diff sheets
+python3 excel_utils.py --diff fileA.xlsx fileB.xlsx --output changes.xlsx
 
-# Custom output filename
-python drawio_utilities.py --create-map tickets.csv --output release-deps.drawio
-
-# Custom title
-python drawio_utilities.py --create-map tickets.csv --title "Release 12.2 Dependencies"
-
-# Full workflow example
-python jira_utils.py --get-related STL-74071 --hierarchy 2 --dump-file deps
-python drawio_utilities.py --create-map deps.csv --output release-12.2-map.drawio
+# Pairwise diff across three files (A→B, B→C)
+python3 excel_utils.py --diff v1.xlsx v2.xlsx v3.xlsx
 ```
 
-### Color Coding
+Rows are matched by a key column (`key` if present, otherwise the first column). Each row is marked **ADDED**, **REMOVED**, **CHANGED**, or **SAME**.
 
-The diagram uses color coding to indicate relationship types:
+| Flag | Description |
+|------|-------------|
+| `--diff FILE [FILE ...]` | Two or more `.xlsx` files to diff |
+| `--output FILE` | Output filename (default: `diff_output.xlsx`) |
 
-| Link Type | Box Fill | Border Color |
-|-----------|----------|--------------|
-| Root ticket (depth 0) | Light green | Gray |
-| `is blocked by` / `blocks` | Light red | Red |
-| `relates to` | Light blue | Blue |
-| `is caused by` / `causes` | Light yellow | Yellow |
-| `is cloned by` / `clones` | Light orange | Orange |
-| Other link types | White | Gray |
+#### Formatting Options
 
-### Diagram Layout
+All output workbooks include automatic styling by default:
 
-- **Pyramid structure**: Root ticket at top, children arranged by depth level below
-- **Clickable links**: Each ticket box links to the Jira ticket URL
-- **Connection lines**: Lines between boxes show the relationship type
-- **Labels**: Each box shows the ticket key and truncated summary
+| Feature | Description |
+|---------|-------------|
+| Header styling | Bold white text on dark-blue background, centered, with borders |
+| Status conditional formatting | Cell fill color based on status value (e.g., green for Closed, red for Open) |
+| Priority conditional formatting | Red fill for P0-Stopper, yellow fill for P1-Critical |
+| Auto-fit columns | Column widths adjusted to content |
+| Frozen header row | First row stays visible when scrolling |
+| Auto-filter | Drop-down filters on every column |
 
-## Author
+Use `--no-formatting` to disable all styling and produce a plain data-only workbook:
 
-John Macdonald
+```bash
+python3 excel_utils.py --convert-from-csv data.csv --no-formatting
+python3 excel_utils.py --concat *.xlsx --no-formatting
+```
+
+#### Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `-m MODEL`, `--model MODEL` | LLM model name override (e.g. `developer-opus`, `gpt-4o`). Overrides the env-var default for this run. |
+| `-v`, `--verbose` | Enable verbose (DEBUG-level) output |
+| `-q`, `--quiet` | Minimal stdout output |
+| `--no-formatting` | Disable all Excel formatting (header styling, conditional formatting, auto-fit) |
+
+---
+
+### Workflows (`--workflow`)
+
+Multi-step automated pipelines that chain Jira queries, LLM analysis, and Excel formatting into a single command.
+
+#### Bug Report Workflow
+
+Generate a cleaned, enriched bug report from a Jira filter:
+
+```bash
+# Basic usage — looks up filter by name, pulls tickets, sends to LLM, converts to Excel
+python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800
+
+# With verbose logging
+python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --timeout 800 --verbose
+
+# Override the LLM model for this run (useful from Jenkins Choice Parameter)
+python3 pm_agent.py --workflow bug-report --filter "SW 12.1.1 P0/P1 Bugs" --model developer-opus --timeout 800
+
+# Custom prompt file
+python3 pm_agent.py --workflow bug-report --filter "My Filter" --prompt my_prompt.md --timeout 600
+```
+
+**Steps performed:**
+
+| Step | Action | Output |
+|------|--------|--------|
+| 1 | Connect to Jira | — |
+| 2 | Look up filter by name from favourite filters | Filter ID |
+| 3 | Run filter to get tickets with latest comments | Issues list |
+| 4 | Dump tickets to JSON | `<filter_name>.json` |
+| 5 | Send JSON + prompt to LLM for analysis | `llm_output.md` + extracted files |
+| 6 | Convert any extracted CSV to styled Excel | `<name>.xlsx` |
+
+#### Workflow Flags
+
+| Flag | Description |
+|------|-------------|
+| `--workflow NAME` | Workflow to run (currently: `bug-report`) |
+| `--filter NAME` | Jira filter name to look up (required for `bug-report`) |
+| `--prompt FILE` | LLM prompt file (default: `agents/prompts/cn5000_bugs_clean.md`) |
+| `--timeout SECS` | LLM request timeout in seconds |
+| `--limit N` | Max tickets to retrieve |
+| `--output FILE` | Override output filename |
+| `--model MODEL`, `-m` | LLM model name override (e.g. `developer-opus`, `gpt-4o`). Overrides the env-var default for this run. |
+| `--verbose`, `-v` | Enable verbose (debug-level) logging |
+
+---
+
+### Agent Pipeline (`pm_agent.py`)
+
+```bash
+# Run full release planning workflow
+python pm_agent.py plan --project PROJ --roadmap slides.pptx --org-chart org.drawio
+
+# Analyze Jira project state
+python pm_agent.py analyze --project PROJ --quick
+
+# Analyze roadmap files
+python pm_agent.py vision roadmap.png roadmap.xlsx
+
+# List saved sessions
+python pm_agent.py sessions --list
+
+# Resume a saved session
+python pm_agent.py resume --session abc123
+```
+
+#### Example Workflow
+
+```bash
+# 1. Start release planning
+python pm_agent.py plan \
+  --project ENG \
+  --roadmap "Q1_Roadmap.pptx" \
+  --roadmap "Features.xlsx" \
+  --org-chart "Engineering_Org.drawio" \
+  --save-session
+
+# Output:
+# ============================================================
+# CORNELIS RELEASE PLANNING AGENT
+# ============================================================
+#
+# Project: ENG
+# Roadmap files: 2
+# Org chart: Engineering_Org.drawio
+#
+# Step 1: Analyzing inputs...
+# Step 2: Creating release plan...
+# Step 3: Presenting plan for review...
+#
+# RELEASE PLAN
+# ============
+# Release: 12.1.0
+#   [Epic] Implement new fabric manager interface
+#   [Story] Add topology discovery - Fabric - John Smith
+#   [Story] Implement health monitoring - Fabric - Jane Doe
+# ...
+#
+# Session saved: abc123
+```
+
+### Programmatic Usage
+
+```python
+from agents.orchestrator import ReleasePlanningOrchestrator
+
+# Create orchestrator
+orchestrator = ReleasePlanningOrchestrator()
+
+# Run workflow
+result = orchestrator.run({
+    'project_key': 'ENG',
+    'roadmap_files': ['roadmap.pptx'],
+    'org_chart_file': 'org.drawio',
+    'mode': 'full'
+})
+
+if result.success:
+    print(result.content)
+    
+    # Execute approved plan
+    orchestrator.execute_approved_plan()
+```
+
+## Agent Pipeline
+
+### Orchestrator Agent
+
+Coordinates the end-to-end workflow:
+- Manages sub-agents
+- Tracks workflow state
+- Handles errors and recovery
+
+### Vision Analyzer Agent
+
+Extracts roadmap data from visual documents:
+- PowerPoint slides
+- Excel spreadsheets
+- Images (PNG, JPG)
+
+### Jira Analyst Agent
+
+Analyzes current Jira project state:
+- Existing releases
+- Component structure
+- Team assignments
+- Workflow states
+
+### Planning Agent
+
+Creates release structures:
+- Maps features to tickets
+- Assigns components and owners
+- Sets release versions
+
+### Review Agent
+
+Manages human approval:
+- Presents plans for review
+- Handles modifications
+- Executes approved changes
+
+## Tools
+
+### Jira Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_project_info` | Get project details |
+| `get_project_workflows` | Get workflow statuses |
+| `get_project_issue_types` | Get issue types |
+| `get_releases` | List releases/versions |
+| `get_release_tickets` | Get tickets for a release |
+| `get_components` | List project components |
+| `get_related_tickets` | Traverse ticket links/hierarchy |
+| `search_tickets` | Run JQL query |
+| `create_ticket` | Create new ticket |
+| `update_ticket` | Update existing ticket |
+| `create_release` | Create new release |
+| `link_tickets` | Create ticket links |
+| `assign_ticket` | Assign ticket to user |
+
+### Draw.io Tools
+
+| Tool | Description |
+|------|-------------|
+| `parse_org_chart` | Extract org structure from draw.io |
+| `get_responsibilities` | Map people to responsibility areas |
+| `create_ticket_diagram` | Generate diagram from CSV |
+| `create_diagram_from_tickets` | Generate diagram from ticket data |
+
+### Vision Tools
+
+| Tool | Description |
+|------|-------------|
+| `analyze_image` | Analyze image with vision LLM |
+| `extract_roadmap_from_ppt` | Extract from PowerPoint |
+| `extract_roadmap_from_excel` | Extract from Excel |
+
+## Development
+
+### Project Structure
+
+```
+cornelis-agent/
+├── agents/                  # Agent definitions
+│   ├── orchestrator.py      # Main orchestrator
+│   ├── jira_analyst.py      # Jira analysis
+│   ├── planning_agent.py    # Release planning
+│   ├── vision_analyzer.py   # Document analysis
+│   └── review_agent.py      # Human review
+├── llm/                     # LLM abstraction
+│   ├── base.py              # Abstract interface
+│   ├── cornelis_llm.py      # Internal LLM client
+│   ├── litellm_client.py    # External LLM client
+│   └── config.py            # LLM configuration
+├── tools/                   # Agent tools
+│   ├── jira_tools.py        # Jira operations
+│   ├── drawio_tools.py      # Draw.io operations
+│   ├── vision_tools.py      # Vision/document tools
+│   └── file_tools.py        # File operations
+├── state/                   # State management
+│   ├── session.py           # Session state
+│   └── persistence.py       # Storage backends
+├── config/                  # Configuration
+│   ├── settings.py          # App settings
+│   └── prompts/             # Agent prompts
+├── data/
+│   ├── templates/           # Ticket creation templates & schema
+│   │   ├── create_ticket_input.schema.json
+│   │   ├── create_ticket_input.example.json
+│   │   ├── create_story.json
+│   │   ├── epic.json        # Agent pipeline template
+│   │   ├── story.json       # Agent pipeline template
+│   │   ├── task.json        # Agent pipeline template
+│   │   └── release.json     # Agent pipeline template
+│   └── knowledge/           # Product knowledge
+│       └── cornelis_products.md
+├── plans/                   # Architecture & conversation docs
+├── jira_utils.py            # Standalone Jira CLI utility (→ jira-utils)
+├── drawio_utilities.py      # Standalone draw.io CLI utility (→ drawio-utils)
+├── pm_agent.py                  # Agent pipeline entry point
+├── pyproject.toml           # Package metadata & console_scripts (pipx)
+├── .env.example             # Environment template
+└── requirements.txt         # Dependencies
+```
+
+### Adding New Tools
+
+1. Create tool function with `@tool` decorator:
+   ```python
+   from tools.base import tool, ToolResult
+   
+   @tool(description='My new tool')
+   def my_tool(param: str) -> ToolResult:
+       # Implementation
+       return ToolResult.success({'result': 'data'})
+   ```
+
+2. Add to tool collection class
+3. Register with agent
+
+### Adding New Agents
+
+1. Create agent class extending `BaseAgent`
+2. Define instruction prompt
+3. Register tools
+4. Implement `run()` method
+
+### Testing
+
+```bash
+# Run tests
+pytest tests/
+
+# Run specific test
+pytest tests/test_tools/test_jira_tools.py
+```
+
+## Standalone Utilities
+
+The CLI utilities can be used standalone (without the agent pipeline). After a `pipx install` they are available globally as `jira-utils`, `drawio-utils`, and `excel-utils`:
+
+| Command | Source | Description |
+|---------|--------|-------------|
+| `jira-utils` | [`jira_utils.py`](jira_utils.py) | Full-featured Jira CLI (project queries, ticket creation, bulk ops, dashboards) |
+| `drawio-utils` | [`drawio_utilities.py`](drawio_utilities.py) | Draw.io diagram generator from Jira hierarchy CSV exports |
+| `excel-utils` | [`excel_utils.py`](excel_utils.py) | Excel workbook concatenation, CSV conversion, and diff reporting |
+
+Run any of them with `-h` for full help:
+
+```bash
+# Via pipx (global)
+jira-utils -h
+drawio-utils -h
+excel-utils -h
+
+# Or directly from the repo
+python3 jira_utils.py -h
+python3 drawio_utilities.py -h
+python3 excel_utils.py -h
+```
 
 ## License
 
-Internal use - Cornelis Networks
+Proprietary — Cornelis Networks
+
+## Support
+
+For issues or questions, contact the Engineering Tools team.

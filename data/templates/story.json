@@ -1,0 +1,12 @@
+{
+  "name": "Story Template",
+  "description": "Template for creating Story tickets",
+  "fields": {
+    "issue_type": "Story",
+    "summary_prefix": "",
+    "description_template": "## User Story\n\nAs a {user_type}, I want to {action} so that {benefit}.\n\n## Description\n\n{description}\n\n## Acceptance Criteria\n\n- [ ] {criteria}\n\n## Technical Notes\n\n{technical_notes}",
+    "default_labels": [],
+    "default_priority": "Medium"
+  },
+  "child_types": ["Task", "Sub-task"]
+}

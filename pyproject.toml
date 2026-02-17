@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cornelis-jira-tools"
+version = "0.1.0"
+description = "Cornelis Networks Jira & draw.io CLI utilities"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Proprietary"}
+authors = [
+    {name = "Cornelis Networks Engineering Tools"},
+]
+
+# Runtime dependencies — only what the CLI utilities need.
+# The agent pipeline (pm_agent.py, agents/, llm/, tools/) has heavier deps
+# that are NOT required for the standalone CLIs.
+dependencies = [
+    "jira>=3.5.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.28.0",
+    "openpyxl>=3.1.0",
+]
+
+# Optional: install the full agent pipeline deps
+[project.optional-dependencies]
+agents = [
+    "openai>=1.0.0",
+    "litellm>=1.0.0",
+    "google-adk>=0.1.0",
+    "python-pptx>=0.6.21",
+    "openpyxl>=3.1.0",
+    "Pillow>=10.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+# Console entry points — these become commands on your PATH
+pm-agent = "pm_agent:main"
+jira-utils = "jira_utils:main"
+drawio-utils = "drawio_utilities:main"
+excel-utils = "excel_utils:main"
+
+[tool.setuptools]
+# Include top-level .py modules (not packages)
+py-modules = ["jira_utils", "drawio_utilities", "excel_utils", "pm_agent"]
+
+[tool.setuptools.package-data]
+# Include template files so --create-ticket can reference them
+"*" = [
+    "data/templates/*.json",
+    "data/knowledge/*.md",
+]
