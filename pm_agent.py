@@ -1330,21 +1330,39 @@ def _workflow_bug_report(args):
     # Deduplicate: when the LLM emits multiple CSV blocks (e.g. an original
     # and a "corrected" version), keep only the LAST one — it is typically the
     # most complete / corrected.
+    #
+    # Edge case: the LLM may emit multiple blocks with the SAME filename.
+    # In that case the second write already overwrote the first on disk, so
+    # there is only one physical file.  We must NOT os.remove() it because
+    # that would delete the surviving copy.  We also must not strip ALL
+    # tracking entries for that name — we need to keep exactly one.
     if len(csv_files) > 1:
         keep = csv_files[-1]           # last CSV is the corrected one
         discard = csv_files[:-1]
         log.info(f'LLM emitted {len(csv_files)} CSV files; keeping last: {keep}')
-        for d in discard:
+
+        # Collect unique discard paths that differ from keep — safe to delete
+        unique_discard = set(d for d in discard if d != keep)
+        same_name_count = sum(1 for d in discard if d == keep)
+        if same_name_count:
+            log.info(f'{same_name_count} duplicate(s) share the same filename as keep ({keep}); skipping remove')
+
+        for d in unique_discard:
             try:
                 os.remove(d)
                 log.info(f'Removed duplicate CSV: {d}')
             except OSError as rm_err:
                 log.warning(f'Could not remove {d}: {rm_err}')
-            # Also remove from all_created_files tracking
-            all_created_files[:] = [
-                (f, desc) for f, desc in all_created_files if f != d]
-            # Remove from saved_files so it won't appear later
-            saved_files = [sf for sf in saved_files if sf != d]
+
+        # Rebuild tracking lists: remove ALL csv entries, then re-add the
+        # single keep entry.  This avoids the problem where same-name
+        # duplicates cause the keep entry to be removed too.
+        discard_set = set(csv_files)  # all csv filenames (including keep)
+        all_created_files[:] = [
+            (f, desc) for f, desc in all_created_files if f not in discard_set]
+        all_created_files.append((keep, 'LLM extracted'))
+        saved_files = [sf for sf in saved_files if sf not in discard_set]
+        saved_files.append(keep)
 
         csv_files = [keep]
         output(f'  Deduplicated: keeping {keep}')
