@@ -9,7 +9,7 @@ Take this json input file that describes a list of bug tickets and do the follow
 
 
 ** Fill in the Customer Cell for Each Row**
-Look at the summary and if you find something like [word] then use that word as the category. If you don't find that, but find a company name mentioned anywhere in those fields (ie, nvidia, Lenovo, etc), use that. If you don't find anything definitive, leave it blank.
+Use the customer ID field. If it is blank, look at the summary and if you find something like [word] then use that word as the category. If you don't find that, but find a company name mentioned anywhere in those fields (ie, nvidia, Lenovo, etc), use that. If you don't find anything definitive, leave it blank.
 
 ** Fill in the Product and Module Cells for Each Row**
 Look at Components, make an assessment from your knowledge of the Cornelis CN6000 project and products, and fill in either "NIC" or "Switch" for the Product. Then fill in the module cell with one of "Driver", "BTS", "FW", "OPX", or "GPU." These are references to software modules.
