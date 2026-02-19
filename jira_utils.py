@@ -1313,7 +1313,7 @@ def _dump_components_to_file(components, dump_file, dump_format='csv', ticket_co
         fieldnames.append('ticket_count')
     
     # Determine fieldnames (include any extra keys present in rows)
-    base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary', 'assignee', 'reporter', 'created', 'updated', 'resolved', 'fix_version', 'affects_version']
+    base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary', 'assignee', 'reporter', 'created', 'updated', 'resolved', 'fix_version', 'affects_version', 'customer']
     # Collect all keys that appear in any row
     all_keys = set(base_fields)
     for r in rows:
@@ -1422,7 +1422,7 @@ def _get_children_data(jira, root_key, limit=None):
         max_retries = 5
 
         # Fields needed for display/dump; keep aligned with print_ticket_row/dump_tickets_to_file
-        fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'parent']
+        fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'parent', 'customfield_17504']
         if _include_comments:
             fields_to_fetch.append('comment')
 
@@ -1619,7 +1619,7 @@ def _get_related_data(jira, root_key, hierarchy=None, limit=None):
     '''
     log.debug(f'Entering _get_related_data(root_key={root_key}, hierarchy={hierarchy}, limit={limit})')
 
-    fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'issuelinks']
+    fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'issuelinks', 'customfield_17504']
     if _include_comments:
         fields_to_fetch.append('comment')
 
@@ -2108,7 +2108,7 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'customfield_17504']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -2287,7 +2287,7 @@ def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, s
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'customfield_17504']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -2446,7 +2446,7 @@ def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, d
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'customfield_17504']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -2726,7 +2726,7 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
                 current_batch = batch_size
             
             # Build request payload - include extra fields if dumping
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'customfield_17504']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -2984,7 +2984,7 @@ def _write_excel(rows, output_path, extra_fields=None, table_format='flat'):
     # ---------------------------------------------------------------
     base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary',
                    'assignee', 'reporter', 'created', 'updated', 'resolved',
-                   'fix_version', 'affects_version', 'component']
+                   'fix_version', 'affects_version', 'component', 'customer']
 
     is_indented = (table_format == 'indented' and any('depth' in r for r in rows))
 
@@ -3173,6 +3173,10 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
         components = fields.get('components', [])
         component_str = ', '.join([c.get('name', '') for c in components]) if components else ''
         
+        # Extract customer field (customfield_17504 — "Customer/s ID", array of strings)
+        customer_raw = fields.get('customfield_17504') or []
+        customer_str = ', '.join(customer_raw) if isinstance(customer_raw, list) else str(customer_raw) if customer_raw else ''
+        
         # Extract common fields
         row = {
             'key': issue.get('key', ''),
@@ -3189,6 +3193,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
             'fix_version': fix_version_str,
             'affects_version': affects_version_str,
             'component': component_str,
+            'customer': customer_str,
         }
 
         # ── Comment extraction (only when --get-comments is active) ──────
@@ -3285,7 +3290,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
         if rows:
             base_fields = ['key', 'project', 'issue_type', 'status', 'priority', 'summary',
                            'assignee', 'reporter', 'created', 'updated', 'resolved',
-                           'fix_version', 'affects_version', 'component']
+                           'fix_version', 'affects_version', 'component', 'customer']
 
             # ------------------------------------------------------------------
             # "indented" table format: replace the depth column with per-level
@@ -3376,7 +3381,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
                 writer = csv.writer(f)
                 writer.writerow(['key', 'project', 'issue_type', 'status', 'priority', 'summary',
                                  'assignee', 'reporter', 'created', 'updated', 'resolved',
-                                 'fix_version', 'affects_version'])
+                                 'fix_version', 'affects_version', 'customer'])
     
     log.info(f'Wrote {len(rows)} tickets to: {output_path}')
 
@@ -3922,7 +3927,7 @@ def run_jql_query(jira, jql_query, limit=None, dump_file=None, dump_format='csv'
                 current_batch = batch_size
             
             # Build request payload - include extra fields if dumping
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'customfield_17504']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
