@@ -1136,6 +1136,44 @@ def cmd_workflow(args):
     return handler(args)
 
 
+# ---------------------------------------------------------------------------
+# Shared workflow summary helper
+# ---------------------------------------------------------------------------
+
+def _print_workflow_summary(workflow_name: str, created_files: list):
+    '''Print a standardised "WORKFLOW COMPLETE" banner with a file table.
+
+    Input:
+        workflow_name:  Short name shown in the banner (e.g. "bug-report").
+        created_files:  List of (filepath, description) tuples.
+    '''
+    banner = '=' * 80
+    output('')
+    output(banner)
+    output(f'WORKFLOW COMPLETE: {workflow_name}')
+    output(banner)
+
+    if created_files:
+        max_name = max(len(f[0]) for f in created_files)
+        max_name = max(max_name, 4)  # minimum column width
+        row_fmt = f'{{:<4}}{{:<{max_name + 3}}}{{:<}}'
+
+        file_table_lines = [
+            '',
+            banner,
+            'Workflow Output Files',
+            banner,
+            row_fmt.format('#', 'File', 'Description'),
+        ]
+        for idx, (fpath, fdesc) in enumerate(created_files, 1):
+            file_table_lines.append(row_fmt.format(str(idx), fpath, fdesc))
+        file_table_lines.append(banner)
+
+        output('\n'.join(file_table_lines))
+
+    output('')
+
+
 def _workflow_bug_report(args):
     '''
     Bug report workflow: filter lookup → run filter → LLM analysis → Excel conversion.
@@ -1379,33 +1417,7 @@ def _workflow_bug_report(args):
                 log.error(f'Excel conversion failed for {csv_path}: {e}', exc_info=True)
                 output(f'  WARNING: Failed to convert {csv_path} to Excel: {e}')
 
-    # ---- Final summary — ==== banner style ----------------------------------
-    banner = '=' * 80
-    output('')
-    output(banner)
-    output('WORKFLOW COMPLETE: bug-report')
-    output(banner)
-
-    if all_created_files:
-        max_name = max(len(f[0]) for f in all_created_files)
-        max_name = max(max_name, 4)
-        row_fmt = f'{{:<4}}{{:<{max_name + 3}}}{{:<}}'
-
-        file_table_lines = [
-            '',
-            banner,
-            'Workflow Output Files',
-            banner,
-            row_fmt.format('#', 'File', 'Description'),
-        ]
-        for idx, (fpath, fdesc) in enumerate(all_created_files, 1):
-            file_table_lines.append(row_fmt.format(str(idx), fpath, fdesc))
-        file_table_lines.append(banner)
-
-        file_table = '\n'.join(file_table_lines)
-        output(file_table)
-
-    output('')
+    _print_workflow_summary('bug-report', all_created_files)
     return 0
 
 
@@ -1473,12 +1485,16 @@ def _workflow_feature_plan(args):
 
             # Save the plan to JSON
             jira_plan = response.metadata.get('state', {}).get('jira_plan')
+            # Track all output files for the summary table
+            all_created_files: list = []
+
             if jira_plan:
                 import json
                 json_path = output_file
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(jira_plan, f, indent=2)
                 output(f'\nPlan saved to: {json_path}')
+                all_created_files.append((json_path, 'Feature plan JSON'))
 
                 # Also save Markdown summary
                 md_path = os.path.splitext(json_path)[0] + '.md'
@@ -1487,8 +1503,10 @@ def _workflow_feature_plan(args):
                     with open(md_path, 'w', encoding='utf-8') as f:
                         f.write(markdown)
                     output(f'Markdown saved to: {md_path}')
+                    all_created_files.append((md_path, 'Markdown summary'))
 
                 # Export plan to CSV (indented format, same basename as JSON)
+                csv_path = ''
                 try:
                     from tools.plan_export_tools import plan_to_csv as _plan_to_csv
                     csv_basename = os.path.splitext(json_path)[0]
@@ -1497,10 +1515,23 @@ def _workflow_feature_plan(args):
                         csv_path = csv_result.data.get('output_path', '')
                         if csv_path:
                             output(f'CSV saved to: {csv_path}')
+                            all_created_files.append((csv_path, 'Jira CSV (indented)'))
                     elif hasattr(csv_result, 'error') and csv_result.error:
                         log.warning(f'CSV export warning: {csv_result.error}')
                 except Exception as csv_err:
                     log.warning(f'CSV export failed (plan JSON still saved): {csv_err}')
+
+                # Convert CSV to Excel workbook via excel_utils
+                if csv_path:
+                    try:
+                        import excel_utils
+                        xlsx_path = excel_utils.convert_from_csv(csv_path)
+                        log.info(f'Converted {csv_path} -> {xlsx_path}')
+                        output(f'Excel saved to: {xlsx_path}')
+                        all_created_files.append((xlsx_path, 'Excel workbook'))
+                    except Exception as xlsx_err:
+                        log.warning(f'Excel conversion failed: {xlsx_err}')
+                        output(f'  WARNING: Excel conversion failed: {xlsx_err}')
 
             # Report blocking status
             if response.metadata.get('blocked'):
@@ -1512,6 +1543,7 @@ def _workflow_feature_plan(args):
             if not execute:
                 output('\nThis was a DRY RUN. To create tickets in Jira, re-run with --execute.')
 
+            _print_workflow_summary('feature-plan', all_created_files)
             return 0
         else:
             output(f'ERROR: {response.error}')
