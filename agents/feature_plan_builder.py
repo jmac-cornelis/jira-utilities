@@ -13,8 +13,10 @@
 import json
 import logging
 import os
+import re
 import sys
-from typing import Any, Dict, List, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from agents.base import BaseAgent, AgentConfig, AgentResponse
 from agents.feature_planning_models import (
@@ -48,7 +50,8 @@ IMPORTANT:
 '''
 
 # ---------------------------------------------------------------------------
-# Category → Epic title prefix mapping (used only for fallback grouping)
+# Category → Epic title prefix mapping (used only for fallback grouping
+# when dependency-based clustering cannot determine a better grouping)
 # ---------------------------------------------------------------------------
 
 CATEGORY_EPIC_MAP = {
@@ -74,6 +77,44 @@ CATEGORY_PREFIX = {
     'driver': '[DRV]',
     'tool': '[TOOL]',
 }
+
+# ---------------------------------------------------------------------------
+# Throughline clustering — keyword groups that identify functional themes.
+# Each tuple is (epic_label, set_of_keywords_that_match_titles).
+# Order matters: first match wins.
+# ---------------------------------------------------------------------------
+
+# Each entry is (epic_label, title_pattern, description_pattern).
+# title_pattern is matched against the item title ONLY.
+# description_pattern (optional) is matched against the description ONLY
+# when the title pattern does not match.  This avoids false positives from
+# cross-references in description text.
+THROUGHLINE_PATTERNS: List[Tuple[str, re.Pattern, Optional[re.Pattern]]] = [
+    # PLDM foundation — type definitions, dispatcher, PDR entries
+    # (must be checked before BEJ because "type definitions" could match BEJ)
+    ('PLDM Foundation',
+     re.compile(r'type\s+definition|dispatcher|PDR\b|GetPLDMTypes|PLDM\s+Type\s+6',
+                re.IGNORECASE),
+     None),
+    # RDE command handlers (negotiation, dictionary retrieval)
+    ('RDE Command Handlers',
+     re.compile(r'command\s+handler|negotiat|dictionary\s+retrieval',
+                re.IGNORECASE),
+     None),
+    # RDE operation lifecycle — operation handlers, state machine, multi-part
+    ('RDE Operation & Transfer',
+     re.compile(r'operation\s+lifecycle|operation\s+state|multi-?part\s+transfer',
+                re.IGNORECASE),
+     None),
+    # BEJ encoding — encoder + dictionary generation
+    ('BEJ Encoding Engine',
+     re.compile(r'BEJ\s+encod|dictionary\s+generation', re.IGNORECASE),
+     None),
+    # Resource providers — any story about a specific Redfish resource
+    ('Resource Providers',
+     re.compile(r'resource\s+provider', re.IGNORECASE),
+     None),
+]
 
 # Mandatory acceptance criteria appended to every Story
 MANDATORY_ACCEPTANCE_CRITERIA = [
@@ -239,6 +280,18 @@ class FeaturePlanBuilderAgent(BaseAgent):
 
         This is the deterministic path that does not require LLM calls.
 
+        Epic grouping strategy (in priority order):
+          1. **Throughline clustering** — match each scope item's title +
+             description against THROUGHLINE_PATTERNS to assign it to a
+             functional theme (e.g. "Resource Providers", "BEJ Encoding
+             Engine").
+          2. **Dependency pull-in** — if item A depends on item B and B is
+             already in a cluster, A joins the same cluster (unless A has
+             its own explicit match).
+          3. **Fallback** — items that match no pattern and share no
+             dependencies with a cluster go into a per-category fallback
+             Epic (e.g. "Firmware — Uncategorized").
+
         Input:
             feature_name:   Short name for the feature.
             project_key:    Target Jira project key.
@@ -257,40 +310,146 @@ class FeaturePlanBuilderAgent(BaseAgent):
         # Load Jira components for assignment
         components = self._get_jira_components(project_key)
 
-        # Group scope items by category — skip excluded categories (test,
-        # integration, documentation) whose items are folded into coding
-        # Stories as acceptance criteria instead of becoming tickets.
-        category_items = {
-            'firmware': feature_scope.get('firmware_items', []),
-            'driver': feature_scope.get('driver_items', []),
-            'tool': feature_scope.get('tool_items', []),
-        }
+        # ------------------------------------------------------------------
+        # 1. Collect all ticketable scope items into a flat list, each
+        #    annotated with its source category.
+        # ------------------------------------------------------------------
+        all_items: List[Tuple[str, Dict[str, Any]]] = []  # (category, item)
+        for category in ('firmware', 'driver', 'tool'):
+            for item in feature_scope.get(f'{category}_items', []):
+                all_items.append((category, item))
 
-        for category, items in category_items.items():
-            if not items:
-                continue
+        if not all_items:
+            log.warning('No ticketable scope items found')
+            plan.summary_markdown = self._build_markdown_summary(plan, feature_scope)
+            plan.confidence_report = self._build_confidence_report(plan)
+            return plan
 
-            epic_title = CATEGORY_EPIC_MAP.get(category, category.title())
-            epic_component = self._match_component(category, components)
+        # ------------------------------------------------------------------
+        # 2. Assign each item to a throughline cluster via pattern matching.
+        # ------------------------------------------------------------------
+        # cluster_name → list of (category, item)
+        clusters: Dict[str, List[Tuple[str, Dict[str, Any]]]] = defaultdict(list)
+        unclustered: List[Tuple[str, Dict[str, Any]]] = []
+
+        for category, item in all_items:
+            title = item.get('title', '')
+            matched = False
+            for cluster_label, title_pat, desc_pat in THROUGHLINE_PATTERNS:
+                if title_pat.search(title):
+                    clusters[cluster_label].append((category, item))
+                    matched = True
+                    break
+                # Fall back to description pattern only if title didn't match
+                if desc_pat is not None:
+                    desc = item.get('description', '')
+                    if desc_pat.search(desc):
+                        clusters[cluster_label].append((category, item))
+                        matched = True
+                        break
+            if not matched:
+                unclustered.append((category, item))
+
+        # ------------------------------------------------------------------
+        # 3. Dependency pull-in — for each unclustered item, check if any
+        #    of its dependencies match a title already in a cluster.
+        # ------------------------------------------------------------------
+        # Build a title→cluster lookup from already-clustered items
+        title_to_cluster: Dict[str, str] = {}
+        for cluster_label, members in clusters.items():
+            for _cat, itm in members:
+                title_to_cluster[itm.get('title', '').lower()] = cluster_label
+
+        still_unclustered: List[Tuple[str, Dict[str, Any]]] = []
+        for category, item in unclustered:
+            deps = item.get('dependencies', [])
+            pulled = False
+            for dep in deps:
+                dep_lower = dep.lower()
+                # Check if any clustered item title is a substring of the
+                # dependency string (dependencies are often short-form titles)
+                for clustered_title, cluster_label in title_to_cluster.items():
+                    if clustered_title in dep_lower or dep_lower in clustered_title:
+                        clusters[cluster_label].append((category, item))
+                        pulled = True
+                        break
+                if pulled:
+                    break
+            if not pulled:
+                still_unclustered.append((category, item))
+
+        # ------------------------------------------------------------------
+        # 4. Fallback — remaining items go into per-category Epics.
+        # ------------------------------------------------------------------
+        fallback_clusters: Dict[str, List[Tuple[str, Dict[str, Any]]]] = defaultdict(list)
+        for category, item in still_unclustered:
+            fallback_label = CATEGORY_EPIC_MAP.get(category, category.title())
+            fallback_clusters[fallback_label].append((category, item))
+
+        # ------------------------------------------------------------------
+        # 5. Create Epics from throughline clusters.
+        # ------------------------------------------------------------------
+        for cluster_label, members in clusters.items():
+            # Determine the dominant category for component assignment
+            cat_counts: Dict[str, int] = defaultdict(int)
+            for cat, _itm in members:
+                cat_counts[cat] += 1
+            dominant_cat = max(cat_counts, key=cat_counts.get)  # type: ignore[arg-type]
+            epic_component = self._match_component(dominant_cat, components)
+
+            # Build item dicts for the epic description helper
+            item_dicts = [itm for _cat, itm in members]
 
             epic = PlannedEpic(
-                summary=f'[{feature_name[:50]}] {epic_title}',
+                summary=f'[{feature_name[:50]}] {cluster_label}',
                 description=self._build_epic_description(
-                    feature_name, epic_title, items
+                    feature_name, cluster_label, item_dicts
                 ),
                 components=[epic_component] if epic_component else [],
                 labels=['feature-planning'],
             )
 
-            # Create Stories from scope items
-            prefix = CATEGORY_PREFIX.get(category, '')
-            for item in items:
+            for cat, item in members:
+                prefix = CATEGORY_PREFIX.get(cat, '')
                 story = self._scope_item_to_story(
-                    item, prefix, epic.summary, components, category
+                    item, prefix, epic.summary, components, cat
                 )
                 epic.stories.append(story)
 
             plan.epics.append(epic)
+
+        # ------------------------------------------------------------------
+        # 6. Create fallback Epics for unclustered items.
+        # ------------------------------------------------------------------
+        for fallback_label, members in fallback_clusters.items():
+            dominant_cat = members[0][0]
+            epic_component = self._match_component(dominant_cat, components)
+            item_dicts = [itm for _cat, itm in members]
+
+            epic = PlannedEpic(
+                summary=f'[{feature_name[:50]}] {fallback_label}',
+                description=self._build_epic_description(
+                    feature_name, fallback_label, item_dicts
+                ),
+                components=[epic_component] if epic_component else [],
+                labels=['feature-planning'],
+            )
+
+            for cat, item in members:
+                prefix = CATEGORY_PREFIX.get(cat, '')
+                story = self._scope_item_to_story(
+                    item, prefix, epic.summary, components, cat
+                )
+                epic.stories.append(story)
+
+            plan.epics.append(epic)
+
+        log.info(
+            f'Plan built: {plan.total_epics} epics, '
+            f'{plan.total_stories} stories '
+            f'({len(clusters)} throughline clusters, '
+            f'{len(fallback_clusters)} fallback epics)'
+        )
 
         # Build the Markdown summary
         plan.summary_markdown = self._build_markdown_summary(plan, feature_scope)

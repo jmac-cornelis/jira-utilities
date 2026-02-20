@@ -23,23 +23,26 @@ tracked, and delivered as a unit.
 
 ### How to derive Epics
 
-1. **Read the dependency Gantt chart** in the scope document — each major milestone
-   or parallel work-stream typically maps to one Epic.
-2. **Group related scope items** that share dependencies or form a logical unit of
-   delivery.  For example, if a firmware module and its corresponding driver shim
-   are tightly coupled, they belong in the same Epic.
-3. **Name Epics after the deliverable**, not the team.  Good: `[Feature] BEJ Encoder
+1. **Identify functional throughlines** — look for groups of scope items that form
+   a coherent development thread.  For example, all resource-provider stories share
+   the same code path and can be developed/reviewed together.
+2. **Use dependency chains** — items that depend on each other usually belong in the
+   same Epic.  If item A blocks item B and they share a functional theme, group them.
+3. **Cross work-type boundaries** — a firmware module and its build-time tool (e.g.
+   BEJ encoder + dictionary generator) belong in the same Epic because they form a
+   single deliverable.
+4. **Name Epics after the deliverable**, not the team.  Good: `[Feature] BEJ Encoding
    Engine`.  Bad: `[Feature] Firmware`.
-4. **Keep Epics to 3–8 Stories** when possible.  If an Epic has more than 10 Stories,
+5. **Keep Epics to 2–8 Stories** when possible.  If an Epic has more than 10 Stories,
    consider splitting it into sub-features.
 
 ### Example Epic names
 
-- `[Feature] PLDM Type 6 Dispatcher & Negotiation`
-- `[Feature] BEJ Encoder Engine`
-- `[Feature] RDE Operation Lifecycle`
-- `[Feature] Resource Providers (NetworkAdapter, Port, PCIeDevice)`
-- `[Feature] Multi-Part Transfer Engine`
+- `[Feature] PLDM Foundation` — type definitions, dispatcher, PDR entries
+- `[Feature] BEJ Encoding Engine` — encoder + dictionary generation tool
+- `[Feature] RDE Command Handlers` — negotiation, dictionary retrieval, operation lifecycle
+- `[Feature] RDE Operation & Transfer` — state machine, multi-part transfer
+- `[Feature] Resource Providers` — NetworkAdapter, Port, PCIeDevice, etc.
 
 ## What NOT to Create Tickets For
 
