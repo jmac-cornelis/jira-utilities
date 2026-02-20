@@ -52,6 +52,20 @@ class Settings:
     agent_max_iterations: int = 50
     agent_timeout_seconds: int = 300
     
+    # Cornelis MCP settings
+    mcp_url: str = 'http://cn-ai-01.cornelisnetworks.com:50700/mcp'
+    mcp_api_key_env: str = 'CORNELIS_AI_API_KEY'
+    mcp_timeout: int = 60
+    mcp_enabled: bool = True
+    
+    # Web search settings (fallback when MCP has no search tool)
+    brave_search_api_key: Optional[str] = None
+    tavily_api_key: Optional[str] = None
+    
+    # Feature planning settings
+    feature_planning_max_research_queries: int = 20
+    feature_planning_confidence_threshold: str = 'medium'
+    
     # State persistence
     state_persistence_enabled: bool = True
     state_persistence_path: str = './data/sessions'
@@ -93,6 +107,23 @@ class Settings:
             agent_log_level=os.getenv('AGENT_LOG_LEVEL', 'INFO'),
             agent_max_iterations=int(os.getenv('AGENT_MAX_ITERATIONS', '50')),
             agent_timeout_seconds=int(os.getenv('AGENT_TIMEOUT_SECONDS', '300')),
+            
+            # Cornelis MCP
+            mcp_url=os.getenv('CORNELIS_MCP_URL',
+                              'http://cn-ai-01.cornelisnetworks.com:50700/mcp'),
+            mcp_api_key_env=os.getenv('CORNELIS_MCP_API_KEY_ENV', 'CORNELIS_AI_API_KEY'),
+            mcp_timeout=int(os.getenv('CORNELIS_MCP_TIMEOUT', '60')),
+            mcp_enabled=os.getenv('CORNELIS_MCP_ENABLED', 'true').lower() == 'true',
+            
+            # Web search (fallback)
+            brave_search_api_key=os.getenv('BRAVE_SEARCH_API_KEY'),
+            tavily_api_key=os.getenv('TAVILY_API_KEY'),
+            
+            # Feature planning
+            feature_planning_max_research_queries=int(
+                os.getenv('FEATURE_PLANNING_MAX_RESEARCH_QUERIES', '20')),
+            feature_planning_confidence_threshold=os.getenv(
+                'FEATURE_PLANNING_CONFIDENCE_THRESHOLD', 'medium'),
             
             # State persistence
             state_persistence_enabled=os.getenv('STATE_PERSISTENCE_ENABLED', 'true').lower() == 'true',

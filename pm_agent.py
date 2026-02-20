@@ -1152,6 +1152,7 @@ def cmd_workflow(args):
     # Registry of available workflows
     WORKFLOWS = {
         'bug-report': _workflow_bug_report,
+        'feature-plan': _workflow_feature_plan,
     }
 
     handler = WORKFLOWS.get(args.workflow_name)
@@ -1436,6 +1437,100 @@ def _workflow_bug_report(args):
     return 0
 
 
+def _workflow_feature_plan(args):
+    '''
+    Feature planning workflow: research → HW analysis → scoping → Jira plan.
+
+    Takes a high-level feature request and produces a Jira project plan with
+    Epics and Stories.  Dry-run by default; use --execute to create tickets.
+
+    Input:
+        args: Parsed argparse namespace with:
+            - project: Jira project key
+            - feature: Feature description string
+            - docs: Optional list of document paths
+            - output: Optional output file path
+            - execute: Whether to create tickets in Jira
+
+    Output:
+        int: Exit code (0 = success, 1 = error).
+    '''
+    log.debug('Entering _workflow_feature_plan()')
+
+    project_key = args.project
+    feature_request = args.feature
+    doc_paths = args.docs or []
+    output_file = args.output or 'feature_plan.json'
+    execute = getattr(args, 'execute', False)
+
+    output(f'Feature Planning Workflow')
+    output(f'  Project:  {project_key}')
+    output(f'  Feature:  {feature_request}')
+    if doc_paths:
+        output(f'  Docs:     {len(doc_paths)} file(s)')
+        for dp in doc_paths:
+            output(f'            - {dp}')
+    output(f'  Execute:  {"YES — will create Jira tickets" if execute else "DRY RUN"}')
+    output('')
+
+    try:
+        from agents.feature_planning_orchestrator import FeaturePlanningOrchestrator
+
+        orchestrator = FeaturePlanningOrchestrator()
+
+        response = orchestrator.run({
+            'feature_request': feature_request,
+            'project_key': project_key,
+            'doc_paths': doc_paths,
+            'mode': 'full',
+            'execute': execute,
+        })
+
+        if response.success:
+            output(response.content)
+
+            # Save the plan to JSON
+            jira_plan = response.metadata.get('state', {}).get('jira_plan')
+            if jira_plan:
+                import json
+                json_path = output_file
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(jira_plan, f, indent=2)
+                output(f'\nPlan saved to: {json_path}')
+
+                # Also save Markdown summary
+                md_path = os.path.splitext(json_path)[0] + '.md'
+                markdown = jira_plan.get('summary_markdown', '')
+                if markdown:
+                    with open(md_path, 'w', encoding='utf-8') as f:
+                        f.write(markdown)
+                    output(f'Markdown saved to: {md_path}')
+
+            # Report blocking status
+            if response.metadata.get('blocked'):
+                questions = response.metadata.get('blocking_questions', [])
+                output(f'\n⚠️  Workflow blocked by {len(questions)} question(s).')
+                output('Answer the questions above and re-run to continue.')
+                return 1
+
+            if not execute:
+                output('\nThis was a DRY RUN. To create tickets in Jira, re-run with --execute.')
+
+            return 0
+        else:
+            output(f'ERROR: {response.error}')
+            return 1
+
+    except ImportError as e:
+        output(f'ERROR: Missing dependency for feature planning: {e}')
+        log.error(f'Import error: {e}', exc_info=True)
+        return 1
+    except Exception as e:
+        output(f'ERROR: Feature planning failed: {e}')
+        log.error(f'Feature planning error: {e}', exc_info=True)
+        return 1
+
+
 def cmd_resume(args):
     '''
     Resume a saved session.
@@ -1524,6 +1619,8 @@ Examples:
   %(prog)s --invoke-llm prompt.md --attachments screenshot.png report.csv
   %(prog)s --sessions --list-sessions
   %(prog)s --resume abc123
+  %(prog)s --workflow feature-plan --project STL --feature "Add PQC device support"
+  %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --docs spec.pdf --execute
         '''
     )
     
@@ -1577,6 +1674,16 @@ Examples:
                             'gets a COUNTIF-based pivot table. Names are '
                             'case-insensitive. '
                             'Example: --d-columns Phase Customer Product Module Priority')
+    
+    # ---- Options for --workflow feature-plan -----------------------------------
+    parser.add_argument('--feature', default=None, metavar='TEXT',
+                       help='Feature description for --workflow feature-plan '
+                            '(e.g. "Add PQC device support to CN5000 board")')
+    parser.add_argument('--docs', nargs='*', default=None, metavar='FILE',
+                       help='Spec documents / datasheets for --workflow feature-plan')
+    parser.add_argument('--execute', action='store_true',
+                       help='Actually create Jira tickets (default: dry-run). '
+                            'Used by --workflow feature-plan.')
     
     # ---- Options for --plan ----------------------------------------------------
     parser.add_argument('--project', '-p', default=None,
@@ -1685,6 +1792,11 @@ Examples:
         if args.workflow_name == 'bug-report':
             if not args.workflow_filter:
                 parser.error('--workflow bug-report requires --filter "FILTER_NAME"')
+        elif args.workflow_name == 'feature-plan':
+            if not args.project:
+                parser.error('--workflow feature-plan requires --project PROJECT_KEY')
+            if not args.feature:
+                parser.error('--workflow feature-plan requires --feature "DESCRIPTION"')
     
     # ---- Map ticket_keys for build-excel-map compatibility ---------------------
     # cmd_build_excel_map expects args.ticket_keys
@@ -1748,6 +1860,20 @@ Examples:
         log.info(f'+  Session: {args.resume}')
     elif command == 'workflow':
         log.info(f'+  Workflow: {args.workflow_name}')
+        if args.workflow_name == 'feature-plan':
+            log.info(f'+  Project: {args.project}')
+            feature_display = args.feature if len(args.feature) <= 60 else args.feature[:57] + '...'
+            log.info(f'+  Feature: {feature_display}')
+            if args.docs:
+                log.info(f'+  Docs: {len(args.docs)} file(s)')
+                for dp in args.docs:
+                    log.info(f'+    - {dp}')
+            if args.execute:
+                log.info(f'+  Execute: YES (will create Jira tickets)')
+            else:
+                log.info(f'+  Execute: DRY RUN')
+            if args.output:
+                log.info(f'+  Output: {args.output}')
         if args.workflow_filter:
             log.info(f'+  Filter: {args.workflow_filter}')
         if args.workflow_prompt:
