@@ -177,7 +177,8 @@ F = TypeVar('F', bound=Callable[..., Any])
 def tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
-    returns: str = 'ToolResult with operation result'
+    returns: str = 'ToolResult with operation result',
+    parameters: Optional[Dict[str, str]] = None,
 ) -> Callable[[F], F]:
     '''
     Decorator to mark a function as an agent tool.
@@ -191,6 +192,9 @@ def tool(
         name: Optional tool name override (defaults to function name).
         description: Optional description override (defaults to docstring).
         returns: Description of return value.
+        parameters: Optional dict of {param_name: description} overrides.
+                    If provided, these descriptions take precedence over
+                    docstring-extracted descriptions.
     
     Usage::
     
@@ -208,7 +212,7 @@ def tool(
         sig = inspect.signature(func)
         type_hints = getattr(func, '__annotations__', {})
         
-        parameters = []
+        tool_params = []
         for param_name, param in sig.parameters.items():
             if param_name in ('self', 'cls'):
                 continue
@@ -221,10 +225,13 @@ def tool(
             required = param.default == inspect.Parameter.empty
             default = None if required else param.default
             
-            # Try to get description from docstring
-            param_desc = _extract_param_description(func.__doc__, param_name)
+            # Try to get description: explicit override > docstring > fallback
+            if parameters and param_name in parameters:
+                param_desc = parameters[param_name]
+            else:
+                param_desc = _extract_param_description(func.__doc__, param_name)
             
-            parameters.append(ToolParameter(
+            tool_params.append(ToolParameter(
                 name=param_name,
                 type=param_type,
                 description=param_desc or f'The {param_name} parameter',
@@ -236,7 +243,7 @@ def tool(
         tool_def = ToolDefinition(
             name=tool_name,
             description=tool_description,
-            parameters=parameters,
+            parameters=tool_params,
             returns=returns,
             func=func
         )

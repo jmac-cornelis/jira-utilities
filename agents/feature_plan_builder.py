@@ -96,6 +96,12 @@ class FeaturePlanBuilderAgent(BaseAgent):
             max_iterations=20,
         )
 
+        # The plan builder sends large prompts (full scope + Jira metadata)
+        # so we need a longer LLM timeout than the default 120s.
+        if 'llm' not in kwargs:
+            from llm.config import get_llm_client
+            kwargs['llm'] = get_llm_client(timeout=600.0)
+
         super().__init__(config=config, **kwargs)
         self._register_builder_tools()
 
@@ -178,20 +184,36 @@ class FeaturePlanBuilderAgent(BaseAgent):
             feature_request, project_key, feature_scope
         )
 
-        # Run the ReAct loop
-        response = self._run_with_tools(user_prompt)
+        # Run the ReAct loop — this lets the LLM call tools (e.g.
+        # get_project_info, get_components) to gather Jira metadata.
+        # The loop may time out on large prompts; that's OK because the
+        # deterministic build_plan() below is the authoritative output.
+        react_response = self._run_with_tools(user_prompt)
 
-        # Also build the plan programmatically for structured output
+        if not react_response.success:
+            log.warning(
+                f'ReAct loop did not succeed '
+                f'(error={react_response.error}); '
+                f'falling back to deterministic build_plan()'
+            )
+
+        # Build the plan programmatically — this is the authoritative,
+        # deterministic path that does not depend on the ReAct loop.
         plan = self.build_plan(
             feature_name=feature_scope.get('feature_name', feature_request[:100]),
             project_key=project_key,
             feature_scope=feature_scope,
         )
 
-        # Attach structured plan to metadata
-        response.metadata['jira_plan'] = plan.to_dict()
-
-        return response
+        # Return a success response with the structured plan regardless
+        # of whether the ReAct loop succeeded.  The ReAct content is
+        # included as supplementary context when available.
+        return AgentResponse.success_response(
+            content=react_response.content or plan.summary_markdown or '',
+            tool_calls=react_response.tool_calls,
+            iterations=react_response.iterations,
+            metadata={'jira_plan': plan.to_dict()},
+        )
 
     # ------------------------------------------------------------------
     # Programmatic plan building (deterministic)
