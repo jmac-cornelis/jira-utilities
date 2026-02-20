@@ -24,6 +24,9 @@ set -euo pipefail
 readonly PROMPT="config/prompts/cn5000_bugs_clean.md"
 readonly LLM_TIMEOUT=800
 readonly CSV_OUTPUT="cn_bug_report.csv"
+# Dashboard columns — space-separated list of column names for the Dashboard
+# summary sheet.  Set to empty string to skip dashboard creation.
+readonly D_COLUMNS="Phase Customer Product Module Priority"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -201,7 +204,14 @@ hr
 if [[ -f "$CSV_OUTPUT" ]]; then
     log "Step 4/4: Converting ${CSV_OUTPUT} → Excel ..."
 
-    python3 excel_utils.py --convert-from-csv "$CSV_OUTPUT"
+    # Build the --d-columns flag only when D_COLUMNS is non-empty.
+    D_COL_ARGS=()
+    if [[ -n "${D_COLUMNS:-}" ]]; then
+        # shellcheck disable=SC2206  # intentional word-splitting
+        D_COL_ARGS=(--d-columns $D_COLUMNS)
+    fi
+
+    python3 excel_utils.py --convert-from-csv "$CSV_OUTPUT" "${D_COL_ARGS[@]}"
 
     # Derive expected xlsx name
     XLSX_OUTPUT="${CSV_OUTPUT%.csv}.xlsx"

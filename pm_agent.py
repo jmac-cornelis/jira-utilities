@@ -1393,10 +1393,12 @@ def _workflow_bug_report(args):
         # Pass the Jira base URL so ticket-key cells become clickable links
         # in the Excel output (e.g. https://cornelisnetworks.atlassian.net/browse/STL-76582).
         jira_base_url = getattr(jira_utils, 'JIRA_URL', None)
+        dashboard_columns = getattr(args, 'dashboard_columns', None)
         for csv_path in csv_files:
             try:
                 xlsx_path = excel_utils.convert_from_csv(
-                    csv_path, jira_base_url=jira_base_url)
+                    csv_path, jira_base_url=jira_base_url,
+                    dashboard_columns=dashboard_columns)
                 log.info(f'Converted {csv_path} -> {xlsx_path}')
                 output(f'  Converted: {csv_path} -> {xlsx_path}')
                 all_created_files.append((xlsx_path, 'Excel workbook'))
@@ -1568,6 +1570,13 @@ Examples:
                        dest='workflow_prompt',
                        help='Prompt file for LLM step (used by --workflow bug-report, '
                             'default: config/prompts/cn5000_bugs_clean.md)')
+    parser.add_argument('--d-columns', nargs='+', default=None, metavar='COL',
+                       dest='dashboard_columns',
+                       help='Column names for the Excel Dashboard sheet '
+                            '(used by --workflow bug-report). Each named column '
+                            'gets a COUNTIF-based pivot table. Names are '
+                            'case-insensitive. '
+                            'Example: --d-columns Phase Customer Product Module Priority')
     
     # ---- Options for --plan ----------------------------------------------------
     parser.add_argument('--project', '-p', default=None,
