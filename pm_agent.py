@@ -1633,12 +1633,16 @@ Examples:
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --docs spec.pdf --execute
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.json
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.md --execute
+  %(prog)s --env .env_sandbox --workflow feature-plan --project STLSB --feature "Redfish RDE" --scope-doc RedfishRDE.md
         '''
     )
     
     # Global options
     parser.add_argument('-q', '--quiet', action='store_true',
                        help='Suppress output to stdout')
+    parser.add_argument('--env', default=None, metavar='FILE',
+                       help='Path to a .env file to load (overrides the default .env). '
+                            'Example: --env .env_sandbox')
     parser.add_argument('--persistence-format', choices=['json', 'sqlite', 'both'],
                        default='json', help='Session persistence format')
     
@@ -1758,6 +1762,16 @@ Examples:
     
     if args.quiet:
         _quiet_mode = True
+    
+    # ---- Load custom env file (--env) early, before anything reads env vars ----
+    # The default .env was already loaded at import time (line 31) with
+    # override=False.  When --env is provided we reload from that file with
+    # override=True so its values take precedence.
+    if args.env:
+        if not os.path.exists(args.env):
+            parser.error(f'--env file not found: {args.env}')
+        load_dotenv(dotenv_path=args.env, override=True)
+        log.info(f'Loaded env file: {args.env}')
     
     # ---- Verbose mode: add a stdout handler so debug messages appear on console
     if args.verbose:
