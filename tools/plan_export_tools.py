@@ -169,11 +169,19 @@ def plan_json_to_rows(
 
 
 def _resolve_output_path(input_path: str, output_path: Optional[str], fmt: str) -> str:
-    '''Derive the output file path from the input path when not explicitly given.'''
+    '''Derive the output file path from the input path when not explicitly given.
+
+    If *output_path* is provided it is treated as a **basename without extension**;
+    the correct extension (.csv or .xlsx) is appended automatically.  When
+    *output_path* is ``None`` or empty the basename is derived from *input_path*.
+    '''
+    ext = '.csv' if fmt == 'csv' else '.xlsx'
     if output_path:
-        return output_path
+        # Strip any extension the caller may have included, then apply the right one
+        base, _ = os.path.splitext(output_path)
+        return f'{base}{ext}'
     base, _ = os.path.splitext(input_path)
-    return f'{base}.csv' if fmt == 'csv' else f'{base}.xlsx'
+    return f'{base}{ext}'
 
 
 # ============================================================================
@@ -184,16 +192,16 @@ def write_plan_csv(
     rows: List[Dict[str, str]],
     output_path: str,
     *,
-    table_format: str = 'flat',
+    table_format: str = 'indented',
 ) -> str:
     '''Write plan rows to a CSV file using the jira_utils column convention.
 
     Args:
         rows: List of row dicts (from plan_json_to_rows).
         output_path: Destination file path.
-        table_format: ``'flat'`` (default) keeps depth as a regular column;
-            ``'indented'`` replaces the key column with per-depth columns
-            (Depth 0, Depth 1, …) matching jira_utils indented format.
+        table_format: ``'indented'`` (default) replaces the key column with
+            per-depth columns (Depth 0, Depth 1, …) matching jira_utils
+            indented format; ``'flat'`` keeps depth as a regular column.
 
     Returns:
         The resolved output path.
@@ -277,7 +285,7 @@ def write_plan_excel(
     rows: List[Dict[str, str]],
     output_path: str,
     *,
-    table_format: str = 'flat',
+    table_format: str = 'indented',
 ) -> str:
     '''Write plan rows to an Excel file, delegating to jira_utils._write_excel().
 
@@ -310,8 +318,8 @@ def write_plan_excel(
     ),
     parameters={
         'input_path': 'Path to the feature-plan JSON file (e.g. feature_plan.json)',
-        'output_path': 'Optional output CSV path. Defaults to <input_basename>.csv',
-        'table_format': "Table layout: 'flat' (default) or 'indented'",
+        'output_path': 'Output file basename without extension. Extension is added automatically. Defaults to <input_basename>',
+        'table_format': "Table layout: 'indented' (default) or 'flat'",
         'include_description': 'Include full description column (default: false)',
         'output_format': "Output format: 'csv' (default) or 'excel'",
     },
@@ -319,21 +327,24 @@ def write_plan_excel(
 def plan_to_csv(
     input_path: str,
     output_path: str = '',
-    table_format: str = 'flat',
+    table_format: str = 'indented',
     include_description: bool = False,
     output_format: str = 'csv',
 ) -> ToolResult:
     '''Convert a feature-plan JSON to the standard Jira CSV/Excel format.
 
+    The CSV is always written.  When *output_format* is ``'excel'`` an
+    additional ``.xlsx`` file is produced alongside the CSV.
+
     Args:
         input_path: Path to the feature-plan JSON file.
-        output_path: Destination file path (auto-derived if empty).
-        table_format: 'flat' or 'indented'.
+        output_path: Output basename without extension (auto-derived if empty).
+        table_format: 'indented' (default) or 'flat'.
         include_description: Whether to include the description column.
         output_format: 'csv' or 'excel'.
 
     Returns:
-        ToolResult with the output file path and row count.
+        ToolResult with the output file path(s) and row count.
     '''
     # --- Validate input ---
     if not os.path.exists(input_path):
@@ -350,29 +361,38 @@ def plan_to_csv(
     if not rows:
         return ToolResult.error(error='Plan contains no epics or stories')
 
-    # --- Resolve output path ---
+    # --- Resolve output paths ---
     fmt = output_format.lower().strip()
-    resolved = _resolve_output_path(input_path, output_path or None, fmt)
+    csv_path = _resolve_output_path(input_path, output_path or None, 'csv')
 
-    # --- Write ---
+    # --- Always write CSV ---
     try:
-        if fmt == 'excel':
-            written_path = write_plan_excel(rows, resolved, table_format=table_format)
-        else:
-            written_path = write_plan_csv(rows, resolved, table_format=table_format)
+        write_plan_csv(rows, csv_path, table_format=table_format)
     except Exception as e:
-        return ToolResult.error(error=f'Failed to write output: {e}')
+        return ToolResult.error(error=f'Failed to write CSV: {e}')
+
+    written_paths = [csv_path]
+
+    # --- Optionally write Excel alongside the CSV ---
+    if fmt == 'excel':
+        xlsx_path = _resolve_output_path(input_path, output_path or None, 'excel')
+        try:
+            write_plan_excel(rows, xlsx_path, table_format=table_format)
+            written_paths.append(xlsx_path)
+        except Exception as e:
+            log.warning(f'Excel write failed (CSV still written): {e}')
 
     return ToolResult.success(
         data={
-            'output_path': written_path,
+            'output_path': csv_path,
+            'output_paths': written_paths,
             'total_rows': len(rows),
             'epics': sum(1 for r in rows if r.get('issue_type') == 'Epic'),
             'stories': sum(1 for r in rows if r.get('issue_type') == 'Story'),
             'format': fmt,
             'table_format': table_format,
         },
-        message=f'Exported {len(rows)} rows to {written_path}',
+        message=f'Exported {len(rows)} rows to {", ".join(written_paths)}',
     )
 
 
@@ -436,7 +456,7 @@ class PlanExportTools(BaseTool):
 
     @tool(description='Convert a feature-plan JSON to Jira-compatible CSV')
     def plan_to_csv(self, input_path: str, output_path: str = '',
-                    table_format: str = 'flat', include_description: bool = False,
+                    table_format: str = 'indented', include_description: bool = False,
                     output_format: str = 'csv') -> ToolResult:
         return plan_to_csv(input_path, output_path, table_format,
                            include_description, output_format)
@@ -463,21 +483,21 @@ def _cli_main() -> None:
         help='Path to the feature-plan JSON file',
     )
     parser.add_argument(
-        '-o', '--output',
+        '-o', '--outfile',
         default='',
-        help='Output file path (default: <input_basename>.csv)',
+        help='Output file basename without extension (default: same as input basename)',
     )
     parser.add_argument(
         '-f', '--format',
         choices=['csv', 'excel'],
         default='csv',
-        help='Output format (default: csv)',
+        help='Output format (default: csv). CSV is always written; excel adds .xlsx alongside',
     )
     parser.add_argument(
         '-t', '--table-format',
         choices=['flat', 'indented'],
-        default='flat',
-        help="Table layout: 'flat' (default) or 'indented'",
+        default='indented',
+        help="Table layout: 'indented' (default) or 'flat'",
     )
     parser.add_argument(
         '--include-description',
@@ -502,7 +522,7 @@ def _cli_main() -> None:
 
     result = plan_to_csv(
         input_path=args.input,
-        output_path=args.output,
+        output_path=args.outfile,
         table_format=args.table_format,
         include_description=args.include_description,
         output_format=args.format,
@@ -514,7 +534,8 @@ def _cli_main() -> None:
         raise SystemExit(1)
 
     data = result.data if hasattr(result, 'data') else {}
-    print(f'Output:  {data.get("output_path", "?")}')
+    for p in data.get('output_paths', [data.get('output_path', '?')]):
+        print(f'Output:  {p}')
     print(f'Rows:    {data.get("total_rows", 0)}')
     print(f'Epics:   {data.get("epics", 0)}')
     print(f'Stories: {data.get("stories", 0)}')
