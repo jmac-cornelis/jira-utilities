@@ -146,7 +146,8 @@ class CornelisLLM(BaseLLM):
             # Add any additional kwargs
             params.update(kwargs)
             
-            log.debug(f'Sending request to Cornelis LLM: model={self.model}')
+            msg_count = len(api_messages)
+            log.info(f'Waiting for Cornelis LLM response (model={self.model}, messages={msg_count}) ...')
             response = self.client.chat.completions.create(**params)
             
             # Extract response data

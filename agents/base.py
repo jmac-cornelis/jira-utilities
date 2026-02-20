@@ -249,7 +249,11 @@ class BaseAgent(ABC):
         messages = self._build_messages(user_input)
         
         for iteration in range(max_iter):
-            log.debug(f'Agent {self.config.name} iteration {iteration + 1}/{max_iter}')
+            log.info(
+                f'Agent {self.config.name} — LLM call '
+                f'(iteration {iteration + 1}/{max_iter}, '
+                f'{len(messages)} messages) ... waiting for response'
+            )
             
             try:
                 # Call LLM with tools
