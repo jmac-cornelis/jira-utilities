@@ -143,7 +143,8 @@ class FeaturePlanningOrchestrator(BaseAgent):
                 - feature_request: str — The user's feature description (required)
                 - project_key: str — Target Jira project key (required)
                 - doc_paths: List[str] — Optional paths to spec documents
-                - mode: str — 'full', 'research', 'plan', or 'execute'
+                - mode: str — 'full', 'research', 'plan', 'scope-to-plan', or 'execute'
+                - scope_doc: str — Path to a pre-existing scope document (used with mode='scope-to-plan')
                 - execute: bool — Whether to create tickets in Jira
 
         Output:
@@ -162,6 +163,7 @@ class FeaturePlanningOrchestrator(BaseAgent):
         doc_paths = input_data.get('doc_paths', [])
         mode = input_data.get('mode', 'full')
         execute = input_data.get('execute', False)
+        scope_doc = input_data.get('scope_doc', '')
 
         if not feature_request:
             return AgentResponse.error_response('No feature_request provided')
@@ -179,6 +181,10 @@ class FeaturePlanningOrchestrator(BaseAgent):
                 return self._run_research_only()
             elif mode == 'plan':
                 return self._run_plan_only()
+            elif mode == 'scope-to-plan':
+                return self._run_scope_to_plan(
+                    scope_doc=scope_doc, execute=execute
+                )
             elif mode == 'execute':
                 return self._run_execute_only()
             else:
@@ -235,6 +241,418 @@ class FeaturePlanningOrchestrator(BaseAgent):
                 'No Jira plan to execute. Run the full workflow first.'
             )
         return self._phase_execution()
+
+    def _run_scope_to_plan(
+        self, scope_doc: str = '', execute: bool = False
+    ) -> AgentResponse:
+        '''
+        Skip research/HW-analysis/scoping — parse a pre-existing scope
+        document and jump straight to plan generation + review + execute.
+
+        The scope document can be:
+          • A JSON file whose structure matches FeatureScope.to_dict()
+          • A Markdown / plain-text file that the LLM will parse into scope items
+          • A PDF or DOCX that will be extracted to text first
+
+        Input:
+            scope_doc: Path to the scope document.
+            execute:   Whether to create Jira tickets after plan generation.
+
+        Output:
+            AgentResponse with the generated plan (and execution results if execute=True).
+        '''
+        results: List[str] = []
+
+        if not scope_doc:
+            return AgentResponse.error_response(
+                'mode=scope-to-plan requires a --scope-doc path'
+            )
+
+        # ---- Phase 0: Parse the scope document into a FeatureScope dict ----
+        log.info('=' * 60)
+        log.info('PHASE 0: Parsing scope document → FeatureScope')
+        log.info('=' * 60)
+
+        scope_result = self._parse_scope_document(scope_doc)
+        if scope_result is None:
+            return AgentResponse.error_response(
+                f'Failed to parse scope document: {scope_doc}'
+            )
+
+        self.state.feature_scope = scope_result
+        self.state.mark_phase_complete('research')
+        self.state.mark_phase_complete('hw_analysis')
+        self.state.mark_phase_complete('scoping')
+
+        results.append(
+            f'PHASE 0: Scope Document Parsed\n'
+            f'  Source: {scope_doc}\n'
+            f'  Feature: {scope_result.get("feature_name", "?")}\n'
+            f'  Items: {sum(len(scope_result.get(k, [])) for k in ("firmware_items", "driver_items", "tool_items", "test_items", "integration_items", "documentation_items"))}'
+        )
+
+        # ---- Phase 4: Plan Generation ----
+        log.info('=' * 60)
+        log.info('PHASE 4: Jira Plan Generation')
+        log.info('=' * 60)
+        results.append(self._phase_plan_generation())
+
+        # ---- Phase 5: Review ----
+        log.info('=' * 60)
+        log.info('PHASE 5: Plan Review')
+        log.info('=' * 60)
+        results.append(self._format_plan_for_review())
+
+        # ---- Phase 6: Execute (only if --execute) ----
+        if execute:
+            log.info('=' * 60)
+            log.info('PHASE 6: Jira Execution')
+            log.info('=' * 60)
+            exec_result = self._phase_execution()
+            if exec_result.success:
+                results.append(exec_result.content)
+            else:
+                results.append(f'Execution failed: {exec_result.error}')
+
+        return AgentResponse.success_response(
+            content='\n\n'.join(results),
+            metadata={
+                'state': self.state.to_dict(),
+                'ready_for_execution': not execute,
+                'scope_doc': scope_doc,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Scope document parser
+    # ------------------------------------------------------------------
+
+    def _parse_scope_document(self, doc_path: str) -> Optional[Dict[str, Any]]:
+        '''
+        Parse a scope document into a FeatureScope-compatible dict.
+
+        Supports three formats:
+          1. JSON  — must match FeatureScope.to_dict() schema (direct load)
+          2. Markdown / plain text — parsed by the LLM into structured scope
+          3. PDF / DOCX — extracted to text first, then parsed by the LLM
+
+        Input:
+            doc_path: Path to the scope document.
+
+        Output:
+            A dict matching FeatureScope.to_dict() structure, or None on failure.
+        '''
+        if not os.path.exists(doc_path):
+            log.error(f'Scope document not found: {doc_path}')
+            return None
+
+        ext = os.path.splitext(doc_path)[1].lower()
+
+        # ---- JSON: direct load ----
+        if ext == '.json':
+            return self._parse_scope_json(doc_path)
+
+        # ---- PDF / DOCX: extract text first ----
+        if ext in ('.pdf', '.docx'):
+            text = self._extract_document_text(doc_path)
+            if not text:
+                log.error(f'Failed to extract text from {doc_path}')
+                return None
+            return self._parse_scope_text(text, source=doc_path)
+
+        # ---- Markdown / plain text ----
+        try:
+            with open(doc_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+        except Exception as e:
+            log.error(f'Failed to read scope document {doc_path}: {e}')
+            return None
+
+        if not text.strip():
+            log.error(f'Scope document is empty: {doc_path}')
+            return None
+
+        return self._parse_scope_text(text, source=doc_path)
+
+    def _parse_scope_json(self, json_path: str) -> Optional[Dict[str, Any]]:
+        '''
+        Load a JSON scope document.  Validates that it has at least one
+        category list (firmware_items, driver_items, etc.).
+
+        Input:
+            json_path: Path to the JSON file.
+
+        Output:
+            FeatureScope-compatible dict, or None on failure.
+        '''
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            log.error(f'Failed to parse JSON scope document {json_path}: {e}')
+            return None
+
+        if not isinstance(data, dict):
+            log.error(f'JSON scope document must be a dict, got {type(data).__name__}')
+            return None
+
+        # Minimal validation: at least one item list should be present
+        item_keys = [
+            'firmware_items', 'driver_items', 'tool_items',
+            'test_items', 'integration_items', 'documentation_items',
+        ]
+        has_items = any(data.get(k) for k in item_keys)
+
+        if not has_items:
+            # Maybe the user provided a flat list of items — try to adapt
+            if 'items' in data and isinstance(data['items'], list):
+                log.info('Adapting flat "items" list into categorized scope')
+                data = self._categorize_flat_items(data)
+            else:
+                log.warning(
+                    'JSON scope document has no item lists; '
+                    'will attempt to use it as-is'
+                )
+
+        # Ensure required top-level keys have defaults
+        data.setdefault('feature_name', '')
+        data.setdefault('summary', '')
+        for k in item_keys:
+            data.setdefault(k, [])
+        data.setdefault('open_questions', [])
+        data.setdefault('assumptions', [])
+        data.setdefault('confidence_report', {})
+
+        log.info(
+            f'Loaded JSON scope: {data.get("feature_name", "?")} — '
+            f'{sum(len(data.get(k, [])) for k in item_keys)} items'
+        )
+        return data
+
+    @staticmethod
+    def _categorize_flat_items(data: Dict[str, Any]) -> Dict[str, Any]:
+        '''
+        Convert a flat {"items": [...]} structure into the categorized
+        FeatureScope format by inspecting each item's "category" field.
+
+        Input:
+            data: Dict with an "items" key containing a list of scope item dicts.
+
+        Output:
+            Dict with items distributed into *_items lists.
+        '''
+        category_map = {
+            'firmware': 'firmware_items',
+            'driver': 'driver_items',
+            'tool': 'tool_items',
+            'test': 'test_items',
+            'integration': 'integration_items',
+            'documentation': 'documentation_items',
+        }
+
+        result = {
+            'feature_name': data.get('feature_name', ''),
+            'summary': data.get('summary', ''),
+            'firmware_items': [],
+            'driver_items': [],
+            'tool_items': [],
+            'test_items': [],
+            'integration_items': [],
+            'documentation_items': [],
+            'open_questions': data.get('open_questions', []),
+            'assumptions': data.get('assumptions', []),
+            'confidence_report': {},
+        }
+
+        for item in data.get('items', []):
+            cat = item.get('category', 'firmware').lower()
+            target_key = category_map.get(cat, 'firmware_items')
+            result[target_key].append(item)
+
+        return result
+
+    def _parse_scope_text(
+        self, text: str, source: str = ''
+    ) -> Optional[Dict[str, Any]]:
+        '''
+        Use the LLM to parse free-form text (Markdown, plain text, extracted
+        PDF/DOCX) into a structured FeatureScope dict.
+
+        The LLM is given the text and asked to produce JSON matching the
+        FeatureScope schema.
+
+        Input:
+            text:   The raw text content of the scope document.
+            source: Original file path (for logging).
+
+        Output:
+            FeatureScope-compatible dict, or None on failure.
+        '''
+        import re
+
+        log.info(f'Parsing scope text via LLM ({len(text)} chars from {source})')
+
+        # Build the LLM prompt
+        parse_prompt = (
+            'You are given a technical scoping document for a Cornelis Networks '
+            'feature.  Parse it into a structured JSON object with this schema:\n\n'
+            '```json\n'
+            '{\n'
+            '  "feature_name": "short name",\n'
+            '  "summary": "executive summary",\n'
+            '  "firmware_items": [ { "title": "...", "description": "...", '
+            '"category": "firmware", "complexity": "S|M|L|XL", '
+            '"confidence": "high|medium|low", "dependencies": [], '
+            '"rationale": "...", "acceptance_criteria": ["..."] } ],\n'
+            '  "driver_items": [ ... ],\n'
+            '  "tool_items": [ ... ],\n'
+            '  "test_items": [ ... ],\n'
+            '  "integration_items": [ ... ],\n'
+            '  "documentation_items": [ ... ],\n'
+            '  "open_questions": [ { "question": "...", "context": "...", '
+            '"options": [], "blocking": false } ],\n'
+            '  "assumptions": [ "..." ]\n'
+            '}\n'
+            '```\n\n'
+            'Rules:\n'
+            '- Assign each work item to the most appropriate category.\n'
+            '- If the document mentions complexity/size, map it to S/M/L/XL.\n'
+            '- If the document mentions confidence, map it to high/medium/low.\n'
+            '- If not stated, default complexity to M and confidence to medium.\n'
+            '- Extract acceptance criteria from the text where possible.\n'
+            '- Identify dependencies between items by title.\n'
+            '- List any open questions or unknowns.\n'
+            '- List any assumptions made.\n\n'
+            'Return ONLY the JSON object, no other text.\n\n'
+            '--- SCOPE DOCUMENT ---\n\n'
+            f'{text}\n'
+        )
+
+        try:
+            from llm.config import get_llm_client
+            llm = get_llm_client()
+            from llm.base import Message
+            messages = [Message.user(parse_prompt)]
+            response = llm.chat(messages=messages)
+
+            if not response or not response.content:
+                log.error('LLM returned empty response for scope parsing')
+                return None
+
+            # Extract JSON from the response (may be wrapped in ```json ... ```)
+            content = response.content.strip()
+            json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', content, re.DOTALL)
+            if json_match:
+                content = json_match.group(1).strip()
+
+            data = json.loads(content)
+
+            if not isinstance(data, dict):
+                log.error(f'LLM scope parse returned {type(data).__name__}, expected dict')
+                return None
+
+            # Ensure all required keys
+            item_keys = [
+                'firmware_items', 'driver_items', 'tool_items',
+                'test_items', 'integration_items', 'documentation_items',
+            ]
+            data.setdefault('feature_name', '')
+            data.setdefault('summary', '')
+            for k in item_keys:
+                data.setdefault(k, [])
+            data.setdefault('open_questions', [])
+            data.setdefault('assumptions', [])
+            data.setdefault('confidence_report', {})
+
+            total = sum(len(data.get(k, [])) for k in item_keys)
+            log.info(f'LLM parsed scope: {data.get("feature_name", "?")} — {total} items')
+            return data
+
+        except json.JSONDecodeError as e:
+            log.error(f'Failed to parse LLM scope output as JSON: {e}')
+            return None
+        except Exception as e:
+            log.error(f'LLM scope parsing failed: {e}')
+            return None
+
+    @staticmethod
+    def _extract_document_text(doc_path: str) -> Optional[str]:
+        '''
+        Extract plain text from a PDF or DOCX file.
+
+        Uses the same library fallback chain as knowledge_tools:
+        PDF:  PyMuPDF → pdfplumber → PyPDF2
+        DOCX: python-docx
+
+        Input:
+            doc_path: Path to the document.
+
+        Output:
+            Extracted text, or None on failure.
+        '''
+        ext = os.path.splitext(doc_path)[1].lower()
+
+        if ext == '.pdf':
+            # Try PyMuPDF first
+            try:
+                import fitz  # PyMuPDF
+                doc = fitz.open(doc_path)
+                text = '\n'.join(page.get_text() for page in doc)
+                doc.close()
+                if text.strip():
+                    return text
+            except ImportError:
+                pass
+            except Exception as e:
+                log.warning(f'PyMuPDF failed on {doc_path}: {e}')
+
+            # Try pdfplumber
+            try:
+                import pdfplumber
+                with pdfplumber.open(doc_path) as pdf:
+                    text = '\n'.join(
+                        page.extract_text() or '' for page in pdf.pages
+                    )
+                if text.strip():
+                    return text
+            except ImportError:
+                pass
+            except Exception as e:
+                log.warning(f'pdfplumber failed on {doc_path}: {e}')
+
+            # Try PyPDF2
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(doc_path)
+                text = '\n'.join(
+                    page.extract_text() or '' for page in reader.pages
+                )
+                if text.strip():
+                    return text
+            except ImportError:
+                pass
+            except Exception as e:
+                log.warning(f'PyPDF2 failed on {doc_path}: {e}')
+
+            log.error(f'No PDF library available to extract {doc_path}')
+            return None
+
+        elif ext == '.docx':
+            try:
+                from docx import Document
+                doc = Document(doc_path)
+                text = '\n'.join(p.text for p in doc.paragraphs)
+                if text.strip():
+                    return text
+            except ImportError:
+                log.error('python-docx not installed; cannot extract DOCX')
+            except Exception as e:
+                log.error(f'DOCX extraction failed for {doc_path}: {e}')
+            return None
+
+        else:
+            log.error(f'Unsupported document type for extraction: {ext}')
+            return None
 
     def _run_full_workflow(self, execute: bool = False) -> AgentResponse:
         '''Run the complete workflow.'''

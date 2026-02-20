@@ -1462,10 +1462,19 @@ def _workflow_feature_plan(args):
     doc_paths = args.docs or []
     output_file = args.output or 'feature_plan.json'
     execute = getattr(args, 'execute', False)
+    scope_doc = getattr(args, 'scope_doc', None) or ''
+
+    # Determine the workflow mode:
+    #   --scope-doc  → 'scope-to-plan' (skip research/HW/scoping, jump to plan)
+    #   default      → 'full' (run all phases)
+    mode = 'scope-to-plan' if scope_doc else 'full'
 
     output(f'Feature Planning Workflow')
     output(f'  Project:  {project_key}')
     output(f'  Feature:  {feature_request}')
+    output(f'  Mode:     {mode}')
+    if scope_doc:
+        output(f'  Scope:    {scope_doc}')
     if doc_paths:
         output(f'  Docs:     {len(doc_paths)} file(s)')
         for dp in doc_paths:
@@ -1482,8 +1491,9 @@ def _workflow_feature_plan(args):
             'feature_request': feature_request,
             'project_key': project_key,
             'doc_paths': doc_paths,
-            'mode': 'full',
+            'mode': mode,
             'execute': execute,
+            'scope_doc': scope_doc,
         })
 
         if response.success:
@@ -1621,6 +1631,8 @@ Examples:
   %(prog)s --resume abc123
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device support"
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --docs spec.pdf --execute
+  %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.json
+  %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.md --execute
         '''
     )
     
@@ -1679,6 +1691,12 @@ Examples:
     parser.add_argument('--feature', default=None, metavar='TEXT',
                        help='Feature description for --workflow feature-plan '
                             '(e.g. "Add PQC device support to CN5000 board")')
+    parser.add_argument('--scope-doc', default=None, metavar='FILE',
+                       dest='scope_doc',
+                       help='Pre-existing scope document (JSON, Markdown, PDF, DOCX). '
+                            'Skips research/HW-analysis/scoping phases and jumps '
+                            'straight to Jira plan generation. '
+                            'Used by --workflow feature-plan.')
     parser.add_argument('--docs', nargs='*', default=None, metavar='FILE',
                        help='Spec documents / datasheets for --workflow feature-plan')
     parser.add_argument('--execute', action='store_true',
