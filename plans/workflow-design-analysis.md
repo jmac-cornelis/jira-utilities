@@ -254,7 +254,7 @@ parameters:
     description: Exact name of a Jira favourite filter
   prompt:
     type: string
-    default: agents/prompts/cn5000_bugs_clean.md
+    default: config/prompts/cn5000_bugs_clean.md
   timeout:
     type: int
     default: 800

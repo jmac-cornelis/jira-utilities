@@ -585,7 +585,7 @@ python3 pm_agent.py --workflow bug-report --filter "My Filter" --prompt my_promp
 |------|-------------|
 | `--workflow NAME` | Workflow to run (currently: `bug-report`) |
 | `--filter NAME` | Jira filter name to look up (required for `bug-report`) |
-| `--prompt FILE` | LLM prompt file (default: `agents/prompts/cn5000_bugs_clean.md`) |
+| `--prompt FILE` | LLM prompt file (default: `config/prompts/cn5000_bugs_clean.md`) |
 | `--timeout SECS` | LLM request timeout in seconds |
 | `--limit N` | Max tickets to retrieve |
 | `--output FILE` | Override output filename |

@@ -1196,7 +1196,7 @@ def _workflow_bug_report(args):
     import excel_utils
 
     filter_name = args.workflow_filter
-    prompt_path = args.workflow_prompt or 'agents/prompts/cn5000_bugs_clean.md'
+    prompt_path = args.workflow_prompt or 'config/prompts/cn5000_bugs_clean.md'
     all_created_files = []  # (filepath, description) tuples for final summary
 
     # ---- Step 1/6: Connect to Jira ------------------------------------------
@@ -1567,7 +1567,7 @@ Examples:
     parser.add_argument('--prompt', default=None, metavar='FILE',
                        dest='workflow_prompt',
                        help='Prompt file for LLM step (used by --workflow bug-report, '
-                            'default: agents/prompts/cn5000_bugs_clean.md)')
+                            'default: config/prompts/cn5000_bugs_clean.md)')
     
     # ---- Options for --plan ----------------------------------------------------
     parser.add_argument('--project', '-p', default=None,

@@ -21,7 +21,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration — edit these if prompt or filenames change
 # ---------------------------------------------------------------------------
-readonly PROMPT="agents/prompts/cn5000_bugs_clean.md"
+readonly PROMPT="config/prompts/cn5000_bugs_clean.md"
 readonly LLM_TIMEOUT=800
 readonly CSV_OUTPUT="cn_bug_report.csv"
 
