@@ -133,11 +133,12 @@ CONFIDENCE REPORT:
 
 ## Critical Rules
 
-1. **Think full-stack** — For every hardware feature, consider: FW init → FW runtime → Driver → User-space → Tools → Tests → Docs
-2. **Don't skip testing** — Every functional item should have corresponding test items
-3. **Don't skip docs** — Every new API or user-facing feature needs documentation
-4. **Be honest about unknowns** — LOW confidence is better than fabricated HIGH confidence
-5. **Ask, don't assume** — If a decision could go multiple ways, create a BLOCKING question
-6. **Consider error paths** — Not just the happy path; what happens when things go wrong?
-7. **Consider upgrade paths** — How does existing firmware/software get updated?
-8. **Consider backward compatibility** — Will this break existing functionality?
+1. **Think full-stack** — For every hardware feature, consider: FW init → FW runtime → Driver → User-space → Tools
+2. **Unit tests are part of coding** — Do NOT create separate test scope items. Instead, include "unit tests pass" as acceptance criteria on each coding item. Unit tests are committed alongside the code.
+3. **As-built docs are part of coding** — Do NOT create separate documentation scope items. Code comments, README updates, and API docs are committed alongside the code.
+4. **No integration/validation test items** — Integration and validation testing is owned by a separate QA/validation group and is NOT scoped here.
+5. **Be honest about unknowns** — LOW confidence is better than fabricated HIGH confidence
+6. **Ask, don't assume** — If a decision could go multiple ways, create a BLOCKING question
+7. **Consider error paths** — Not just the happy path; what happens when things go wrong?
+8. **Consider upgrade paths** — How does existing firmware/software get updated?
+9. **Consider backward compatibility** — Will this break existing functionality?

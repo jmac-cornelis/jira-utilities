@@ -35,31 +35,37 @@ log = logging.getLogger(os.path.basename(sys.argv[0]))
 PLAN_BUILDER_INSTRUCTION = '''You are a Feature Plan Builder Agent for Cornelis Networks.
 
 Convert scoped SW/FW work items into a Jira project plan with Epics and Stories.
-Group items by functional area, assign components, write clear descriptions with
-acceptance criteria, and produce a dry-run plan for human review.
+Group items by feature/deliverable (NOT by work-type), assign components, write
+clear descriptions with acceptance criteria, and produce a dry-run plan for
+human review.
+
+IMPORTANT:
+- Do NOT create tickets for unit tests, documentation, integration testing,
+  or validation testing.  Unit tests and as-built docs are acceptance criteria
+  on coding Stories.  Integration/validation testing is owned by another group.
+- Epics are feature-based (derived from the dependency Gantt chart), not
+  work-type-based.
 '''
 
 # ---------------------------------------------------------------------------
-# Category → Epic title prefix mapping
+# Category → Epic title prefix mapping (used only for fallback grouping)
 # ---------------------------------------------------------------------------
 
 CATEGORY_EPIC_MAP = {
     'firmware': 'Firmware',
     'driver': 'Driver',
     'tool': 'Tools & Diagnostics',
-    'test': 'Testing',
-    'integration': 'Integration',
-    'documentation': 'Documentation',
 }
+
+# Categories that should NOT produce tickets — their items are folded into
+# coding Stories as acceptance criteria instead.
+EXCLUDED_CATEGORIES = {'test', 'integration', 'documentation'}
 
 # Category → Jira component keyword matching
 CATEGORY_COMPONENT_KEYWORDS = {
     'firmware': ['firmware', 'fw', 'embedded'],
     'driver': ['driver', 'kernel', 'hfi', 'module'],
     'tool': ['tool', 'cli', 'util', 'diag'],
-    'test': ['qa', 'test', 'validation', 'quality'],
-    'integration': ['integration', 'system'],
-    'documentation': ['doc', 'documentation', 'docs', 'technical writing'],
 }
 
 # Category → Story summary prefix
@@ -67,10 +73,13 @@ CATEGORY_PREFIX = {
     'firmware': '[FW]',
     'driver': '[DRV]',
     'tool': '[TOOL]',
-    'test': '[TEST]',
-    'integration': '[INT]',
-    'documentation': '[DOC]',
 }
+
+# Mandatory acceptance criteria appended to every Story
+MANDATORY_ACCEPTANCE_CRITERIA = [
+    'Unit tests pass for relevant functionality',
+    'Code reviewed and merged',
+]
 
 
 class FeaturePlanBuilderAgent(BaseAgent):
@@ -248,14 +257,13 @@ class FeaturePlanBuilderAgent(BaseAgent):
         # Load Jira components for assignment
         components = self._get_jira_components(project_key)
 
-        # Group scope items by category and create Epics
+        # Group scope items by category — skip excluded categories (test,
+        # integration, documentation) whose items are folded into coding
+        # Stories as acceptance criteria instead of becoming tickets.
         category_items = {
             'firmware': feature_scope.get('firmware_items', []),
             'driver': feature_scope.get('driver_items', []),
             'tool': feature_scope.get('tool_items', []),
-            'test': feature_scope.get('test_items', []),
-            'integration': feature_scope.get('integration_items', []),
-            'documentation': feature_scope.get('documentation_items', []),
         }
 
         for category, items in category_items.items():
@@ -351,7 +359,12 @@ class FeaturePlanBuilderAgent(BaseAgent):
         confidence = item.get('confidence', 'medium')
         complexity = item.get('complexity', 'M')
         dependencies = item.get('dependencies', [])
-        acceptance_criteria = item.get('acceptance_criteria', [])
+        acceptance_criteria = list(item.get('acceptance_criteria', []))
+
+        # Append mandatory acceptance criteria (unit tests + code review)
+        for mandatory_ac in MANDATORY_ACCEPTANCE_CRITERIA:
+            if mandatory_ac not in acceptance_criteria:
+                acceptance_criteria.append(mandatory_ac)
 
         # Build the full Story description in Markdown
         desc_lines = ['## Overview', '']
@@ -567,9 +580,10 @@ class FeaturePlanBuilderAgent(BaseAgent):
             '## Scoped Work Items\n',
         ]
 
-        # Summarize scope items by category
-        for category in ('firmware', 'driver', 'tool', 'test',
-                         'integration', 'documentation'):
+        # Summarize scope items by category — only include categories that
+        # produce tickets (firmware, driver, tool).  Test, integration, and
+        # documentation items are excluded per policy.
+        for category in ('firmware', 'driver', 'tool'):
             items = feature_scope.get(f'{category}_items', [])
             if items:
                 label = CATEGORY_EPIC_MAP.get(category, category.title())
@@ -582,6 +596,19 @@ class FeaturePlanBuilderAgent(BaseAgent):
                         f'- [{complexity}] {title} (Confidence: {confidence})'
                     )
                 lines.append('')
+
+        # Note excluded items so the LLM knows they exist but should not
+        # become tickets
+        excluded_count = 0
+        for cat in EXCLUDED_CATEGORIES:
+            excluded_count += len(feature_scope.get(f'{cat}_items', []))
+        if excluded_count:
+            lines.append(
+                f'*Note: {excluded_count} test/integration/documentation items '
+                f'were excluded — unit tests and docs are acceptance criteria '
+                f'on coding Stories; integration/validation testing is owned '
+                f'by another group.*\n'
+            )
 
         # Open questions
         questions = feature_scope.get('open_questions', [])
@@ -599,12 +626,15 @@ class FeaturePlanBuilderAgent(BaseAgent):
             'Please build a Jira project plan from these scoped items:\n\n'
             '1. **Look up components** — Use `get_components` to find the '
             f'project\'s component list for `{project_key}`.\n'
-            '2. **Create Epics** — One per functional area (Firmware, Driver, '
-            'Tools, Testing, Documentation).\n'
+            '2. **Create feature-based Epics** — Group by deliverable/feature '
+            '(derived from the dependency Gantt chart), NOT by work-type.\n'
             '3. **Create Stories** — One per scope item, with full descriptions '
-            'and acceptance criteria.\n'
-            '4. **Assign components** — Match scope categories to Jira components.\n'
-            '5. **Generate the plan** — Produce the dry-run output in the format '
+            'and acceptance criteria.  Every Story must include "Unit tests pass" '
+            'and "Code reviewed and merged" as acceptance criteria.\n'
+            '4. **Do NOT create test or documentation tickets** — Those are '
+            'acceptance criteria on coding Stories, not separate tickets.\n'
+            '5. **Assign components** — Match scope categories to Jira components.\n'
+            '6. **Generate the plan** — Produce the dry-run output in the format '
             'specified in your system instructions.\n\n'
             'This is a DRY RUN — do NOT create any tickets. Just produce the plan.'
         )
