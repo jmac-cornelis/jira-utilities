@@ -12,8 +12,6 @@
 import logging
 import os
 import sys
-import threading
-import time as _time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -258,39 +256,15 @@ class BaseAgent(ABC):
             )
             
             try:
-                # Call LLM with tools — run in a background thread so we
-                # can emit periodic "Still waiting..." heartbeat messages.
-                llm_result: Dict[str, Any] = {}
-
-                def _llm_worker():
-                    try:
-                        llm_result['response'] = self.llm.chat(
-                            messages=messages,
-                            temperature=self.config.temperature,
-                            max_tokens=self.config.max_tokens,
-                            tools=self.get_tool_schemas() if self.tools else None,
-                        )
-                    except Exception as exc:
-                        llm_result['error'] = exc
-
-                worker = threading.Thread(target=_llm_worker, daemon=True)
-                start_time = _time.monotonic()
-                worker.start()
-
-                heartbeat_interval = 10
-                while worker.is_alive():
-                    worker.join(timeout=heartbeat_interval)
-                    if worker.is_alive():
-                        elapsed = int(_time.monotonic() - start_time)
-                        log.info(f'Still waiting on LLM return... {elapsed} seconds total')
-
-                elapsed_total = _time.monotonic() - start_time
-                log.info(f'LLM returned in {elapsed_total:.1f}s')
-
-                if 'error' in llm_result:
-                    raise llm_result['error']
-
-                response = llm_result['response']
+                # Call LLM with tools.  Heartbeat "Still waiting on LLM
+                # return..." messages are emitted by CornelisLLM.chat()
+                # itself, so no wrapper thread is needed here.
+                response = self.llm.chat(
+                    messages=messages,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                    tools=self.get_tool_schemas() if self.tools else None,
+                )
                 
                 # Check if LLM wants to call tools
                 # Note: This depends on the LLM response format
