@@ -21,8 +21,6 @@ import logging
 import re
 import sys
 import os
-import threading
-import time as _time
 from datetime import date
 
 from dotenv import load_dotenv
@@ -931,40 +929,14 @@ def _invoke_llm(prompt_text, attachments=None, timeout=None, model=None):
         output(f'Using model: {client.model}')
         messages = [Message.user(prompt_text)]
 
-    # ---- call LLM with waiting-status heartbeat -----------------------------
-    # Run the actual API call in a background thread so we can print
-    # periodic "Still waiting..." messages every 10 seconds.
-    llm_result = {}  # shared dict: {'response': ..., 'error': ...}
-
-    def _llm_worker():
-        try:
-            if image_data_uris:
-                llm_result['response'] = client.chat_with_vision(messages, image_data_uris)
-            else:
-                llm_result['response'] = client.chat(messages)
-        except Exception as exc:
-            llm_result['error'] = exc
-
-    worker = threading.Thread(target=_llm_worker, daemon=True)
-    start_time = _time.monotonic()
-    worker.start()
-
-    # Heartbeat loop — print status every 10 seconds while waiting
-    heartbeat_interval = 10
-    while worker.is_alive():
-        worker.join(timeout=heartbeat_interval)
-        if worker.is_alive():
-            elapsed = int(_time.monotonic() - start_time)
-            log.info(f'Still waiting on LLM return... {elapsed} seconds total')
-
-    elapsed_total = _time.monotonic() - start_time
-
-    # Re-raise any exception from the worker thread
-    if 'error' in llm_result:
-        raise llm_result['error']
-
-    response = llm_result['response']
-    log.info(f'LLM returned in {elapsed_total:.1f}s')
+    # ---- call LLM -----------------------------------------------------------
+    # Heartbeat "Still waiting on LLM return..." messages are now emitted
+    # inside CornelisLLM.chat() / chat_with_vision() themselves, so no
+    # wrapper thread is needed here.
+    if image_data_uris:
+        response = client.chat_with_vision(messages, image_data_uris)
+    else:
+        response = client.chat(messages)
 
     # ---- display response ---------------------------------------------------
     output('')
