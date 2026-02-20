@@ -4,7 +4,7 @@ Take this json input file that describes a list of bug tickets and do the follow
 
 1. Remove the created, reporter, resolve, affects version, and comments fields
 2. Create a CSV from the json data. Give the CSV file a name of your choosing in your response as follows: ```[name] [file contents]```
-3. Add fields to the left of the current beginning: Customer, Product, Module, Todays Status, Dependency
+3. Add fields to the left of the current beginning: Customer, Product, Module, Todays Status, Phase, Dependency
 4. Truncate the updated date to just the day
 
 
@@ -16,6 +16,9 @@ Look at Components, make an assessment from your knowledge of the Cornelis CN600
 
 ** Fill in Todays Status**
 Look at the updated cell, and if it was updated today, summarize the latest from the comments fields for today. Make the summary 5 words or less.
+
+** Fill in Phase **
+Look at the labels. Fill in the Phase cell with the label that starts with "sw_". There should be only one. Ignore all other labels. 
 
 Sort the output CSV rows as follows:
 - Priority (descending)
