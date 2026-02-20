@@ -1516,6 +1516,20 @@ def _workflow_feature_plan(args):
                         f.write(markdown)
                     output(f'Markdown saved to: {md_path}')
 
+                # Export plan to CSV (indented format, same basename as JSON)
+                try:
+                    from tools.plan_export_tools import plan_to_csv as _plan_to_csv
+                    csv_basename = os.path.splitext(json_path)[0]
+                    csv_result = _plan_to_csv(json_path, output_path=csv_basename)
+                    if hasattr(csv_result, 'data') and csv_result.data:
+                        csv_path = csv_result.data.get('output_path', '')
+                        if csv_path:
+                            output(f'CSV saved to: {csv_path}')
+                    elif hasattr(csv_result, 'error') and csv_result.error:
+                        log.warning(f'CSV export warning: {csv_result.error}')
+                except Exception as csv_err:
+                    log.warning(f'CSV export failed (plan JSON still saved): {csv_err}')
+
             # Report blocking status
             if response.metadata.get('blocked'):
                 questions = response.metadata.get('blocking_questions', [])
