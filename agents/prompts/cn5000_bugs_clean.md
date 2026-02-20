@@ -26,20 +26,50 @@ Sort the output CSV rows as follows:
 
 ## CRITICAL CSV FORMATTING RULES
 
-You MUST follow RFC 4180 CSV formatting. Every cell that contains a comma, double-quote, or newline MUST be wrapped in double-quotes. Examples:
+You MUST follow RFC 4180 CSV formatting. ANY cell that contains a comma, double-quote, or newline MUST be enclosed in double-quotes. This is the #1 source of errors.
 
+### Fields that ALMOST ALWAYS need quoting:
+- **summary**: Nearly every summary contains commas, colons, or special characters. When in doubt, ALWAYS quote the summary field.
+- **fix_version**: When there are multiple versions separated by commas (e.g., `"12.1.1.x, 12.1.0.2.x"`), you MUST quote.
+- **Todays Status**: If it contains commas, quote it.
+
+### Quoting examples:
 - fix_version with multiple versions: `"12.2.0.x, 12.1.1.x, 12.1.0.2.x"`
 - summary with commas: `"hfi1_0: CPORT 0,1 - link down after reboot"`
-- cell with a quote: `"He said ""hello"""`
+- summary with version numbers and commas: `"12.1.0.1.4 - HPL hits OPX_TID_CACHE Assert with use_bulksvc:N"`
+- summary with colons and hyphens (safe but quote anyway): `"[IOCB] Continued issues with PCIe enumeration and HFI initialization"`
+- cell with a double-quote: `"He said ""hello"""`
 
-Do NOT leave commas bare inside a cell — this breaks the column count. The header row defines the exact number of columns; every data row must have the same number of commas as the header.
+Do NOT leave commas bare inside a cell — this breaks the column count.
 
-## COLUMN COUNT VALIDATION
+## COLUMN COUNT VALIDATION — MANDATORY
 
 The header row has exactly 15 columns:
+```
 Customer,Product,Module,Todays Status,Phase,Dependency,key,project,issue_type,status,priority,summary,assignee,updated,fix_version
+```
 
-Every single data row MUST have exactly 14 commas (matching the header). Before outputting each row, count the commas. If a row has fewer or more than 14 commas, you have a formatting error — fix it before outputting. Common mistakes:
-- Forgetting to emit an empty cell (two consecutive commas) when a field is blank
-- Failing to quote a summary or fix_version that contains commas
-- Omitting the Dependency column
+**Every single data row MUST have exactly 14 commas** (matching the header's 14 delimiter commas). Commas inside double-quoted strings do NOT count as delimiters.
+
+### Self-check procedure (do this for EVERY row before outputting):
+1. Write the row
+2. Count the delimiter commas (commas NOT inside double-quotes)
+3. If the count is not exactly 14, you have an error — find and fix it
+4. The most common error is an UNQUOTED summary or fix_version that contains commas
+
+### Common mistakes that cause column misalignment:
+- **Forgetting to quote summary**: If the summary has ANY comma, it MUST be in double-quotes. Example: `12.1.0.0.80 - opafm killed for out of memory` is safe, but `12.1.0.0.72, 78, 12.1.0.1.4 - hfi1_0: CPORT request wait interrupt` MUST be quoted.
+- **Forgetting to quote fix_version**: `"12.1.1.x, 12.1.0.x, 12.0.2.x"` — multiple versions always need quotes.
+- **Forgetting to emit empty cells**: When a field is blank, you still need the comma delimiter. Two consecutive commas `,,` represent an empty cell. Do NOT skip it.
+- **Omitting the Dependency column**: Even if Dependency is always blank, you must emit the comma for it.
+
+### Example of a correct row:
+```
+TACC,NIC,FW,,sw_critical_debugging,,STL-76494,STL,Bug,In Progress,P0-Stopper,[TACC] Hung nodes under 12.1.0.1.x,"Davis, Paul",2026-02-20,12.1.0.2.x
+```
+Note: `"Davis, Paul"` is quoted because the assignee name contains a comma. The empty Todays Status and Dependency fields produce `,,`.
+
+### Example of a row with a complex summary and multi-value fix_version:
+```
+internal,NIC,OPX,,sw_debugging,,STL-76313,STL,Bug,In Progress,P0-Stopper,"12.1.0.0.72, 78, 12.1.0.1.4 - hfi1_0: CPORT request wait interrupt","Luick, Dean",2026-02-20,"12.1.1.x, 12.1.0.2.x"
+```
