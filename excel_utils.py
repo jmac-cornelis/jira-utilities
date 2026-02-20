@@ -687,6 +687,148 @@ def convert_to_csv(input_file, output_file=None):
     output('')
 
 
+def _create_dashboard_sheet(wb, ws_data, headers):
+    '''
+    Create a "Dashboard" sheet with summary pivot tables that count occurrences
+    of key categorical columns from the data sheet.
+
+    Generates one summary table per category (Phase, Customer, Product, Module,
+    Priority). Each table has two columns: the category value and its count.
+    Tables are laid out side-by-side horizontally with a gap column between them.
+
+    Input:
+        wb: openpyxl Workbook to add the Dashboard sheet to.
+        ws_data: The data worksheet to read values from.
+        headers: List of column header names from the data sheet.
+
+    Output:
+        None; adds a "Dashboard" sheet to the workbook.
+
+    Side Effects:
+        Creates and populates a new worksheet named "Dashboard" in the workbook.
+    '''
+    log.debug('Entering _create_dashboard_sheet()')
+
+    # Categories to summarize — each entry is (display_title, header_name_to_match)
+    # header_name_to_match is matched case-insensitively against the CSV headers.
+    categories = [
+        ('Phase', 'phase'),
+        ('Customer', 'customer'),
+        ('Product', 'product'),
+        ('Module', 'module'),
+        ('Priority', 'priority'),
+    ]
+
+    # Build a case-insensitive header lookup: lowered_name -> (col_index_1based, original_name)
+    header_lookup = {}
+    for idx, h in enumerate(headers, 1):
+        header_lookup[h.strip().lower()] = (idx, h)
+
+    # Collect counts for each category
+    category_data = []  # list of (title, sorted_list_of_(value, count))
+    for title, match_key in categories:
+        entry = header_lookup.get(match_key)
+        if entry is None:
+            log.debug(f'Dashboard: column "{match_key}" not found in headers — skipping "{title}"')
+            continue
+
+        col_idx, _ = entry
+        counts = {}
+        # Read data rows (row 2 onwards)
+        for row_idx in range(2, ws_data.max_row + 1):
+            val = ws_data.cell(row=row_idx, column=col_idx).value
+            val_str = str(val).strip() if val else '(blank)'
+            if not val_str:
+                val_str = '(blank)'
+            counts[val_str] = counts.get(val_str, 0) + 1
+
+        # Sort by count descending, then alphabetically
+        sorted_counts = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+        category_data.append((title, sorted_counts))
+        log.debug(f'Dashboard: "{title}" has {len(sorted_counts)} distinct values')
+
+    if not category_data:
+        log.debug('Dashboard: no category data found — skipping dashboard sheet')
+        return
+
+    # Create the Dashboard sheet
+    ws_dash = wb.create_sheet(title='Dashboard')
+
+    # Styling
+    title_font = Font(bold=True, size=12, color='1F4E79')
+    header_font = Font(bold=True, color='FFFFFF')
+    header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+    header_alignment = Alignment(horizontal='center', vertical='center')
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin'),
+    )
+    total_font = Font(bold=True)
+    total_fill = PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid')
+
+    # Layout: tables side-by-side starting at row 2, with a gap column between them.
+    # Row 1 is reserved for a dashboard title.
+    ws_dash.cell(row=1, column=1, value='Bug Report Dashboard').font = Font(bold=True, size=14, color='1F4E79')
+
+    current_col = 1  # Starting column for the first table
+
+    for title, sorted_counts in category_data:
+        start_col = current_col
+
+        # Table title row (row 2)
+        cell = ws_dash.cell(row=2, column=start_col, value=title)
+        cell.font = title_font
+
+        # Table header row (row 3)
+        hdr_val = ws_dash.cell(row=3, column=start_col, value=title)
+        hdr_val.font = header_font
+        hdr_val.fill = header_fill
+        hdr_val.alignment = header_alignment
+        hdr_val.border = thin_border
+
+        hdr_count = ws_dash.cell(row=3, column=start_col + 1, value='Count')
+        hdr_count.font = header_font
+        hdr_count.fill = header_fill
+        hdr_count.alignment = header_alignment
+        hdr_count.border = thin_border
+
+        # Data rows (row 4 onwards)
+        total = 0
+        for i, (val, count) in enumerate(sorted_counts):
+            row_num = 4 + i
+            val_cell = ws_dash.cell(row=row_num, column=start_col, value=val)
+            val_cell.border = thin_border
+            count_cell = ws_dash.cell(row=row_num, column=start_col + 1, value=count)
+            count_cell.border = thin_border
+            count_cell.alignment = Alignment(horizontal='center')
+            total += count
+
+        # Total row
+        total_row = 4 + len(sorted_counts)
+        total_label = ws_dash.cell(row=total_row, column=start_col, value='Total')
+        total_label.font = total_font
+        total_label.fill = total_fill
+        total_label.border = thin_border
+        total_value = ws_dash.cell(row=total_row, column=start_col + 1, value=total)
+        total_value.font = total_font
+        total_value.fill = total_fill
+        total_value.border = thin_border
+        total_value.alignment = Alignment(horizontal='center')
+
+        # Auto-fit the two columns for this table
+        max_val_len = max((len(str(val)) for val, _ in sorted_counts), default=len(title))
+        max_val_len = max(max_val_len, len(title))
+        ws_dash.column_dimensions[get_column_letter(start_col)].width = min(max_val_len + 4, 35)
+        ws_dash.column_dimensions[get_column_letter(start_col + 1)].width = 10
+
+        # Move to next table position (2 data columns + 1 gap column)
+        current_col = start_col + 3
+
+    log.info(f'Created Dashboard sheet with {len(category_data)} summary tables')
+
+
 def convert_from_csv(input_file, output_file=None, jira_base_url=None):
     '''
     Convert a comma-delimited CSV file to an Excel (.xlsx) file.
@@ -790,6 +932,13 @@ def convert_from_csv(input_file, output_file=None, jira_base_url=None):
         # Apply conditional formatting
         _apply_status_conditional_formatting(ws, headers)
         _apply_priority_conditional_formatting(ws, headers)
+
+    # Create a Dashboard summary sheet with pivot tables for key categories.
+    # The dashboard reads from the data sheet (ws) and adds a new "Dashboard"
+    # sheet to the workbook with counts for Phase, Customer, Product, Module,
+    # and Priority.
+    if not _no_formatting:
+        _create_dashboard_sheet(wb, ws, headers)
 
     wb.save(output_file)
     log.info(f'Converted "{input_file}" to Excel: {output_file} ({len(rows)} rows)')

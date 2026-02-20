@@ -18,7 +18,7 @@ Look at Components, make an assessment from your knowledge of the Cornelis CN600
 Look at the updated cell, and if it was updated today, summarize the latest from the comments fields for today. Make the summary 5 words or less.
 
 ** Fill in Phase **
-Look at the labels. Fill in the Phase cell with the label that starts with "sw_". There should be only one. Ignore all other labels. 
+Look at the labels field. Fill in the Phase cell with the label that starts with "sw_". There should be only one. Ignore all other labels. If there is no label starting with "sw_", leave the Phase cell blank.
 
 Sort the output CSV rows as follows:
 - Priority (descending)
@@ -33,3 +33,13 @@ You MUST follow RFC 4180 CSV formatting. Every cell that contains a comma, doubl
 - cell with a quote: `"He said ""hello"""`
 
 Do NOT leave commas bare inside a cell — this breaks the column count. The header row defines the exact number of columns; every data row must have the same number of commas as the header.
+
+## COLUMN COUNT VALIDATION
+
+The header row has exactly 15 columns:
+Customer,Product,Module,Todays Status,Phase,Dependency,key,project,issue_type,status,priority,summary,assignee,updated,fix_version
+
+Every single data row MUST have exactly 14 commas (matching the header). Before outputting each row, count the commas. If a row has fewer or more than 14 commas, you have a formatting error — fix it before outputting. Common mistakes:
+- Forgetting to emit an empty cell (two consecutive commas) when a field is blank
+- Failing to quote a summary or fix_version that contains commas
+- Omitting the Dependency column
