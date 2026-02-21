@@ -169,7 +169,9 @@ class CornelisLLM(BaseLLM):
                 worker.join(timeout=heartbeat)
                 if worker.is_alive():
                     elapsed = int(_time.monotonic() - start)
-                    log.info(f'Still waiting on LLM return... {elapsed} seconds total')
+                    msg = f'  ⏳ Waiting for LLM... {elapsed}s'
+                    log.info(msg)
+                    print(msg, flush=True)
 
             elapsed_total = _time.monotonic() - start
             log.info(f'LLM returned in {elapsed_total:.1f}s')
@@ -286,7 +288,9 @@ class CornelisLLM(BaseLLM):
                 worker.join(timeout=heartbeat)
                 if worker.is_alive():
                     elapsed = int(_time.monotonic() - start)
-                    log.info(f'Still waiting on LLM return... {elapsed} seconds total')
+                    msg = f'  ⏳ Waiting for LLM... {elapsed}s'
+                    log.info(msg)
+                    print(msg, flush=True)
 
             elapsed_total = _time.monotonic() - start
             log.info(f'LLM returned in {elapsed_total:.1f}s')

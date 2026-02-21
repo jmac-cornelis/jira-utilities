@@ -12,6 +12,8 @@
 import logging
 import os
 import sys
+import threading
+import time as _time
 from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
@@ -146,8 +148,38 @@ class LiteLLMClient(BaseLLM):
             params.update(kwargs)
             
             log.debug(f'Sending request via LiteLLM: model={self.model}')
-            response = completion(**params)
-            
+
+            # Run the blocking API call in a background thread so we can
+            # emit periodic heartbeat messages on the main thread.
+            result_box: Dict[str, Any] = {}
+
+            def _worker():
+                try:
+                    result_box['response'] = completion(**params)
+                except Exception as exc:
+                    result_box['error'] = exc
+
+            worker = threading.Thread(target=_worker, daemon=True)
+            start = _time.monotonic()
+            worker.start()
+
+            heartbeat = 10
+            while worker.is_alive():
+                worker.join(timeout=heartbeat)
+                if worker.is_alive():
+                    elapsed = int(_time.monotonic() - start)
+                    msg = f'  ⏳ Waiting for LLM... {elapsed}s'
+                    log.info(msg)
+                    print(msg, flush=True)
+
+            elapsed_total = _time.monotonic() - start
+            log.info(f'LLM returned in {elapsed_total:.1f}s')
+
+            if 'error' in result_box:
+                raise result_box['error']
+
+            response = result_box['response']
+
             # Extract response data
             choice = response.choices[0]
             content = choice.message.content or ''
@@ -242,8 +274,37 @@ class LiteLLMClient(BaseLLM):
             params.update(kwargs)
             
             log.debug(f'Sending vision request via LiteLLM: model={self.model}')
-            response = completion(**params)
-            
+
+            # Heartbeat wrapper — same pattern as chat()
+            result_box: Dict[str, Any] = {}
+
+            def _worker():
+                try:
+                    result_box['response'] = completion(**params)
+                except Exception as exc:
+                    result_box['error'] = exc
+
+            worker = threading.Thread(target=_worker, daemon=True)
+            start = _time.monotonic()
+            worker.start()
+
+            heartbeat = 10
+            while worker.is_alive():
+                worker.join(timeout=heartbeat)
+                if worker.is_alive():
+                    elapsed = int(_time.monotonic() - start)
+                    msg = f'  ⏳ Waiting for LLM... {elapsed}s'
+                    log.info(msg)
+                    print(msg, flush=True)
+
+            elapsed_total = _time.monotonic() - start
+            log.info(f'LLM returned in {elapsed_total:.1f}s')
+
+            if 'error' in result_box:
+                raise result_box['error']
+
+            response = result_box['response']
+
             choice = response.choices[0]
             content = choice.message.content or ''
             
