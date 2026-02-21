@@ -1442,7 +1442,18 @@ def _workflow_feature_plan(args):
     log.debug('Entering _workflow_feature_plan()')
 
     project_key = args.project
-    feature_request = args.feature
+    # --feature-prompt FILE takes precedence over --feature "string"
+    feature_prompt_file = getattr(args, 'feature_prompt', None)
+    if feature_prompt_file:
+        log.info(f'Reading feature prompt from file: {feature_prompt_file}')
+        with open(feature_prompt_file, 'r', encoding='utf-8') as fp:
+            feature_request = fp.read().strip()
+        if not feature_request:
+            output(f'ERROR: Feature prompt file is empty: {feature_prompt_file}')
+            return 1
+        log.info(f'Feature prompt loaded: {len(feature_request)} chars from {feature_prompt_file}')
+    else:
+        feature_request = args.feature
     doc_paths = args.docs or []
     output_file = args.output or 'feature_plan.json'
     execute = getattr(args, 'execute', False)
@@ -1459,7 +1470,12 @@ def _workflow_feature_plan(args):
     output_dir = os.path.dirname(output_file)
     if not output_dir:
         # Default: plans/<project_key>-<sanitized_feature_slug>
-        slug = feature_request[:40].lower()
+        # When using --feature-prompt, derive slug from the filename stem
+        # (the full file content would be too long for a directory name).
+        if feature_prompt_file:
+            slug = os.path.splitext(os.path.basename(feature_prompt_file))[0].lower()
+        else:
+            slug = feature_request[:40].lower()
         slug = slug.replace(' ', '-').replace('/', '-')
         slug = ''.join(c for c in slug if c.isalnum() or c == '-')
         slug = slug.strip('-')
@@ -1467,7 +1483,10 @@ def _workflow_feature_plan(args):
 
     output(f'Feature Planning Workflow')
     output(f'  Project:  {project_key}')
-    output(f'  Feature:  {feature_request}')
+    if feature_prompt_file:
+        output(f'  Prompt:   {feature_prompt_file} ({len(feature_request)} chars)')
+    else:
+        output(f'  Feature:  {feature_request}')
     output(f'  Mode:     {mode}')
     output(f'  Output:   {output_dir}/')
     if scope_doc:
@@ -1683,6 +1702,7 @@ Examples:
   %(prog)s --resume abc123
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device support"
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --docs spec.pdf --execute
+  %(prog)s --workflow feature-plan --project STLSB --feature-prompt RedfishRDE.md
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.json
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.md --execute
   %(prog)s --env .env_sandbox --workflow feature-plan --project STLSB --feature "Redfish RDE" --scope-doc RedfishRDE.md
@@ -1747,6 +1767,12 @@ Examples:
     parser.add_argument('--feature', default=None, metavar='TEXT',
                        help='Feature description for --workflow feature-plan '
                             '(e.g. "Add PQC device support to CN5000 board")')
+    parser.add_argument('--feature-prompt', default=None, metavar='FILE',
+                       dest='feature_prompt',
+                       help='Markdown file with a rich feature prompt. '
+                            'When provided, its content is used as the feature '
+                            'request and takes precedence over --feature. '
+                            'Used by --workflow feature-plan.')
     parser.add_argument('--scope-doc', default=None, metavar='FILE',
                        dest='scope_doc',
                        help='Pre-existing scope document (JSON, Markdown, PDF, DOCX). '
@@ -1879,8 +1905,13 @@ Examples:
         elif args.workflow_name == 'feature-plan':
             if not args.project:
                 parser.error('--workflow feature-plan requires --project PROJECT_KEY')
-            if not args.feature:
-                parser.error('--workflow feature-plan requires --feature "DESCRIPTION"')
+            # Require at least one of --feature or --feature-prompt
+            if not args.feature and not args.feature_prompt:
+                parser.error('--workflow feature-plan requires --feature "DESCRIPTION" '
+                             'or --feature-prompt FILE')
+            # Validate that the prompt file exists when specified
+            if args.feature_prompt and not os.path.isfile(args.feature_prompt):
+                parser.error(f'--feature-prompt file not found: {args.feature_prompt}')
     
     # ---- Map ticket_keys for build-excel-map compatibility ---------------------
     # cmd_build_excel_map expects args.ticket_keys
@@ -1946,8 +1977,11 @@ Examples:
         log.info(f'+  Workflow: {args.workflow_name}')
         if args.workflow_name == 'feature-plan':
             log.info(f'+  Project: {args.project}')
-            feature_display = args.feature if len(args.feature) <= 60 else args.feature[:57] + '...'
-            log.info(f'+  Feature: {feature_display}')
+            if args.feature_prompt:
+                log.info(f'+  Feature prompt: {args.feature_prompt}')
+            if args.feature:
+                feature_display = args.feature if len(args.feature) <= 60 else args.feature[:57] + '...'
+                log.info(f'+  Feature: {feature_display}')
             if args.docs:
                 log.info(f'+  Docs: {len(args.docs)} file(s)')
                 for dp in args.docs:
