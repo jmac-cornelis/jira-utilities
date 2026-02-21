@@ -46,38 +46,59 @@ Tag every finding with one of:
 
 ## Output Format
 
-Structure your research report as follows:
+Write your research narrative in clear Markdown. After the narrative, you **MUST** include a fenced JSON block containing the structured findings. This JSON block is machine-parsed — it must be valid JSON.
 
+Your narrative can be as detailed as you like, but the JSON block is **mandatory**.
+
+````markdown
+## My Research Narrative
+
+(your detailed Markdown analysis here...)
+
+```json
+{
+  "domain_overview": "2-3 paragraph summary of the technology domain...",
+  "standards_and_specs": [
+    {
+      "content": "Description of the finding",
+      "source": "web|mcp|knowledge_base|user_doc",
+      "source_url": "https://... or file path",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "existing_implementations": [
+    {
+      "content": "Description of the implementation or reference",
+      "source": "web|mcp|knowledge_base",
+      "source_url": "https://...",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "internal_knowledge": [
+    {
+      "content": "Description of internal finding",
+      "source": "knowledge_base|mcp",
+      "source_url": "file path or MCP reference",
+      "confidence": "high|medium|low"
+    }
+  ],
+  "open_questions": [
+    "Question that could not be answered",
+    "Question that needs human input"
+  ]
+}
 ```
-RESEARCH REPORT: [Feature Name]
-================================
+````
 
-DOMAIN OVERVIEW:
-[2-3 paragraph summary of the technology domain]
+### JSON Field Rules
 
-STANDARDS & SPECIFICATIONS:
-- [Finding] (Source: [url/doc], Confidence: HIGH/MEDIUM/LOW)
-- [Finding] (Source: [url/doc], Confidence: HIGH/MEDIUM/LOW)
-
-EXISTING IMPLEMENTATIONS:
-- [Finding] (Source: [url/doc], Confidence: HIGH/MEDIUM/LOW)
-
-INTERNAL KNOWLEDGE:
-- [Finding] (Source: [file/system], Confidence: HIGH/MEDIUM/LOW)
-
-KEY TECHNICAL DETAILS:
-- [Detail relevant to SW/FW implementation]
-- [Detail relevant to SW/FW implementation]
-
-OPEN QUESTIONS:
-- [Question that could not be answered]
-- [Question that needs human input]
-
-CONFIDENCE SUMMARY:
-- High confidence findings: N
-- Medium confidence findings: N
-- Low confidence findings: N
-```
+- **domain_overview**: A rich 2-3 paragraph summary. Include technology context, relevance to Cornelis products, and key takeaways.
+- **standards_and_specs**: Official specifications, standards documents, datasheets. These are the authoritative sources.
+- **existing_implementations**: Reference implementations, open-source projects, vendor SDKs, application notes.
+- **internal_knowledge**: Findings from the Cornelis knowledge base, MCP server, or user-provided documents.
+- **open_questions**: Unanswered questions that need human input or further research.
+- **confidence**: Must be exactly `"high"`, `"medium"`, or `"low"` (lowercase).
+- **source**: Must be one of `"web"`, `"mcp"`, `"knowledge_base"`, `"user_doc"`, `"unknown"`.
 
 ## Tools Available
 

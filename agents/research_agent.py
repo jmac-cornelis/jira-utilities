@@ -486,15 +486,61 @@ class ResearchAgent(BaseAgent):
     @staticmethod
     def _parse_report(llm_output: str) -> ResearchReport:
         '''
-        Parse the LLM's free-text research report into a ResearchReport.
+        Parse the LLM's research report into a ResearchReport.
 
-        This is a best-effort parser that extracts structured data from
-        the LLM's Markdown-formatted output.
+        Strategy: try JSON extraction first (reliable), then fall back to
+        the legacy Markdown regex parser (best-effort).
         '''
         report = ResearchReport()
 
         if not llm_output:
             return report
+
+        # ------------------------------------------------------------------
+        # Strategy 1: Extract a ```json block (preferred — prompt requires it)
+        # ------------------------------------------------------------------
+        from agents.base import BaseAgent
+        json_data = BaseAgent._extract_json_block(llm_output)
+
+        if json_data and isinstance(json_data, dict):
+            log.info('ResearchAgent: parsed report from JSON block')
+
+            report.domain_overview = (json_data.get('domain_overview', '') or '')[:3000]
+
+            # Helper to build ResearchFinding from a JSON dict
+            def _finding(d: dict, default_category: str) -> ResearchFinding:
+                return ResearchFinding(
+                    content=d.get('content', ''),
+                    source=d.get('source', 'unknown'),
+                    source_url=d.get('source_url', ''),
+                    confidence=(d.get('confidence', 'medium') or 'medium').lower(),
+                    relevance='direct' if default_category == 'spec' else 'supporting',
+                    category=default_category,
+                )
+
+            for item in json_data.get('standards_and_specs', []):
+                if isinstance(item, dict):
+                    report.standards_and_specs.append(_finding(item, 'spec'))
+
+            for item in json_data.get('existing_implementations', []):
+                if isinstance(item, dict):
+                    report.existing_implementations.append(_finding(item, 'general'))
+
+            for item in json_data.get('internal_knowledge', []):
+                if isinstance(item, dict):
+                    report.internal_knowledge.append(_finding(item, 'internal'))
+
+            for q in json_data.get('open_questions', []):
+                if isinstance(q, str) and q.strip():
+                    report.open_questions.append(q.strip())
+
+            report.recompute_confidence_summary()
+            return report
+
+        # ------------------------------------------------------------------
+        # Strategy 2: Legacy Markdown regex parser (fallback)
+        # ------------------------------------------------------------------
+        log.info('ResearchAgent: no JSON block found — falling back to Markdown parser')
 
         # Extract domain overview (text before the first section heading)
         sections = re.split(r'\n(?=#{1,3}\s|[A-Z][A-Z\s&]+:)', llm_output)

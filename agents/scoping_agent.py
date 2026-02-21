@@ -512,15 +512,80 @@ class ScopingAgent(BaseAgent):
     @staticmethod
     def _parse_scope(llm_output: str, feature_request: str) -> FeatureScope:
         '''
-        Parse the LLM's free-text scoping output into a FeatureScope.
+        Parse the LLM's scoping output into a FeatureScope.
 
-        Best-effort parser that extracts structured data from the
-        Markdown-formatted output.
+        Strategy: try JSON extraction first (reliable), then fall back to
+        the legacy Markdown regex parser (best-effort).
         '''
         scope = FeatureScope(feature_name=feature_request[:100])
 
         if not llm_output:
             return scope
+
+        # ------------------------------------------------------------------
+        # Strategy 1: Extract a ```json block (preferred — prompt requires it)
+        # ------------------------------------------------------------------
+        from agents.base import BaseAgent
+        json_data = BaseAgent._extract_json_block(llm_output)
+
+        if json_data and isinstance(json_data, dict):
+            log.info('ScopingAgent: parsed scope from JSON block')
+
+            scope.summary = (json_data.get('summary', '') or '')[:500]
+
+            for assumption in json_data.get('assumptions', []):
+                if isinstance(assumption, str) and assumption.strip():
+                    scope.assumptions.append(assumption.strip())
+
+            # Map JSON keys to FeatureScope list attributes + category names
+            item_key_map = {
+                'firmware_items': ('firmware_items', 'firmware'),
+                'driver_items': ('driver_items', 'driver'),
+                'tool_items': ('tool_items', 'tool'),
+                'test_items': ('test_items', 'test'),
+                'integration_items': ('integration_items', 'integration'),
+                'documentation_items': ('documentation_items', 'documentation'),
+            }
+
+            for json_key, (attr_name, category) in item_key_map.items():
+                for item_dict in json_data.get(json_key, []):
+                    if not isinstance(item_dict, dict):
+                        continue
+                    item = ScopeItem(
+                        title=item_dict.get('title', ''),
+                        description=item_dict.get('description', ''),
+                        category=category,
+                        complexity=item_dict.get('complexity', 'M').upper(),
+                        confidence=(item_dict.get('confidence', 'medium') or 'medium').lower(),
+                        dependencies=item_dict.get('dependencies', []),
+                        rationale=item_dict.get('rationale', ''),
+                        acceptance_criteria=item_dict.get('acceptance_criteria', []),
+                    )
+                    target_list = getattr(scope, attr_name, None)
+                    if target_list is not None:
+                        target_list.append(item)
+
+            for q_dict in json_data.get('open_questions', []):
+                if isinstance(q_dict, dict):
+                    scope.open_questions.append(Question(
+                        question=q_dict.get('question', ''),
+                        context=q_dict.get('context', ''),
+                        blocking=bool(q_dict.get('blocking', False)),
+                    ))
+                elif isinstance(q_dict, str) and q_dict.strip():
+                    scope.open_questions.append(Question(
+                        question=q_dict.strip(),
+                        context='',
+                        blocking=False,
+                    ))
+
+            scope.recompute_confidence_report()
+            return scope
+
+        # ------------------------------------------------------------------
+        # Strategy 2: Legacy Markdown regex parser (fallback)
+        # ------------------------------------------------------------------
+        log.info('ScopingAgent: no JSON block found — falling back to Markdown parser')
 
         # --- Extract summary -----------------------------------------------
         summary_match = re.search(

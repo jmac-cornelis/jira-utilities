@@ -9,8 +9,10 @@
 #
 ##########################################################################################
 
+import json
 import logging
 import os
+import re
 import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -339,6 +341,49 @@ class BaseAgent(ABC):
             iterations=max_iter
         )
     
+    # ------------------------------------------------------------------
+    # JSON extraction helper — shared by all agent parsers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_json_block(text: str) -> Optional[Dict]:
+        '''
+        Extract the first ```json ... ``` fenced block from LLM output.
+
+        Returns the parsed dict/list, or None if no valid JSON block is found.
+        This is the primary parsing strategy for the hybrid two-pass approach:
+        prompts instruct the LLM to emit a ```json block, and this helper
+        reliably extracts it.  If the LLM omits the block or produces
+        malformed JSON, callers fall back to the legacy Markdown regex parser.
+        '''
+        if not text:
+            return None
+
+        # Match ```json ... ``` (case-insensitive language tag)
+        match = re.search(r'```(?:json|JSON)\s*\n(.*?)\n```', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError as exc:
+                log.warning(f'Found ```json block but JSON parse failed: {exc}')
+
+        # Fallback: try to find a bare top-level JSON object in the text
+        # (some LLMs omit the fences but still produce valid JSON)
+        for start_char, end_char in [('{', '}'), ('[', ']')]:
+            start_idx = text.find(start_char)
+            if start_idx == -1:
+                continue
+            # Walk backwards from the end to find the matching close
+            end_idx = text.rfind(end_char)
+            if end_idx > start_idx:
+                candidate = text[start_idx:end_idx + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass  # not valid JSON — skip
+
+        return None
+
     def load_prompt(self, prompt_name: str) -> str:
         '''
         Load a prompt from the config/prompts directory.

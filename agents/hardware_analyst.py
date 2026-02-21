@@ -461,14 +461,84 @@ class HardwareAnalystAgent(BaseAgent):
     @staticmethod
     def _parse_profile(llm_output: str) -> HardwareProfile:
         '''
-        Parse the LLM's free-text hardware analysis into a HardwareProfile.
+        Parse the LLM's hardware analysis into a HardwareProfile.
 
-        Best-effort parser that extracts structured data from Markdown output.
+        Strategy: try JSON extraction first (reliable), then fall back to
+        the legacy Markdown regex parser (best-effort).
         '''
         profile = HardwareProfile()
 
         if not llm_output:
             return profile
+
+        # ------------------------------------------------------------------
+        # Strategy 1: Extract a ```json block (preferred — prompt requires it)
+        # ------------------------------------------------------------------
+        from agents.base import BaseAgent
+        json_data = BaseAgent._extract_json_block(llm_output)
+
+        if json_data and isinstance(json_data, dict):
+            log.info('HardwareAnalystAgent: parsed profile from JSON block')
+
+            profile.product_name = json_data.get('product_name', '') or ''
+            profile.description = json_data.get('description', '') or ''
+
+            for comp in json_data.get('components', []):
+                if isinstance(comp, dict):
+                    profile.components.append({
+                        'name': comp.get('name', ''),
+                        'description': comp.get('description', ''),
+                        'type': comp.get('type', 'hardware'),
+                    })
+
+            for bus in json_data.get('bus_interfaces', []):
+                if isinstance(bus, dict):
+                    profile.bus_interfaces.append({
+                        'name': bus.get('name', ''),
+                        'protocol': bus.get('protocol', ''),
+                        'description': bus.get('description', ''),
+                        'source': 'llm_analysis',
+                    })
+
+            for fw in json_data.get('existing_firmware', []):
+                if isinstance(fw, dict):
+                    profile.existing_firmware.append({
+                        'name': fw.get('name', ''),
+                        'description': fw.get('description', ''),
+                        'source': 'llm_analysis',
+                    })
+
+            for drv in json_data.get('existing_drivers', []):
+                if isinstance(drv, dict):
+                    profile.existing_drivers.append({
+                        'name': drv.get('name', ''),
+                        'description': drv.get('description', ''),
+                        'source': 'llm_analysis',
+                    })
+
+            for tool in json_data.get('existing_tools', []):
+                if isinstance(tool, dict):
+                    profile.existing_tools.append({
+                        'name': tool.get('name', ''),
+                        'description': tool.get('description', ''),
+                        'source': 'llm_analysis',
+                    })
+
+            for gap in json_data.get('gaps', []):
+                if isinstance(gap, str) and gap.strip():
+                    profile.gaps.append(gap.strip())
+
+            # integration_points → store as gaps/notes (no dedicated field)
+            for pt in json_data.get('integration_points', []):
+                if isinstance(pt, str) and pt.strip():
+                    profile.gaps.append(f'Integration: {pt.strip()}')
+
+            return profile
+
+        # ------------------------------------------------------------------
+        # Strategy 2: Legacy Markdown regex parser (fallback)
+        # ------------------------------------------------------------------
+        log.info('HardwareAnalystAgent: no JSON block found — falling back to Markdown parser')
 
         current_section = ''
 
@@ -545,8 +615,9 @@ class HardwareAnalystAgent(BaseAgent):
                     profile.gaps.append(content)
 
         # If we got a block diagram section, try to extract it
+        # (skip ```json blocks — those are for structured data, not diagrams)
         diagram_match = re.search(
-            r'```(?:mermaid)?\s*\n(.*?)\n```',
+            r'```(?:mermaid)\s*\n(.*?)\n```',
             llm_output,
             re.DOTALL,
         )
