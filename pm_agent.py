@@ -1453,10 +1453,23 @@ def _workflow_feature_plan(args):
     #   default      → 'full' (run all phases)
     mode = 'scope-to-plan' if scope_doc else 'full'
 
+    # Build an output directory from the output_file path.
+    # e.g. "plans/STLSB-redfish-rde/plan.json" → output_dir = "plans/STLSB-redfish-rde"
+    # If output_file has no directory component, use "plans/<project_key>"
+    output_dir = os.path.dirname(output_file)
+    if not output_dir:
+        # Default: plans/<project_key>-<sanitized_feature_slug>
+        slug = feature_request[:40].lower()
+        slug = slug.replace(' ', '-').replace('/', '-')
+        slug = ''.join(c for c in slug if c.isalnum() or c == '-')
+        slug = slug.strip('-')
+        output_dir = os.path.join('plans', f'{project_key}-{slug}')
+
     output(f'Feature Planning Workflow')
     output(f'  Project:  {project_key}')
     output(f'  Feature:  {feature_request}')
     output(f'  Mode:     {mode}')
+    output(f'  Output:   {output_dir}/')
     if scope_doc:
         output(f'  Scope:    {scope_doc}')
     if doc_paths:
@@ -1469,7 +1482,7 @@ def _workflow_feature_plan(args):
     try:
         from agents.feature_planning_orchestrator import FeaturePlanningOrchestrator
 
-        orchestrator = FeaturePlanningOrchestrator()
+        orchestrator = FeaturePlanningOrchestrator(output_dir=output_dir)
 
         response = orchestrator.run({
             'feature_request': feature_request,
@@ -1478,26 +1491,47 @@ def _workflow_feature_plan(args):
             'mode': mode,
             'execute': execute,
             'scope_doc': scope_doc,
+            'output_dir': output_dir,
         })
 
         if response.success:
             output(response.content)
 
-            # Save the plan to JSON
+            # Save the plan to JSON inside the output directory
             jira_plan = response.metadata.get('state', {}).get('jira_plan')
             # Track all output files for the summary table
             all_created_files: list = []
 
+            # Include intermediate files created by the orchestrator
+            # (research.json, hw_profile.json, scope.json, debug/*.md)
+            intermediate_files = getattr(orchestrator, '_created_files', [])
+            for ifile in intermediate_files:
+                if os.path.exists(ifile):
+                    basename = os.path.basename(ifile)
+                    if 'debug' in ifile:
+                        all_created_files.append((ifile, f'Debug: {basename}'))
+                    else:
+                        desc_map = {
+                            'research.json': 'Research findings',
+                            'hw_profile.json': 'Hardware profile',
+                            'scope.json': 'Feature scope',
+                        }
+                        all_created_files.append(
+                            (ifile, desc_map.get(basename, f'Intermediate: {basename}'))
+                        )
+
             if jira_plan:
                 import json
-                json_path = output_file
+                # Place plan files in the output directory
+                os.makedirs(output_dir, exist_ok=True)
+                json_path = os.path.join(output_dir, 'plan.json')
                 with open(json_path, 'w', encoding='utf-8') as f:
                     json.dump(jira_plan, f, indent=2)
                 output(f'\nPlan saved to: {json_path}')
                 all_created_files.append((json_path, 'Feature plan JSON'))
 
                 # Also save Markdown summary
-                md_path = os.path.splitext(json_path)[0] + '.md'
+                md_path = os.path.join(output_dir, 'plan.md')
                 markdown = jira_plan.get('summary_markdown', '')
                 if markdown:
                     with open(md_path, 'w', encoding='utf-8') as f:
@@ -1505,11 +1539,11 @@ def _workflow_feature_plan(args):
                     output(f'Markdown saved to: {md_path}')
                     all_created_files.append((md_path, 'Markdown summary'))
 
-                # Export plan to CSV (indented format, same basename as JSON)
+                # Export plan to CSV (indented format)
                 csv_path = ''
                 try:
                     from tools.plan_export_tools import plan_to_csv as _plan_to_csv
-                    csv_basename = os.path.splitext(json_path)[0]
+                    csv_basename = os.path.join(output_dir, 'plan')
                     csv_result = _plan_to_csv(json_path, output_path=csv_basename)
                     if hasattr(csv_result, 'data') and csv_result.data:
                         csv_path = csv_result.data.get('output_path', '')

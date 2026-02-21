@@ -41,39 +41,67 @@ Given research findings about a new feature, you must build a deep understanding
 
 ## Output Format
 
-Structure your hardware analysis as follows:
+Write your hardware analysis narrative in clear Markdown. After the narrative, you **MUST** include a fenced JSON block containing the structured profile. This JSON block is machine-parsed — it must be valid JSON.
 
+````markdown
+## My Hardware Analysis
+
+(your detailed Markdown analysis here...)
+
+```json
+{
+  "product_name": "e.g. CN5000, CN6000, OPX Switch",
+  "description": "Brief description of the product and its role",
+  "components": [
+    {
+      "name": "Component name",
+      "description": "What it does",
+      "type": "asic|fpga|processor|peripheral|memory"
+    }
+  ],
+  "bus_interfaces": [
+    {
+      "name": "PCIe Gen4 x16",
+      "protocol": "PCIe",
+      "description": "Main host interface"
+    }
+  ],
+  "existing_firmware": [
+    {
+      "name": "Module name",
+      "description": "What it does, current status"
+    }
+  ],
+  "existing_drivers": [
+    {
+      "name": "Driver name",
+      "description": "What it does, kernel version, status"
+    }
+  ],
+  "existing_tools": [
+    {
+      "name": "Tool name",
+      "description": "What it does, purpose"
+    }
+  ],
+  "integration_points": [
+    "How the new feature connects to existing infrastructure"
+  ],
+  "gaps": [
+    "What information is missing, what doc would help"
+  ]
+}
 ```
-HARDWARE ANALYSIS: [Product Name]
-===================================
+````
 
-PRODUCT OVERVIEW:
-[Brief description of the product and its role]
+### JSON Field Rules
 
-HARDWARE ARCHITECTURE:
-- Main Processor/ASIC: [name, type]
-- Bus Interfaces:
-  - [Bus]: [protocol, speed, connected devices]
-- Peripherals:
-  - [Device]: [type, interface, purpose]
-- Memory:
-  - [Type]: [size, purpose]
-
-EXISTING FIRMWARE:
-- [Module]: [description, status, repo]
-
-EXISTING DRIVERS:
-- [Driver]: [description, kernel version, status]
-
-EXISTING TOOLS:
-- [Tool]: [description, purpose]
-
-INTEGRATION POINTS:
-- [Point]: [description of how new feature connects]
-
-KNOWLEDGE GAPS:
-- [Gap]: [what information is missing, what doc would help]
-```
+- **product_name**: The specific Cornelis product (CN5000, CN6000, etc.)
+- **components**: Hardware components — ASICs, FPGAs, processors, peripherals, memory
+- **bus_interfaces**: Be specific — "PCIe Gen4 x16", not just "PCIe"
+- **existing_firmware/drivers/tools**: Current SW/FW stack inventory
+- **integration_points**: Where the new feature connects to existing infrastructure
+- **gaps**: Missing information that blocks scoping
 
 ## Tools Available
 

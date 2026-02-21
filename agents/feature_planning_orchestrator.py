@@ -48,9 +48,13 @@ class FeaturePlanningOrchestrator(BaseAgent):
     Jira project plan from a high-level feature request.
     '''
 
-    def __init__(self, **kwargs):
+    def __init__(self, output_dir: str = '', **kwargs):
         '''
         Initialize the Feature Planning Orchestrator.
+
+        Input:
+            output_dir: Optional directory for intermediate/debug files.
+                        If empty, intermediate files are not saved.
         '''
         instruction = self._load_prompt_file() or ORCHESTRATOR_INSTRUCTION
 
@@ -72,6 +76,11 @@ class FeaturePlanningOrchestrator(BaseAgent):
 
         # Workflow state
         self.state = FeaturePlanningState()
+
+        # Output directory for intermediate files (research.json, etc.)
+        # and debug output (raw LLM responses).
+        self._output_dir = output_dir
+        self._created_files: List[str] = []
 
     # ------------------------------------------------------------------
     # Lazy sub-agent initialization
@@ -131,6 +140,206 @@ class FeaturePlanningOrchestrator(BaseAgent):
         return None
 
     # ------------------------------------------------------------------
+    # Intermediate / debug file helpers
+    # ------------------------------------------------------------------
+
+    def _save_intermediate(self, filename: str, data: Any) -> Optional[str]:
+        '''
+        Save an intermediate data structure (dict/list) to the output directory.
+
+        Returns the file path if saved, or None if no output_dir is configured.
+        '''
+        if not self._output_dir:
+            return None
+
+        os.makedirs(self._output_dir, exist_ok=True)
+        filepath = os.path.join(self._output_dir, filename)
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, default=str)
+            log.info(f'Saved intermediate file: {filepath}')
+            self._created_files.append(filepath)
+            return filepath
+        except Exception as e:
+            log.warning(f'Failed to save intermediate file {filepath}: {e}')
+            return None
+
+    def _save_debug_output(self, filename: str, text: str) -> Optional[str]:
+        '''
+        Save raw LLM output to the debug/ subdirectory for troubleshooting.
+
+        Returns the file path if saved, or None.
+        '''
+        if not self._output_dir:
+            return None
+
+        debug_dir = os.path.join(self._output_dir, 'debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        filepath = os.path.join(debug_dir, filename)
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(text or '')
+            log.info(f'Saved debug output: {filepath}')
+            self._created_files.append(filepath)
+            return filepath
+        except Exception as e:
+            log.warning(f'Failed to save debug output {filepath}: {e}')
+            return None
+
+    # ------------------------------------------------------------------
+    # Merge helpers — combine deterministic baseline + LLM enrichment
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_research(baseline: Dict[str, Any], llm_report: Dict[str, Any]) -> Dict[str, Any]:
+        '''
+        Merge a deterministic research baseline with LLM-enriched findings.
+
+        LLM output wins where it has content; baseline fills gaps.
+        Deduplicates findings by content substring matching.
+        '''
+        if not llm_report:
+            return baseline
+        if not baseline:
+            return llm_report
+
+        merged = dict(baseline)
+
+        # Domain overview: prefer LLM if it's longer/richer
+        llm_overview = llm_report.get('domain_overview', '')
+        if len(llm_overview) > len(merged.get('domain_overview', '')):
+            merged['domain_overview'] = llm_overview
+
+        # Merge finding lists — add LLM findings that aren't duplicates
+        for key in ('standards_and_specs', 'existing_implementations', 'internal_knowledge'):
+            baseline_items = merged.get(key, [])
+            llm_items = llm_report.get(key, [])
+
+            # Build a set of baseline content snippets for dedup
+            seen = set()
+            for item in baseline_items:
+                content = (item.get('content', '') or '')[:80].lower()
+                if content:
+                    seen.add(content)
+
+            for item in llm_items:
+                content = (item.get('content', '') or '')[:80].lower()
+                if content and content not in seen:
+                    baseline_items.append(item)
+                    seen.add(content)
+
+            merged[key] = baseline_items
+
+        # Merge open questions
+        baseline_qs = set(q.lower() for q in merged.get('open_questions', []))
+        for q in llm_report.get('open_questions', []):
+            if q.lower() not in baseline_qs:
+                merged.setdefault('open_questions', []).append(q)
+
+        return merged
+
+    @staticmethod
+    def _merge_hw_profile(baseline: Dict[str, Any], llm_profile: Dict[str, Any]) -> Dict[str, Any]:
+        '''
+        Merge a deterministic HW profile baseline with LLM-enriched profile.
+        '''
+        if not llm_profile:
+            return baseline
+        if not baseline:
+            return llm_profile
+
+        merged = dict(baseline)
+
+        # Scalar fields: prefer LLM if non-empty
+        for key in ('product_name', 'description'):
+            llm_val = llm_profile.get(key, '')
+            if llm_val and len(llm_val) > len(merged.get(key, '')):
+                merged[key] = llm_val
+
+        # List fields: merge with dedup by name
+        for key in ('components', 'bus_interfaces', 'existing_firmware',
+                     'existing_drivers', 'existing_tools'):
+            baseline_items = merged.get(key, [])
+            seen_names = set(
+                (item.get('name', '') or '').lower() for item in baseline_items
+            )
+            for item in llm_profile.get(key, []):
+                name = (item.get('name', '') or '').lower()
+                if name and name not in seen_names:
+                    baseline_items.append(item)
+                    seen_names.add(name)
+            merged[key] = baseline_items
+
+        # Gaps: merge with dedup
+        baseline_gaps = set(g.lower() for g in merged.get('gaps', []))
+        for gap in llm_profile.get('gaps', []):
+            if gap.lower() not in baseline_gaps:
+                merged.setdefault('gaps', []).append(gap)
+
+        return merged
+
+    @staticmethod
+    def _merge_scope(baseline: Dict[str, Any], llm_scope: Dict[str, Any]) -> Dict[str, Any]:
+        '''
+        Merge a deterministic scope baseline with LLM-enriched scope.
+
+        LLM scope items are preferred because they have richer descriptions,
+        rationale, and acceptance criteria.  Baseline items fill gaps.
+        '''
+        if not llm_scope:
+            return baseline
+        if not baseline:
+            return llm_scope
+
+        merged = dict(llm_scope)  # LLM wins as the primary source
+
+        # Summary: prefer LLM
+        if not merged.get('summary') and baseline.get('summary'):
+            merged['summary'] = baseline['summary']
+
+        # Assumptions: merge
+        baseline_assumptions = set(
+            a.lower() for a in baseline.get('assumptions', [])
+        )
+        for a in merged.get('assumptions', []):
+            baseline_assumptions.discard(a.lower())
+        # Add remaining baseline assumptions
+        for a in baseline.get('assumptions', []):
+            if a.lower() in baseline_assumptions:
+                merged.setdefault('assumptions', []).append(a)
+                baseline_assumptions.discard(a.lower())
+
+        # Item lists: add baseline items whose titles don't appear in LLM scope
+        for key in ('firmware_items', 'driver_items', 'tool_items',
+                     'test_items', 'integration_items', 'documentation_items'):
+            llm_items = merged.get(key, [])
+            llm_titles = set(
+                (item.get('title', '') or '').lower() for item in llm_items
+            )
+            for item in baseline.get(key, []):
+                title = (item.get('title', '') or '').lower()
+                if title and title not in llm_titles:
+                    llm_items.append(item)
+                    llm_titles.add(title)
+            merged[key] = llm_items
+
+        # Open questions: merge
+        llm_qs = set()
+        for q in merged.get('open_questions', []):
+            if isinstance(q, dict):
+                llm_qs.add((q.get('question', '') or '').lower())
+            elif isinstance(q, str):
+                llm_qs.add(q.lower())
+        for q in baseline.get('open_questions', []):
+            q_text = q.get('question', '').lower() if isinstance(q, dict) else str(q).lower()
+            if q_text and q_text not in llm_qs:
+                merged.setdefault('open_questions', []).append(q)
+
+        return merged
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
@@ -164,6 +373,11 @@ class FeaturePlanningOrchestrator(BaseAgent):
         mode = input_data.get('mode', 'full')
         execute = input_data.get('execute', False)
         scope_doc = input_data.get('scope_doc', '')
+
+        # Allow callers to set the output directory at run-time
+        output_dir = input_data.get('output_dir', '')
+        if output_dir:
+            self._output_dir = output_dir
 
         if not feature_request:
             return AgentResponse.error_response('No feature_request provided')
@@ -738,126 +952,237 @@ class FeaturePlanningOrchestrator(BaseAgent):
     # ------------------------------------------------------------------
 
     def _phase_research(self) -> str:
-        '''Phase 1: Research the feature domain.'''
+        '''
+        Phase 1: Research the feature domain.
+
+        Hybrid two-pass approach:
+          Pass 1 — deterministic tool calls (guaranteed baseline)
+          Pass 2 — LLM with tools (enrichment via JSON output)
+          Merge  — LLM wins where it has content, baseline fills gaps
+        '''
         self.state.current_phase = 'research'
         start = time.time()
 
         try:
-            response = self.research_agent.run({
+            # Pass 1: Deterministic baseline (guaranteed non-empty)
+            log.info('Phase 1 — Pass 1: deterministic research')
+            baseline_report = self.research_agent.research(
+                self.state.feature_request,
+                self.state.doc_paths or None,
+            )
+            baseline_dict = baseline_report.to_dict()
+            baseline_count = len(baseline_report.all_findings)
+            log.info(f'Phase 1 — Pass 1 complete: {baseline_count} findings')
+
+            # Pass 2: LLM enrichment (may produce richer content)
+            log.info('Phase 1 — Pass 2: LLM enrichment')
+            llm_response = self.research_agent.run({
                 'feature_request': self.state.feature_request,
                 'doc_paths': self.state.doc_paths,
             })
 
-            if response.success:
-                self.state.research_report = response.metadata.get(
-                    'research_report', {}
+            llm_report = {}
+            if llm_response.success:
+                llm_report = llm_response.metadata.get('research_report', {})
+                # Save raw LLM output for debugging
+                self._save_debug_output(
+                    'phase1_research_llm.md', llm_response.content
                 )
-                self.state.mark_phase_complete('research')
 
-                duration = time.time() - start
-                report = self.state.research_report or {}
-                conf = report.get('confidence_summary', {})
+            llm_count = (
+                len(llm_report.get('standards_and_specs', []))
+                + len(llm_report.get('existing_implementations', []))
+                + len(llm_report.get('internal_knowledge', []))
+            )
+            log.info(f'Phase 1 — Pass 2 complete: {llm_count} LLM findings')
 
-                return (
-                    f'PHASE 1: Research — COMPLETE ({duration:.1f}s)\n'
-                    f'  Domain overview: {len(report.get("domain_overview", ""))} chars\n'
-                    f'  Standards/specs: {len(report.get("standards_and_specs", []))}\n'
-                    f'  Implementations: {len(report.get("existing_implementations", []))}\n'
-                    f'  Internal knowledge: {len(report.get("internal_knowledge", []))}\n'
-                    f'  Confidence: {conf.get("high", 0)} high, '
-                    f'{conf.get("medium", 0)} medium, '
-                    f'{conf.get("low", 0)} low\n'
-                    f'  Open questions: {len(report.get("open_questions", []))}'
-                )
-            else:
-                error = response.error or 'Unknown error'
-                self.state.errors.append(f'Research failed: {error}')
-                return f'PHASE 1: Research — FAILED\n  Error: {error}'
+            # Merge: LLM wins where it has content, baseline fills gaps
+            merged = self._merge_research(baseline_dict, llm_report)
+            self.state.research_report = merged
+            self.state.mark_phase_complete('research')
+
+            # Save intermediate file
+            self._save_intermediate('research.json', merged)
+
+            duration = time.time() - start
+            report = merged
+            conf = report.get('confidence_summary', {})
+
+            specs = len(report.get('standards_and_specs', []))
+            impls = len(report.get('existing_implementations', []))
+            internal = len(report.get('internal_knowledge', []))
+
+            return (
+                f'PHASE 1: Research — COMPLETE ({duration:.1f}s)\n'
+                f'  Domain overview: {len(report.get("domain_overview", ""))} chars\n'
+                f'  Standards/specs: {specs}\n'
+                f'  Implementations: {impls}\n'
+                f'  Internal knowledge: {internal}\n'
+                f'  Total findings: {specs + impls + internal} '
+                f'(baseline={baseline_count}, LLM={llm_count})\n'
+                f'  Confidence: {conf.get("high", 0)} high, '
+                f'{conf.get("medium", 0)} medium, '
+                f'{conf.get("low", 0)} low\n'
+                f'  Open questions: {len(report.get("open_questions", []))}'
+            )
 
         except Exception as e:
             self.state.errors.append(f'Research exception: {e}')
+            log.error(f'Phase 1 research error: {e}', exc_info=True)
             return f'PHASE 1: Research — ERROR\n  {e}'
 
     def _phase_hw_analysis(self) -> str:
-        '''Phase 2: Analyze the hardware product.'''
+        '''
+        Phase 2: Analyze the hardware product.
+
+        Hybrid two-pass approach:
+          Pass 1 — deterministic tool calls (guaranteed baseline)
+          Pass 2 — LLM with tools (enrichment via JSON output)
+          Merge  — LLM wins where it has content, baseline fills gaps
+        '''
         self.state.current_phase = 'hw_analysis'
         start = time.time()
 
         try:
-            response = self.hw_analyst.run({
+            # Pass 1: Deterministic baseline
+            log.info('Phase 2 — Pass 1: deterministic HW analysis')
+            baseline_profile = self.hw_analyst.analyze(
+                self.state.feature_request,
+                self.state.project_key,
+                self.state.research_report or None,
+            )
+            baseline_dict = baseline_profile.to_dict()
+            baseline_count = (
+                len(baseline_profile.components)
+                + len(baseline_profile.existing_firmware)
+            )
+            log.info(f'Phase 2 — Pass 1 complete: {baseline_count} items')
+
+            # Pass 2: LLM enrichment
+            log.info('Phase 2 — Pass 2: LLM enrichment')
+            llm_response = self.hw_analyst.run({
                 'feature_request': self.state.feature_request,
                 'project_key': self.state.project_key,
                 'research_report': self.state.research_report or {},
             })
 
-            if response.success:
-                self.state.hw_profile = response.metadata.get('hw_profile', {})
-                self.state.mark_phase_complete('hw_analysis')
-
-                duration = time.time() - start
-                profile = self.state.hw_profile or {}
-
-                return (
-                    f'PHASE 2: Hardware Analysis — COMPLETE ({duration:.1f}s)\n'
-                    f'  Product: {profile.get("product_name", "Unknown")}\n'
-                    f'  Components: {len(profile.get("components", []))}\n'
-                    f'  Bus interfaces: {len(profile.get("bus_interfaces", []))}\n'
-                    f'  Existing firmware: {len(profile.get("existing_firmware", []))}\n'
-                    f'  Existing drivers: {len(profile.get("existing_drivers", []))}\n'
-                    f'  Existing tools: {len(profile.get("existing_tools", []))}\n'
-                    f'  Knowledge gaps: {len(profile.get("gaps", []))}'
+            llm_profile = {}
+            if llm_response.success:
+                llm_profile = llm_response.metadata.get('hw_profile', {})
+                self._save_debug_output(
+                    'phase2_hw_analysis_llm.md', llm_response.content
                 )
-            else:
-                error = response.error or 'Unknown error'
-                self.state.errors.append(f'HW analysis failed: {error}')
-                return f'PHASE 2: Hardware Analysis — FAILED\n  Error: {error}'
+
+            llm_count = (
+                len(llm_profile.get('components', []))
+                + len(llm_profile.get('existing_firmware', []))
+            )
+            log.info(f'Phase 2 — Pass 2 complete: {llm_count} LLM items')
+
+            # Merge
+            merged = self._merge_hw_profile(baseline_dict, llm_profile)
+            self.state.hw_profile = merged
+            self.state.mark_phase_complete('hw_analysis')
+
+            # Save intermediate file
+            self._save_intermediate('hw_profile.json', merged)
+
+            duration = time.time() - start
+            profile = merged
+
+            return (
+                f'PHASE 2: Hardware Analysis — COMPLETE ({duration:.1f}s)\n'
+                f'  Product: {profile.get("product_name", "Unknown")}\n'
+                f'  Components: {len(profile.get("components", []))}\n'
+                f'  Bus interfaces: {len(profile.get("bus_interfaces", []))}\n'
+                f'  Existing firmware: {len(profile.get("existing_firmware", []))}\n'
+                f'  Existing drivers: {len(profile.get("existing_drivers", []))}\n'
+                f'  Existing tools: {len(profile.get("existing_tools", []))}\n'
+                f'  Knowledge gaps: {len(profile.get("gaps", []))}\n'
+                f'  Sources: baseline={baseline_count}, LLM={llm_count}'
+            )
 
         except Exception as e:
             self.state.errors.append(f'HW analysis exception: {e}')
+            log.error(f'Phase 2 HW analysis error: {e}', exc_info=True)
             return f'PHASE 2: Hardware Analysis — ERROR\n  {e}'
 
     def _phase_scoping(self) -> str:
-        '''Phase 3: Scope the SW/FW work.'''
+        '''
+        Phase 3: Scope the SW/FW work.
+
+        Hybrid two-pass approach:
+          Pass 1 — deterministic scoping (guaranteed baseline)
+          Pass 2 — LLM with tools (enrichment via JSON output)
+          Merge  — LLM scope items preferred (richer), baseline fills gaps
+        '''
         self.state.current_phase = 'scoping'
         start = time.time()
 
         try:
-            response = self.scoping_agent.run({
+            # Pass 1: Deterministic baseline
+            log.info('Phase 3 — Pass 1: deterministic scoping')
+            baseline_scope = self.scoping_agent.scope(
+                self.state.feature_request,
+                self.state.research_report or None,
+                self.state.hw_profile or None,
+            )
+            baseline_dict = baseline_scope.to_dict()
+            baseline_count = len(baseline_scope.all_items)
+            log.info(f'Phase 3 — Pass 1 complete: {baseline_count} items')
+
+            # Pass 2: LLM enrichment
+            log.info('Phase 3 — Pass 2: LLM enrichment')
+            llm_response = self.scoping_agent.run({
                 'feature_request': self.state.feature_request,
                 'research_report': self.state.research_report or {},
                 'hw_profile': self.state.hw_profile or {},
             })
 
-            if response.success:
-                self.state.feature_scope = response.metadata.get(
-                    'feature_scope', {}
+            llm_scope = {}
+            if llm_response.success:
+                llm_scope = llm_response.metadata.get('feature_scope', {})
+                self._save_debug_output(
+                    'phase3_scoping_llm.md', llm_response.content
                 )
-                self.state.mark_phase_complete('scoping')
 
-                # Accumulate questions
-                scope = self.state.feature_scope or {}
-                for q in scope.get('open_questions', []):
-                    self.state.questions_for_user.append(q)
+            llm_count = sum(
+                len(llm_scope.get(k, []))
+                for k in ('firmware_items', 'driver_items', 'tool_items',
+                          'test_items', 'integration_items', 'documentation_items')
+            )
+            log.info(f'Phase 3 — Pass 2 complete: {llm_count} LLM items')
 
-                duration = time.time() - start
-                conf = scope.get('confidence_report', {})
+            # Merge: LLM scope items preferred (richer), baseline fills gaps
+            merged = self._merge_scope(baseline_dict, llm_scope)
+            self.state.feature_scope = merged
+            self.state.mark_phase_complete('scoping')
 
-                return (
-                    f'PHASE 3: SW/FW Scoping — COMPLETE ({duration:.1f}s)\n'
-                    f'  Total items: {conf.get("total_items", 0)}\n'
-                    f'  By category: {conf.get("by_category", {})}\n'
-                    f'  By confidence: {conf.get("by_confidence", {})}\n'
-                    f'  By complexity: {conf.get("by_complexity", {})}\n'
-                    f'  Open questions: {conf.get("total_questions", 0)} '
-                    f'({conf.get("blocking_questions", 0)} blocking)'
-                )
-            else:
-                error = response.error or 'Unknown error'
-                self.state.errors.append(f'Scoping failed: {error}')
-                return f'PHASE 3: SW/FW Scoping — FAILED\n  Error: {error}'
+            # Accumulate questions
+            scope = merged
+            for q in scope.get('open_questions', []):
+                self.state.questions_for_user.append(q)
+
+            # Save intermediate file
+            self._save_intermediate('scope.json', merged)
+
+            duration = time.time() - start
+            conf = scope.get('confidence_report', {})
+
+            return (
+                f'PHASE 3: SW/FW Scoping — COMPLETE ({duration:.1f}s)\n'
+                f'  Total items: {conf.get("total_items", 0)}\n'
+                f'  By category: {conf.get("by_category", {})}\n'
+                f'  By confidence: {conf.get("by_confidence", {})}\n'
+                f'  By complexity: {conf.get("by_complexity", {})}\n'
+                f'  Open questions: {conf.get("total_questions", 0)} '
+                f'({conf.get("blocking_questions", 0)} blocking)\n'
+                f'  Sources: baseline={baseline_count}, LLM={llm_count}'
+            )
 
         except Exception as e:
             self.state.errors.append(f'Scoping exception: {e}')
+            log.error(f'Phase 3 scoping error: {e}', exc_info=True)
             return f'PHASE 3: SW/FW Scoping — ERROR\n  {e}'
 
     def _phase_plan_generation(self) -> str:

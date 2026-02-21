@@ -83,53 +83,68 @@ For each work item, list dependencies as:
 
 ## Output Format
 
+Write your scoping analysis narrative in clear Markdown. After the narrative, you **MUST** include a fenced JSON block containing the structured scope. This JSON block is machine-parsed — it must be valid JSON.
+
+````markdown
+## My Scoping Analysis
+
+(your detailed Markdown analysis here...)
+
+```json
+{
+  "summary": "2-3 sentence executive summary of the scoped work",
+  "assumptions": [
+    "Assumption 1",
+    "Assumption 2"
+  ],
+  "firmware_items": [
+    {
+      "title": "Descriptive title of the work item",
+      "description": "What needs to be done",
+      "complexity": "S|M|L|XL",
+      "confidence": "high|medium|low",
+      "rationale": "Why this is needed",
+      "dependencies": ["Title of blocking item"],
+      "acceptance_criteria": [
+        "Criterion 1",
+        "Criterion 2"
+      ]
+    }
+  ],
+  "driver_items": [
+    {
+      "title": "...",
+      "description": "...",
+      "complexity": "S|M|L|XL",
+      "confidence": "high|medium|low",
+      "rationale": "...",
+      "dependencies": [],
+      "acceptance_criteria": ["..."]
+    }
+  ],
+  "tool_items": [],
+  "open_questions": [
+    {
+      "question": "The question text",
+      "context": "Why we need to know this",
+      "blocking": true
+    }
+  ]
+}
 ```
-FEATURE SCOPE: [Feature Name]
-==============================
+````
 
-SUMMARY:
-[2-3 sentence executive summary of the scoped work]
+### JSON Field Rules
 
-ASSUMPTIONS:
-- [Assumption 1]
-- [Assumption 2]
-
-FIRMWARE ITEMS:
-  [S/M/L/XL] [Title] (Confidence: HIGH/MEDIUM/LOW)
-    Description: [what needs to be done]
-    Rationale: [why this is needed]
-    Dependencies: [BLOCKED_BY or RELATED_TO items]
-    Acceptance Criteria:
-    - [criterion 1]
-    - [criterion 2]
-
-DRIVER ITEMS:
-  [S/M/L/XL] [Title] (Confidence: HIGH/MEDIUM/LOW)
-    ...
-
-TOOL ITEMS:
-  ...
-
-TEST ITEMS:
-  ...
-
-INTEGRATION ITEMS:
-  ...
-
-DOCUMENTATION ITEMS:
-  ...
-
-OPEN QUESTIONS:
-  [BLOCKING] [Question] — Context: [why we need to know]
-  [NON-BLOCKING] [Question] — Context: [why we need to know]
-
-CONFIDENCE REPORT:
-- Total items: N
-- High confidence: N
-- Medium confidence: N
-- Low confidence: N
-- Blocking questions: N
-```
+- **summary**: Executive summary — what is being scoped and the overall approach.
+- **firmware_items**: All firmware work items (init, register access, state machines, DMA, interrupts, etc.)
+- **driver_items**: All kernel driver work items (probe, sysfs, DMA, interrupts, etc.)
+- **tool_items**: CLI tools and diagnostic utilities only.
+- **complexity**: Must be exactly `"S"`, `"M"`, `"L"`, or `"XL"` (uppercase).
+- **confidence**: Must be exactly `"high"`, `"medium"`, or `"low"` (lowercase).
+- **dependencies**: List of titles of other items that must be completed first.
+- **acceptance_criteria**: Concrete, testable criteria for "done".
+- **open_questions.blocking**: `true` if this question blocks work from starting, `false` otherwise.
 
 ## Critical Rules
 
