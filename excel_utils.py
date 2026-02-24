@@ -623,6 +623,220 @@ def concat_add_sheet(input_files, output_file):
 
 
 # ****************************************************************************************
+# CSV validation and repair
+# ****************************************************************************************
+
+def _validate_and_repair_csv(input_file):
+    '''
+    Validate a CSV file for column-count consistency and attempt to repair
+    misaligned rows in-place.
+
+    LLM-generated CSV files frequently contain rows where a field (typically
+    summary, assignee, or fix_version) has an unquoted comma, producing one
+    or more extra delimiter fields.  This shifts every subsequent column to
+    the right and breaks the Excel output.
+
+    The repair strategy for rows with TOO MANY fields:
+      1. Identify "anchor" columns whose values are highly recognisable
+         (e.g. Jira keys like STL-NNNNN, issue types like "Bug", status
+         values like "In Progress", priority values like "P0-Stopper").
+      2. Walk the row fields and find the best alignment of anchors to
+         headers.  Where extra fields appear between two anchors, merge
+         them back into a single quoted value (they were one cell that
+         got split by a bare comma).
+      3. If heuristic alignment fails, fall back to merging the LAST
+         extra fields (rightmost), which is usually the summary or
+         fix_version — the most common offenders.
+
+    For rows with TOO FEW fields: pad with empty strings on the right.
+
+    Input:
+        input_file: Path to the .csv file (modified in-place when repairs
+                    are needed).
+
+    Output:
+        Tuple of (repaired: bool, stats: dict).
+        stats keys: total_rows, ok_rows, repaired_rows, padded_rows,
+                    unfixable_rows.
+
+    Side Effects:
+        Overwrites input_file with the repaired CSV when any rows are
+        changed.  The original is logged but not preserved (the caller
+        should keep the LLM raw output in llm_output.md).
+    '''
+    log.debug(f'Entering _validate_and_repair_csv(input_file={input_file})')
+
+    # ------------------------------------------------------------------
+    # Phase 1: Read raw lines and parse with csv.reader (not DictReader)
+    #          so we get positional field lists.
+    # ------------------------------------------------------------------
+    with open(input_file, 'r', encoding='utf-8', newline='') as f:
+        raw_rows = list(csv.reader(f))
+
+    if len(raw_rows) < 2:
+        log.debug('CSV has fewer than 2 rows — nothing to validate')
+        return False, {'total_rows': max(len(raw_rows) - 1, 0),
+                       'ok_rows': max(len(raw_rows) - 1, 0),
+                       'repaired_rows': 0, 'padded_rows': 0,
+                       'unfixable_rows': 0}
+
+    header = raw_rows[0]
+    expected = len(header)
+    log.debug(f'CSV header has {expected} columns: {header}')
+
+    # ------------------------------------------------------------------
+    # Build anchor-detection helpers.
+    # For each header position, define a recogniser function that returns
+    # True when a cell value "looks right" for that column.
+    # ------------------------------------------------------------------
+    # Jira key pattern: PROJECT-DIGITS (e.g. STL-76636)
+    import re as _re
+    _jira_key_re = _re.compile(r'^[A-Z]{2,10}-\d+$')
+
+    # Known categorical values per column name (lowered).
+    _known_values = {
+        'issue_type': {'bug', 'story', 'task', 'epic', 'sub-task', 'subtask',
+                       'improvement', 'new feature', 'change request'},
+        'status':     {'open', 'in progress', 'closed', 'verify', 'ready',
+                       'to do', 'done', 'resolved', 'reopened', 'in review'},
+        'priority':   {'p0-stopper', 'p1-critical', 'p2-major', 'p3-minor',
+                       'p4-trivial', 'blocker', 'critical', 'major', 'minor',
+                       'trivial'},
+        'project':    {'stl', 'stlsb', 'cn', 'opx'},
+        'product':    {'nic', 'switch'},
+        'module':     {'driver', 'bts', 'fw', 'opx', 'gpu'},
+    }
+
+    def _score_alignment(fields, header_list):
+        '''Return a score (higher = better) for how well *fields* align to *header_list*.'''
+        score = 0
+        for i, hdr in enumerate(header_list):
+            if i >= len(fields):
+                break
+            val = (fields[i] or '').strip()
+            hdr_low = hdr.strip().lower()
+
+            # Jira key column
+            if hdr_low == 'key' and _jira_key_re.match(val):
+                score += 10
+            # Known categorical columns
+            elif hdr_low in _known_values and val.lower() in _known_values[hdr_low]:
+                score += 5
+            # Date-like column (updated)
+            elif hdr_low == 'updated' and _re.match(r'^\d{4}-\d{2}-\d{2}', val):
+                score += 5
+            # Non-empty value in a column that usually has data
+            elif val and hdr_low in ('customer', 'summary', 'assignee', 'fix_version'):
+                score += 1
+        return score
+
+    # ------------------------------------------------------------------
+    # Phase 2: Check each data row and repair if needed.
+    # ------------------------------------------------------------------
+    stats = {'total_rows': len(raw_rows) - 1, 'ok_rows': 0,
+             'repaired_rows': 0, 'padded_rows': 0, 'unfixable_rows': 0}
+    any_changed = False
+
+    for row_idx in range(1, len(raw_rows)):
+        fields = raw_rows[row_idx]
+        n = len(fields)
+
+        if n == expected:
+            stats['ok_rows'] += 1
+            continue
+
+        if n < expected:
+            # Too few fields — pad with empty strings on the right.
+            log.warning(f'CSV row {row_idx + 1}: {n} fields (expected {expected}) — '
+                        f'padding {expected - n} empty field(s)')
+            fields.extend([''] * (expected - n))
+            raw_rows[row_idx] = fields
+            stats['padded_rows'] += 1
+            any_changed = True
+            continue
+
+        # Too many fields — attempt heuristic merge.
+        extra = n - expected
+        log.warning(f'CSV row {row_idx + 1}: {n} fields (expected {expected}), '
+                    f'{extra} extra — attempting merge repair')
+
+        # Strategy: try every possible way to merge `extra` adjacent field
+        # pairs and pick the merge that produces the best anchor score.
+        # For efficiency, limit to merging at most 3 extra fields (covers
+        # the vast majority of LLM CSV errors).
+        best_score = -1
+        best_fields = None
+
+        if extra <= 4:
+            # Generate candidate merges.  Each candidate is defined by a
+            # set of merge-start indices: at each such index i, fields[i]
+            # and fields[i+1] are joined with a comma.  We need exactly
+            # `extra` merges.
+            from itertools import combinations
+            merge_candidates = list(range(n - 1))  # possible merge points
+            for merge_points in combinations(merge_candidates, extra):
+                # Build merged field list
+                candidate = []
+                skip_until = -1
+                i = 0
+                while i < n:
+                    if i in merge_points:
+                        # Merge this field with the next one(s) in a
+                        # contiguous run of merge points starting at i.
+                        merged = fields[i]
+                        while i in merge_points:
+                            i += 1
+                            if i < n:
+                                merged += ',' + fields[i]
+                        candidate.append(merged)
+                    else:
+                        candidate.append(fields[i])
+                    i += 1
+
+                if len(candidate) != expected:
+                    continue  # shouldn't happen, but guard
+
+                score = _score_alignment(candidate, header)
+                if score > best_score:
+                    best_score = score
+                    best_fields = candidate
+        else:
+            # Too many extras for combinatorial search — fall back to
+            # merging the rightmost extra fields into the last-but-one
+            # column (usually summary or fix_version).
+            # Find the last anchor column from the right to anchor the
+            # merge boundary.
+            best_fields = fields[:expected - 1]
+            # Join all remaining fields into the last column
+            best_fields.append(','.join(fields[expected - 1:]))
+
+        if best_fields and len(best_fields) == expected:
+            raw_rows[row_idx] = best_fields
+            stats['repaired_rows'] += 1
+            any_changed = True
+            log.info(f'CSV row {row_idx + 1}: repaired by merging {extra} extra field(s) '
+                     f'(alignment score={best_score})')
+        else:
+            # Could not repair — leave as-is (DictReader will handle overflow)
+            stats['unfixable_rows'] += 1
+            log.warning(f'CSV row {row_idx + 1}: could not repair {extra} extra field(s)')
+
+    # ------------------------------------------------------------------
+    # Phase 3: Write back if anything changed.
+    # ------------------------------------------------------------------
+    if any_changed:
+        log.info(f'Rewriting repaired CSV: {input_file} '
+                 f'(repaired={stats["repaired_rows"]}, padded={stats["padded_rows"]})')
+        with open(input_file, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(raw_rows)
+    else:
+        log.debug('All CSV rows have correct column count — no repairs needed')
+
+    return any_changed, stats
+
+
+# ****************************************************************************************
 # Convert functions
 # ****************************************************************************************
 
@@ -904,6 +1118,26 @@ def convert_from_csv(input_file, output_file=None, jira_base_url=None,
 
     if not os.path.exists(input_file):
         raise ExcelFileError(f'File not found: {input_file}')
+
+    # ---- Validate and repair CSV column alignment before parsing ----
+    # LLM-generated CSV files frequently have rows with unquoted commas in
+    # fields like summary, assignee, or fix_version.  This causes extra
+    # delimiters that shift columns to the right.  _validate_and_repair_csv
+    # detects and merges those split fields back together so that every row
+    # has exactly the same number of columns as the header.
+    try:
+        repaired, repair_stats = _validate_and_repair_csv(input_file)
+        if repaired:
+            log.info(f'CSV repair applied: {repair_stats}')
+            output(f'  CSV repair: fixed {repair_stats["repaired_rows"]} row(s) with '
+                   f'extra columns, padded {repair_stats["padded_rows"]} row(s) with '
+                   f'missing columns'
+                   + (f', {repair_stats["unfixable_rows"]} row(s) could not be repaired'
+                      if repair_stats['unfixable_rows'] else ''))
+    except Exception as repair_err:
+        # Repair is best-effort — log the error but continue with the
+        # original CSV so the pipeline is not blocked.
+        log.warning(f'CSV repair failed (continuing with original): {repair_err}')
 
     # Read CSV
     try:
