@@ -359,11 +359,12 @@ class FeaturePlanningOrchestrator(BaseAgent):
 
         Input:
             input_data: Dictionary containing:
-                - feature_request: str — The user's feature description (required)
+                - feature_request: str — The user's feature description (required unless execute-plan)
                 - project_key: str — Target Jira project key (required)
                 - doc_paths: List[str] — Optional paths to spec documents
-                - mode: str — 'full', 'research', 'plan', 'scope-to-plan', or 'execute'
+                - mode: str — 'full', 'research', 'plan', 'scope-to-plan', 'execute', or 'execute-plan'
                 - scope_doc: str — Path to a pre-existing scope document (used with mode='scope-to-plan')
+                - plan_file: str — Path to a plan.json file (used with mode='execute-plan')
                 - execute: bool — Whether to create tickets in Jira
 
         Output:
@@ -383,6 +384,7 @@ class FeaturePlanningOrchestrator(BaseAgent):
         mode = input_data.get('mode', 'full')
         execute = input_data.get('execute', False)
         scope_doc = input_data.get('scope_doc', '')
+        plan_file = input_data.get('plan_file', '')
 
         # Extract timeout from CLI and store for sub-agent propagation
         self._timeout = input_data.get('timeout', None)
@@ -391,6 +393,15 @@ class FeaturePlanningOrchestrator(BaseAgent):
         output_dir = input_data.get('output_dir', '')
         if output_dir:
             self._output_dir = output_dir
+
+        # execute-plan mode only requires project_key (feature_request is
+        # extracted from the plan JSON itself).
+        if mode == 'execute-plan':
+            if not project_key:
+                return AgentResponse.error_response('No project_key provided')
+            return self._run_execute_plan(
+                plan_file=plan_file, project_key=project_key, execute=execute
+            )
 
         if not feature_request:
             return AgentResponse.error_response('No feature_request provided')
@@ -468,6 +479,119 @@ class FeaturePlanningOrchestrator(BaseAgent):
                 'No Jira plan to execute. Run the full workflow first.'
             )
         return self._phase_execution()
+
+    def _run_execute_plan(
+        self, plan_file: str = '', project_key: str = '',
+        execute: bool = False,
+    ) -> AgentResponse:
+        '''
+        Load a plan.json from disk and optionally execute it (push to Jira).
+
+        When --execute is NOT set this is a dry-run: the plan is loaded,
+        validated, and a summary is printed.  When --execute IS set the
+        tickets are created in Jira via _phase_execution().
+
+        Input:
+            plan_file:   Path to a plan.json file produced by a prior run.
+            project_key: Target Jira project key (used to override the
+                         project_key inside the JSON if they differ).
+            execute:     If True, actually create tickets in Jira.
+
+        Output:
+            AgentResponse with plan summary or execution results.
+        '''
+        import json as _json
+
+        if not plan_file:
+            return AgentResponse.error_response(
+                'No --plan-file provided. Pass the path to a plan.json.'
+            )
+
+        # --- Load the plan JSON from disk ---
+        if not os.path.isfile(plan_file):
+            return AgentResponse.error_response(
+                f'Plan file not found: {plan_file}'
+            )
+
+        try:
+            with open(plan_file, 'r', encoding='utf-8') as fh:
+                plan_data = _json.load(fh)
+        except (_json.JSONDecodeError, OSError) as e:
+            return AgentResponse.error_response(
+                f'Failed to read plan file {plan_file}: {e}'
+            )
+
+        if not isinstance(plan_data, dict) or 'epics' not in plan_data:
+            return AgentResponse.error_response(
+                f'Invalid plan JSON — expected a dict with an "epics" key. '
+                f'Got top-level keys: {list(plan_data.keys()) if isinstance(plan_data, dict) else type(plan_data).__name__}'
+            )
+
+        # --- Override project_key if the CLI value differs ---
+        if project_key:
+            plan_data['project_key'] = project_key
+        elif not plan_data.get('project_key'):
+            return AgentResponse.error_response(
+                'Plan JSON has no project_key and none was provided via --project.'
+            )
+
+        # --- Populate orchestrator state so _phase_execution() works ---
+        feature_name = plan_data.get('feature_name', plan_file)
+        self.state = FeaturePlanningState(
+            feature_request=feature_name,
+            project_key=plan_data['project_key'],
+        )
+        self.state.jira_plan = plan_data
+
+        # --- Build a human-readable summary ---
+        n_epics = plan_data.get('total_epics', len(plan_data.get('epics', [])))
+        n_stories = plan_data.get('total_stories', 0)
+        n_tickets = plan_data.get('total_tickets', n_epics + n_stories)
+
+        summary_lines = [
+            f'Plan loaded from: {plan_file}',
+            f'  Project:  {plan_data["project_key"]}',
+            f'  Feature:  {feature_name}',
+            f'  Epics:    {n_epics}',
+            f'  Stories:  {n_stories}',
+            f'  Tickets:  {n_tickets}',
+        ]
+
+        # List each epic + story count
+        for epic in plan_data.get('epics', []):
+            story_count = len(epic.get('stories', []))
+            summary_lines.append(
+                f'    Epic: {epic.get("summary", "?")} ({story_count} stories)'
+            )
+
+        if not execute:
+            # Dry-run: just show the summary
+            summary_lines.append('')
+            summary_lines.append(
+                'DRY RUN — no tickets created. Re-run with --execute to push to Jira.'
+            )
+            return AgentResponse.success_response(
+                content='\n'.join(summary_lines),
+                metadata={
+                    'state': self.state.to_dict(),
+                    'jira_plan': plan_data,
+                    'dry_run': True,
+                },
+            )
+
+        # --- Execute: create tickets in Jira ---
+        log.info(f'Executing plan from {plan_file} into Jira project {plan_data["project_key"]}')
+        exec_response = self._phase_execution()
+
+        # Prepend the plan summary to the execution output
+        combined = '\n'.join(summary_lines) + '\n\n' + (exec_response.content or '')
+
+        return AgentResponse(
+            success=exec_response.success,
+            content=combined,
+            error=exec_response.error,
+            metadata=exec_response.metadata,
+        )
 
     def _run_scope_to_plan(
         self, scope_doc: str = '', execute: bool = False

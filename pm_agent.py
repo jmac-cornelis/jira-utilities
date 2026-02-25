@@ -1442,6 +1442,60 @@ def _workflow_feature_plan(args):
     log.debug('Entering _workflow_feature_plan()')
 
     project_key = args.project
+    plan_file = getattr(args, 'plan_file', None)
+    execute = getattr(args, 'execute', False)
+
+    # ------------------------------------------------------------------
+    # Fast path: --plan-file loads a previously generated plan.json and
+    # optionally pushes it into Jira (--execute).  No LLM / agentic
+    # phases are invoked.
+    # ------------------------------------------------------------------
+    if plan_file:
+        output(f'Feature Planning Workflow — Execute from Plan File')
+        output(f'  Project:   {project_key}')
+        output(f'  Plan file: {plan_file}')
+        output(f'  Execute:   {"YES — will create Jira tickets" if execute else "DRY RUN"}')
+        output('')
+
+        try:
+            from agents.feature_planning_orchestrator import FeaturePlanningOrchestrator
+
+            orchestrator = FeaturePlanningOrchestrator()
+            response = orchestrator.run({
+                'project_key': project_key,
+                'feature_request': '',          # not needed for execute-plan
+                'mode': 'execute-plan',
+                'plan_file': plan_file,
+                'execute': execute,
+                'timeout': getattr(args, 'timeout', None),
+            })
+
+            if response.success:
+                output(response.content)
+
+                # If this was a dry-run, remind the user
+                if not execute:
+                    output('')
+                    output('This was a DRY RUN. To create tickets in Jira, '
+                           're-run with --execute.')
+                return 0
+            else:
+                output(f'ERROR: {response.error}')
+                return 1
+
+        except ImportError as e:
+            output(f'ERROR: Missing dependency: {e}')
+            log.error(f'Import error: {e}', exc_info=True)
+            return 1
+        except Exception as e:
+            output(f'ERROR: Plan execution failed: {e}')
+            log.error(f'Plan execution error: {e}', exc_info=True)
+            return 1
+
+    # ------------------------------------------------------------------
+    # Standard path: agentic workflow (research → HW → scoping → plan)
+    # ------------------------------------------------------------------
+
     # --feature-prompt FILE takes precedence over --feature "string"
     feature_prompt_file = getattr(args, 'feature_prompt', None)
     if feature_prompt_file:
@@ -1455,7 +1509,6 @@ def _workflow_feature_plan(args):
     else:
         feature_request = args.feature
     doc_paths = args.docs or []
-    execute = getattr(args, 'execute', False)
     scope_doc = getattr(args, 'scope_doc', None) or ''
 
     # Determine the workflow mode:
@@ -1723,6 +1776,8 @@ Examples:
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.json
   %(prog)s --workflow feature-plan --project STL --feature "Add PQC device" --scope-doc scope.md --execute
   %(prog)s --env .env_sandbox --workflow feature-plan --project STLSB --feature "Redfish RDE" --scope-doc RedfishRDE.md
+  %(prog)s --workflow feature-plan --project STLSB --plan-file plans/STLSB-redfish/plan.json
+  %(prog)s --workflow feature-plan --project STLSB --plan-file plans/STLSB-redfish/plan.json --execute
         '''
     )
     
@@ -1798,6 +1853,13 @@ Examples:
                             'Used by --workflow feature-plan.')
     parser.add_argument('--docs', nargs='*', default=None, metavar='FILE',
                        help='Spec documents / datasheets for --workflow feature-plan')
+    parser.add_argument('--plan-file', default=None, metavar='FILE',
+                       dest='plan_file',
+                       help='Path to a previously generated plan.json. '
+                            'Loads the plan and prints a summary (dry-run). '
+                            'Combine with --execute to push tickets into Jira. '
+                            'Skips all agentic phases. '
+                            'Used by --workflow feature-plan.')
     parser.add_argument('--execute', action='store_true',
                        help='Actually create Jira tickets (default: dry-run). '
                             'Used by --workflow feature-plan.')
@@ -1928,10 +1990,15 @@ Examples:
         elif args.workflow_name == 'feature-plan':
             if not args.project:
                 parser.error('--workflow feature-plan requires --project PROJECT_KEY')
-            # Require at least one of --feature or --feature-prompt
-            if not args.feature and not args.feature_prompt:
+            # --plan-file bypasses the agentic flow; no --feature needed
+            plan_file = getattr(args, 'plan_file', None)
+            if plan_file:
+                if not os.path.isfile(plan_file):
+                    parser.error(f'--plan-file not found: {plan_file}')
+            elif not args.feature and not args.feature_prompt:
+                # Require at least one of --feature or --feature-prompt
                 parser.error('--workflow feature-plan requires --feature "DESCRIPTION" '
-                             'or --feature-prompt FILE')
+                             'or --feature-prompt FILE (or --plan-file FILE)')
             # Validate that the prompt file exists when specified
             if args.feature_prompt and not os.path.isfile(args.feature_prompt):
                 parser.error(f'--feature-prompt file not found: {args.feature_prompt}')
@@ -2000,6 +2067,9 @@ Examples:
         log.info(f'+  Workflow: {args.workflow_name}')
         if args.workflow_name == 'feature-plan':
             log.info(f'+  Project: {args.project}')
+            plan_file_arg = getattr(args, 'plan_file', None)
+            if plan_file_arg:
+                log.info(f'+  Plan file: {plan_file_arg}')
             if args.feature_prompt:
                 log.info(f'+  Feature prompt: {args.feature_prompt}')
             if args.feature:
