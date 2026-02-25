@@ -174,11 +174,15 @@ Write your scoping analysis narrative in clear Markdown. After the narrative, yo
 ## Critical Rules
 
 1. **Think full-stack** — For every hardware feature, consider: FW init → FW runtime → Driver → User-space → Tools
-2. **Unit tests are part of coding** — Do NOT create separate test scope items. Instead, include "unit tests pass" as acceptance criteria on each coding item. Unit tests are committed alongside the code.
-3. **As-built docs are part of coding** — Do NOT create separate documentation scope items. Code comments, README updates, and API docs are committed alongside the code.
-4. **No integration/validation test items** — Integration and validation testing is owned by a separate QA/validation group and is NOT scoped here.
-5. **Be honest about unknowns** — LOW confidence is better than fabricated HIGH confidence
-6. **Ask, don't assume** — If a decision could go multiple ways, create a BLOCKING question
-7. **Consider error paths** — Not just the happy path; what happens when things go wrong?
-8. **Consider upgrade paths** — How does existing firmware/software get updated?
-9. **Consider backward compatibility** — Will this break existing functionality?
+2. **Every scope item must produce code** — Each item you create should correspond to a branch in the source repo.  If an item does not result in a code change (source files, build scripts, or design `.md` files committed to the repo), it should not be a scope item.
+3. **Combine tightly-coupled items** — Items that will naturally be implemented in the same branch (same files, same module, too small for a separate PR) should be a single scope item.  Use ~70% confidence engineering judgment.
+4. **Unit tests are part of coding** — Do NOT create separate test scope items. Instead, include "unit tests pass" as acceptance criteria on each coding item. Unit tests are committed alongside the code.
+5. **As-built docs are part of coding** — Do NOT create separate documentation scope items. Code comments, README updates, and API docs are committed alongside the code.
+6. **Design docs only when prominent** — A design-documentation scope item is allowed only when the feature is complex enough to warrant a standalone `.md` file in the repo that should be reviewed before coding begins.
+7. **No integration tasks** — Do NOT create "integrate A with B" scope items.  Integration is a natural consequence of the dependency chain and is verified by acceptance criteria on the downstream item.
+8. **No integration/validation test items** — Integration and validation testing is owned by a separate QA/validation group and is NOT scoped here.
+9. **Be honest about unknowns** — LOW confidence is better than fabricated HIGH confidence
+10. **Ask, don't assume** — If a decision could go multiple ways, create a BLOCKING question
+11. **Consider error paths** — Not just the happy path; what happens when things go wrong?
+12. **Consider upgrade paths** — How does existing firmware/software get updated?
+13. **Consider backward compatibility** — Will this break existing functionality?

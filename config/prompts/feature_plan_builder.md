@@ -63,21 +63,51 @@ Use the **directed** dependency graph to cluster items into functional threads:
 - `[Feature] Secure Boot & Key Management` — includes FW: PUF key enrollment + FW: MCU secure boot + FW: anti-rollback counters
 - `[Feature] SPI Flash & Measurement` — includes FW: SPI flash read driver + FW: measurement engine + FW: active/inactive boot slot detection
 
-## What NOT to Create Tickets For
+## Story = Branch Rule
 
-**Do NOT create tickets for any of the following — they are assumed to be part of
-the development work and committed to the repo at the same time as the code:**
+**Every Story must correspond to a branch in the source repository.**  This is the
+fundamental unit of work: one Story → one branch → one pull request.
 
-- **Unit tests** — Writing unit tests is part of each coding Story's acceptance criteria
+### Combining scope items into a single Story
+
+When multiple scope items will naturally be implemented in a single branch (because
+they touch the same files, share the same build context, or are too small to
+justify separate PRs), **combine them into one Story**.  Use your embedded systems
+and software engineering knowledge at ~70% confidence to judge which items can be
+combined.
+
+Examples of items that should be combined:
+- A register access layer and its initialization sequence (same .c/.h files)
+- A CLI tool and its unit-test harness (committed together)
+- Two small sysfs attributes that live in the same driver module
+
+### What does NOT become a Story
+
+Do NOT create Stories for work that does not produce a branch:
+
+- **Unit tests** — Part of each coding Story's acceptance criteria (committed with the code)
 - **As-built documentation** — Code comments, README updates, and API docs are part of each Story
-- **Integration testing** — Owned by a separate QA/validation group; not tracked here
-- **Validation testing** — Owned by a separate QA/validation group; not tracked here
-- **System testing** — Owned by a separate QA/validation group; not tracked here
+- **Integration testing** — Owned by a separate QA/validation group; no code branch here
+- **Validation testing** — Owned by a separate QA/validation group; no code branch here
+- **System testing** — Owned by a separate QA/validation group; no code branch here
+- **Integration tasks** — Tasks like "integrate module A with module B" that don't
+  produce their own code change.  Integration is a natural consequence of the
+  dependency chain; it is verified by acceptance criteria on the downstream Story,
+  not tracked as a separate ticket.
+
+### Design documentation Stories
+
+Design documentation (architecture docs, interface specs, protocol descriptions)
+**may** become a Story when the design is prominent enough to warrant its own
+Markdown file committed to the repo.  The Story should produce a `.md` file in the
+repo's `docs/` or `design/` directory.  Only create a design-doc Story when the
+feature is complex enough that the design needs to be reviewed before coding begins.
 
 If the scope document contains test or documentation items, **do not convert them
-into Stories**.  Instead, fold the relevant acceptance criteria into the coding
-Stories they relate to (e.g., "Unit tests pass for all supported BEJ types" becomes
-an acceptance criterion on the BEJ encoder Story).
+into Stories** unless they meet the design-doc criteria above.  Instead, fold the
+relevant acceptance criteria into the coding Stories they relate to (e.g., "Unit
+tests pass for all supported BEJ types" becomes an acceptance criterion on the BEJ
+encoder Story).
 
 ## Story Format
 
@@ -208,16 +238,19 @@ You MUST produce a single ```json``` code block containing the plan.  The schema
 
 ## Critical Rules
 
-1. **Functional-thread Epics** — Group by dependency-connected functional thread, NOT by work-type (firmware/driver/test/doc). An Epic may contain both [FW] and [TOOL] stories.
-2. **Dependency ordering** — Stories within each Epic MUST be listed in topological (dependency) order. Items that must be done first appear first.
-3. **No test tickets** — Unit tests are acceptance criteria on coding Stories; integration/validation testing is owned by another group
-4. **No documentation tickets** — As-built docs are part of each coding Story
-5. **2-level hierarchy only** — Epic → Story. No Tasks or Sub-tasks.
-6. **Every scope item becomes a Story** — Don't drop items (except test/doc items which fold into coding Stories)
-7. **Acceptance criteria are mandatory** — Every Story must have at least 2 acceptance criteria plus "Unit tests pass" and "Code reviewed and merged"
-8. **Confidence and complexity are mandatory** — Every Story must be tagged
-9. **Dry-run by default** — Never create tickets without explicit approval
-10. **Preserve dependencies** — Carry dependency information into Story descriptions as BLOCKED_BY references
-11. **Use the dependency graph** — The scope document's dependency chains drive Epic grouping and Story ordering within each Epic
-12. **Include open questions** — Surface them in the plan so the reviewer sees them
-13. **JSON output is mandatory** — Your final response MUST contain a ```json``` code block with the complete plan
+1. **Story = Branch** — Every Story must correspond to exactly one branch/PR in the repo. If a scope item does not produce a code change, it is not a Story.
+2. **Combine small items** — Scope items that will naturally land in the same branch (same files, same module, too small for a separate PR) should be combined into a single Story. Use ~70% confidence engineering judgment.
+3. **No integration tickets** — Integration tasks ("wire A to B") do not produce their own branch. Integration is verified by acceptance criteria on downstream Stories.
+4. **No test tickets** — Unit tests are acceptance criteria on coding Stories; integration/validation testing is owned by another group
+5. **No as-built doc tickets** — Code comments, README updates, and API docs are part of each coding Story
+6. **Design-doc Stories only when prominent** — A design-doc Story is allowed only when the feature is complex enough to warrant a standalone `.md` file reviewed before coding begins
+7. **Functional-thread Epics** — Group by dependency-connected functional thread, NOT by work-type (firmware/driver/test/doc). An Epic may contain both [FW] and [TOOL] stories.
+8. **Dependency ordering** — Stories within each Epic MUST be listed in topological (dependency) order. Items that must be done first appear first.
+9. **2-level hierarchy only** — Epic → Story. No Tasks or Sub-tasks.
+10. **Acceptance criteria are mandatory** — Every Story must have at least 2 acceptance criteria plus "Unit tests pass" and "Code reviewed and merged"
+11. **Confidence and complexity are mandatory** — Every Story must be tagged
+12. **Dry-run by default** — Never create tickets without explicit approval
+13. **Preserve dependencies** — Carry dependency information into Story descriptions as BLOCKED_BY references
+14. **Use the dependency graph** — The scope document's dependency chains drive Epic grouping and Story ordering within each Epic
+15. **Include open questions** — Surface them in the plan so the reviewer sees them
+16. **JSON output is mandatory** — Your final response MUST contain a ```json``` code block with the complete plan
