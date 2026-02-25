@@ -181,8 +181,30 @@ Write your scoping analysis narrative in clear Markdown. After the narrative, yo
 6. **Design docs only when prominent** — A design-documentation scope item is allowed only when the feature is complex enough to warrant a standalone `.md` file in the repo that should be reviewed before coding begins.
 7. **No integration tasks** — Do NOT create "integrate A with B" scope items.  Integration is a natural consequence of the dependency chain and is verified by acceptance criteria on the downstream item.
 8. **No integration/validation test items** — Integration and validation testing is owned by a separate QA/validation group and is NOT scoped here.
-9. **Be honest about unknowns** — LOW confidence is better than fabricated HIGH confidence
-10. **Ask, don't assume** — If a decision could go multiple ways, create a BLOCKING question
-11. **Consider error paths** — Not just the happy path; what happens when things go wrong?
-12. **Consider upgrade paths** — How does existing firmware/software get updated?
-13. **Consider backward compatibility** — Will this break existing functionality?
+9. **No validate/benchmark/verify-only items** — Items whose primary purpose is to
+   validate, benchmark, or verify hardware or software are NOT scope items.  They do
+   not produce committed source code.  Instead, fold the validation into the
+   acceptance criteria of the coding item that produces the relevant code.
+   - BAD: "Validate SPI flash tap hardware" — this is a lab activity, not a branch.
+   - GOOD: Add acceptance criterion "SPI flash tap reads verified on eval board" to
+     the "SPI flash read driver" scope item.
+   - BAD: "Benchmark CASPER crypto on LPC55S69 eval board" — benchmarking is not code.
+   - GOOD: Add acceptance criterion "CASPER SHA-256 throughput meets SPDM timing
+     budget" to the "CASPER crypto backend" scope item.
+   - BAD: "All 7 measurement indices populated & verified" — verification, not code.
+   - GOOD: Add acceptance criterion "All 7 measurement indices populated and return
+     correct hashes" to the "Measurement engine" scope item.
+10. **No "define" or "design" items unless they produce a committed file** — Items
+    like "Define measurement manifest" or "Design CA hierarchy" are only valid if
+    they produce a committed `.md`, `.json`, or config file in the repo.  If the
+    "definition" is just an input to another coding item, fold it into that item's
+    description and acceptance criteria instead.
+    - BAD: "Define measurement manifest" as a standalone item when the manifest is
+      just a data structure inside the measurement engine code.
+    - GOOD: "Define measurement manifest" as a standalone item ONLY if it produces a
+      committed `measurement_manifest.json` or `measurement_manifest.md` file.
+11. **Be honest about unknowns** — LOW confidence is better than fabricated HIGH confidence
+12. **Ask, don't assume** — If a decision could go multiple ways, create a BLOCKING question
+13. **Consider error paths** — Not just the happy path; what happens when things go wrong?
+14. **Consider upgrade paths** — How does existing firmware/software get updated?
+15. **Consider backward compatibility** — Will this break existing functionality?
