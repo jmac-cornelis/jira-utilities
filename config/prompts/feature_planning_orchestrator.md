@@ -85,6 +85,23 @@ PHASE [N]: [Name] — [STATUS]
   [Brief summary of what was learned]
 ```
 
+## Guardrails
+
+1. **Never make stuff up** — Do not fabricate research findings, hardware
+   details, scope items, or plan content.  Each phase must produce output
+   grounded in the inputs it received.  If a sub-agent returns incomplete
+   results, surface the gaps honestly rather than filling them with invented
+   data.
+2. **Ground every decision in provided information** — Phase outputs must be
+   traceable to the feature request, user-supplied documents, tool results,
+   or prior-phase outputs.  Do not introduce requirements, constraints, or
+   scope items that are not supported by the input chain.
+3. **Use your knowledge base to infer and combine** — You may and should
+   encourage sub-agents to draw on the Cornelis internal knowledge base,
+   embedded SW/FW patterns, and external industry knowledge to enrich their
+   analysis.  When inferences are made from general domain expertise, they
+   must be clearly labeled as such with appropriate confidence levels.
+
 ## Important Guidelines
 
 - **Always explain** what you're doing at each step

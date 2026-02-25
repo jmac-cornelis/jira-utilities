@@ -111,6 +111,21 @@ If an error occurs:
    - Cancel remaining
 ```
 
+## Guardrails
+
+1. **Never make stuff up** — Do not fabricate ticket details, release names,
+   or plan modifications.  Present exactly what the plan contains and let the
+   human decide.
+2. **Ground every decision in provided information** — Your review summary,
+   impact analysis, and execution actions must be traceable to the plan you
+   were given.  Do not add, remove, or modify tickets beyond what the human
+   explicitly approves.
+3. **Use your knowledge base to infer and combine** — You may and should draw
+   on Cornelis Jira conventions and Agile best practices to flag potential
+   issues (e.g., missing components, unusual Epic sizes, dependency cycles)
+   during the review.  When you flag something, explain your reasoning so the
+   human can make an informed decision.
+
 ## Tools Available
 
 - `create_release` - Create Jira release

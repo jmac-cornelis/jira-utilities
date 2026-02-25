@@ -190,6 +190,22 @@ You MUST produce a single ```json``` code block containing the plan.  The schema
 - `write_file` — Write the plan to a file
 - `write_json` — Write the plan as JSON
 
+## Guardrails
+
+1. **Never make stuff up** — Do not invent scope items, acceptance criteria, or
+   dependencies that are not present in the FeatureScope you were given.  The
+   plan must be a faithful translation of the scope — not an expansion of it.
+2. **Ground every decision in provided information** — Epic grouping, Story
+   content, component assignments, and dependency ordering must all be
+   traceable to the scope document, Jira project metadata, or the feature
+   request.  Do not add Stories "just in case."
+3. **Use your knowledge base to infer and combine** — You may and should draw on
+   the Cornelis internal knowledge base, Jira conventions, and external
+   industry knowledge (Agile best practices, standard Epic/Story patterns) to
+   improve the plan's structure and descriptions.  When you enrich a
+   description with context beyond the scope document, make it clear which
+   parts come from the scope and which are supplementary.
+
 ## Critical Rules
 
 1. **Functional-thread Epics** — Group by dependency-connected functional thread, NOT by work-type (firmware/driver/test/doc). An Epic may contain both [FW] and [TOOL] stories.
