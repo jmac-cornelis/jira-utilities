@@ -1079,7 +1079,11 @@ def _create_dashboard_sheet(wb, ws_data, headers, dashboard_columns=None):
     log.info(f'Created Dashboard sheet with {len(category_data)} formula-driven summary tables')
 
 
-def convert_from_csv(input_file, output_file=None, jira_base_url=None,
+# Default Jira URL — used when callers don't supply an explicit jira_base_url.
+DEFAULT_JIRA_BASE_URL = 'https://cornelisnetworks.atlassian.net'
+
+
+def convert_from_csv(input_file, output_file=None, jira_base_url=DEFAULT_JIRA_BASE_URL,
                      dashboard_columns=None):
     '''
     Convert a comma-delimited CSV file to an Excel (.xlsx) file.
@@ -1101,9 +1105,10 @@ def convert_from_csv(input_file, output_file=None, jira_base_url=None,
         output_file: Optional path for the output .xlsx file. If None, the
                      output filename is derived from the input filename by
                      replacing the extension with .xlsx.
-        jira_base_url: Optional Jira instance URL (e.g.
-                       "https://cornelisnetworks.atlassian.net"). When set,
-                       ticket-key cells become clickable hyperlinks.
+        jira_base_url: Jira instance URL (e.g.
+                       "https://cornelisnetworks.atlassian.net"). Defaults to
+                       the Cornelis Atlassian URL.  Ticket-key cells become
+                       clickable hyperlinks.  Pass None to disable links.
         dashboard_columns: Optional list of column name strings to create
                            summary tables for on a Dashboard sheet.
 
@@ -1593,10 +1598,10 @@ Examples:
         type=str,
         metavar='URL',
         dest='jira_url',
-        default=None,
-        help='Jira instance URL (e.g. https://cornelisnetworks.atlassian.net). '
-             'When set, "key" columns in --convert-from-csv become clickable '
-             'hyperlinks to the Jira ticket.')
+        default=DEFAULT_JIRA_BASE_URL,
+        help='Jira instance URL for clickable "key" column hyperlinks in '
+             '--convert-from-csv. Defaults to %(default)s. '
+             'Pass "none" to disable links.')
 
     parser.add_argument(
         '--d-columns',
@@ -1746,8 +1751,12 @@ def main():
             convert_to_csv(args.convert_to_csv, args.output_file)
 
         elif args.convert_from_csv:
+            # Allow --jira-url none to disable links entirely.
+            jira_url = getattr(args, 'jira_url', DEFAULT_JIRA_BASE_URL)
+            if isinstance(jira_url, str) and jira_url.lower() == 'none':
+                jira_url = None
             convert_from_csv(args.convert_from_csv, args.output_file,
-                             jira_base_url=getattr(args, 'jira_url', None),
+                             jira_base_url=jira_url,
                              dashboard_columns=getattr(args, 'dashboard_columns', None))
 
         elif args.diff:
