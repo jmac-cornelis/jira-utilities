@@ -186,6 +186,7 @@ Map scope categories to Jira components:
 - `firmware` → Look for components containing "Firmware", "FW", "Embedded"
 - `driver` → Look for components containing "Driver", "Kernel", "HFI"
 - `tool` → Look for components containing "Tools", "CLI", "Utilities"
+- `middleware` → Look for components containing "OPX", "libfabric", "FM", "Fabric Manager", "verbs", "Verbs"
 
 If no matching component exists, leave it unassigned and note it.
 
