@@ -1,0 +1,9 @@
+flowchart LR
+    A["🔍 Jira Filter"] --> B["📥 Fetch Tickets"]
+    B --> C["💾 Dump to JSON"]
+    C --> D["🤖 LLM Analysis"]
+    D --> E["📊 CSV Output"]
+    E --> F["📈 Styled Excel"]
+
+    style A fill:#e1f5fe
+    style F fill:#c8e6c9

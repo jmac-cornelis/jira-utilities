@@ -1,0 +1,47 @@
+graph TB
+    subgraph "Agentic Workflows (LLM-powered)"
+        PM["pm_agent.py<br/>CLI Entry Point"]
+        FPO["Feature Planning<br/>Orchestrator"]
+        RPO["Release Planning<br/>Orchestrator"]
+
+        subgraph "Specialized Agents"
+            RA["Research<br/>Agent"]
+            HA["Hardware<br/>Analyst"]
+            SA["Scoping<br/>Agent"]
+            FPB["Feature Plan<br/>Builder"]
+            RVA["Review<br/>Agent"]
+            VA["Vision<br/>Analyzer"]
+            JA["Jira<br/>Analyst"]
+        end
+
+        PM --> FPO
+        PM --> RPO
+        FPO --> RA
+        FPO --> HA
+        FPO --> SA
+        FPO --> FPB
+        FPO --> RVA
+        RPO --> VA
+        RPO --> JA
+        RPO --> RVA
+    end
+
+    subgraph "Standalone Utilities (no LLM)"
+        JU["jira_utils.py<br/>Jira CLI"]
+        EU["excel_utils.py<br/>Excel CLI"]
+        DU["drawio_utilities.py<br/>Draw.io CLI"]
+    end
+
+    subgraph "Shared Infrastructure"
+        TL["Tools Layer<br/>jira_tools · excel_tools · vision_tools · file_tools"]
+        LLM["LLM Abstraction<br/>Cornelis LLM · LiteLLM · OpenAI · Anthropic"]
+        SS["State & Sessions<br/>JSON / SQLite persistence"]
+    end
+
+    FPO --> TL
+    RPO --> TL
+    TL --> LLM
+    FPO --> SS
+    JU --> TL
+    EU -.->|"direct"| EU
+    DU -.->|"direct"| DU

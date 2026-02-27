@@ -1,0 +1,23 @@
+flowchart LR
+    A["📄 Feature<br/>Description"] --> B["🔬 Phase 1<br/>Research"]
+    B --> C["🔧 Phase 2<br/>HW Analysis"]
+    C --> D["📋 Phase 3<br/>Scoping"]
+    D --> E["🏗️ Phase 4<br/>Plan Generation"]
+    E --> F["👁️ Phase 5<br/>Human Review"]
+    F --> G["🚀 Phase 6<br/>Jira Execution"]
+
+    SD["📑 Scope Doc<br/>(--scope-doc)"] -.->|"skip 1-3"| E
+    PF["📦 plan.json<br/>(--plan-file)"] -.->|"skip 1-5"| G
+
+    G --> I["Initiative"]
+    I --> EP1["Epic 1"]
+    I --> EP2["Epic 2"]
+    EP1 --> S1["Story 1.1"]
+    EP1 --> S2["Story 1.2"]
+    EP2 --> S3["Story 2.1"]
+
+    style A fill:#e1f5fe
+    style G fill:#c8e6c9
+    style I fill:#fff3e0
+    style EP1 fill:#f3e5f5
+    style EP2 fill:#f3e5f5

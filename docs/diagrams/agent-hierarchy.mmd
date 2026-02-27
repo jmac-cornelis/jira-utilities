@@ -1,0 +1,54 @@
+classDiagram
+    class BaseAgent {
+        +register_tool()
+        +execute_tool()
+        +run()*
+    }
+
+    class FeaturePlanningOrchestrator {
+        +run()
+        -_phase_research()
+        -_phase_hw_analysis()
+        -_phase_scoping()
+        -_phase_plan_generation()
+        -_phase_execution()
+        -_validate_initiative()
+    }
+
+    class ResearchAgent {
+        +run()
+        +research()
+    }
+
+    class HardwareAnalyst {
+        +run()
+        +analyze()
+    }
+
+    class ScopingAgent {
+        +run()
+        +scope()
+    }
+
+    class FeaturePlanBuilder {
+        +run()
+        -_build_plan_prompt()
+        -_parse_llm_plan()
+    }
+
+    class ReviewAgent {
+        +run()
+    }
+
+    BaseAgent <|-- FeaturePlanningOrchestrator
+    BaseAgent <|-- ResearchAgent
+    BaseAgent <|-- HardwareAnalyst
+    BaseAgent <|-- ScopingAgent
+    BaseAgent <|-- FeaturePlanBuilder
+    BaseAgent <|-- ReviewAgent
+
+    FeaturePlanningOrchestrator --> ResearchAgent : phase 1
+    FeaturePlanningOrchestrator --> HardwareAnalyst : phase 2
+    FeaturePlanningOrchestrator --> ScopingAgent : phase 3
+    FeaturePlanningOrchestrator --> FeaturePlanBuilder : phase 4
+    FeaturePlanningOrchestrator --> ReviewAgent : phase 5
