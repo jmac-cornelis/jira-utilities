@@ -2,9 +2,14 @@
 
 AI-powered project management agents and standalone CLI utilities for Jira, Excel, and Draw.io at Cornelis Networks.
 
+> **Primary use case:** An engineering team writes a scope document describing a feature.
+> The PM agent reads that document and produces a complete Jira project plan —
+> Initiative → Epics → Stories — ready for review and one-command execution.
+
 ## Table of Contents
 
 - [Overview](#overview)
+  - [How It Works — Scope Document to Jira Plan](#how-it-works--scope-document-to-jira-plan)
 - [Architecture](#architecture)
 - [Installation](#installation)
   - [Quick Start](#quick-start)
@@ -36,11 +41,46 @@ This repository contains two categories of tooling:
 | **Agentic Workflows** | Multi-phase AI pipelines that research, scope, plan, and execute Jira project plans | Yes |
 | **Standalone Utilities** | CLI tools for Jira queries, Excel formatting, Draw.io diagrams, and bulk operations | No |
 
+### How It Works — Scope Document to Jira Plan
+
+The flagship workflow takes a **scope document** authored by the engineering team and transforms it into a fully structured Jira project plan:
+
+```
+┌─────────────────┐      ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│  Scope Document  │ ──▶  │  PM Agent     │ ──▶  │  plan.json   │ ──▶  │  Jira        │
+│  (MD/JSON/PDF)   │      │  (LLM-driven) │      │  plan.md     │      │  Tickets     │
+└─────────────────┘      └──────────────┘      └──────────────┘      └──────────────┘
+     Engineering              AI Agents            Review Output         --execute
+     authors this             parse, scope,        Human reviews         creates
+                              and plan             before executing      Initiative →
+                                                                        Epics → Stories
+```
+
+**Three commands cover the entire lifecycle:**
+
+```bash
+# 1. Generate the plan from a scope document (dry-run — no tickets created)
+pm_agent --workflow feature-plan --project STL --feature "SPDM Attestation" \
+         --scope-doc scope.json
+
+# 2. Review the generated plan
+cat plans/STL-spdm-attestation/plan.md
+
+# 3. Execute — create tickets in Jira, attached to an Initiative
+pm_agent --workflow feature-plan --project STL \
+         --plan-file plans/STL-spdm-attestation/plan.json \
+         --initiative STL-74071 --execute
+```
+
+The scope document can be **JSON** (structured items with complexity/confidence), **Markdown**, **PDF**, or **DOCX**. The agent parses it, groups items into vertical-slice Epics, generates Stories with acceptance criteria, and outputs both `plan.json` (machine-readable) and `plan.md` (human-readable).
+
 ### Key Features
 
+- **Scope-to-Jira pipeline** — Engineering writes a scope doc; the agent produces Initiative → Epics → Stories
+- **Multiple entry points** — Start from a feature description, scope document, or previously generated plan
 - **Multi-agent architecture** — Specialized agents for research, hardware analysis, scoping, plan building, and review
-- **Feature-to-Jira pipeline** — Turn a feature description into a complete Jira plan (Initiative → Epics → Stories)
 - **Human-in-the-loop** — Dry-run by default; `--execute` only after review
+- **Initiative linking** — `--initiative KEY` attaches all Epics as children of an existing Initiative ticket
 - **Custom LLM support** — Works with Cornelis internal LLM or external providers (OpenAI, Anthropic)
 - **Session persistence** — Resume interrupted workflows
 - **Vision capabilities** — Extract data from images, slides, and PDFs
@@ -187,46 +227,58 @@ python3 pm_agent.py --env .env_sandbox --workflow feature-plan --project STLSB -
 
 ## Agentic Workflows
 
-Agentic workflows are multi-phase AI pipelines orchestrated by `pm_agent.py`. They require an LLM and use specialized agents to research, analyze, scope, and plan.
+Agentic workflows are multi-phase AI pipelines orchestrated by [`pm_agent.py`](pm_agent.py). They require an LLM and use specialized agents to research, analyze, scope, and plan.
 
 ### Feature Plan Workflow
 
-Generate a complete Jira project plan (Initiative → Epics → Stories) from a feature description, scope document, or previously generated plan.
+Generate a complete Jira project plan (Initiative → Epics → Stories) from a feature description, scope document, or previously generated plan. The **recommended path** is for the engineering team to author a scope document (JSON, Markdown, PDF, or DOCX) and feed it directly to the agent via `--scope-doc`, which skips the research and hardware-analysis phases and jumps straight to plan generation.
 
 #### Entry Points
 
 | Entry Point | Phases Executed | Use When |
 |-------------|----------------|----------|
-| `--feature "text"` or `--feature-prompt FILE` | All 6 phases | Starting from scratch |
-| `--scope-doc FILE` | Phases 4–6 (plan → review → execute) | You already have a scope document |
-| `--plan-file FILE` | Phase 6 only (execute) | You already have a `plan.json` |
+| `--scope-doc FILE` | Phases 4–6 (plan → review → execute) | **Recommended** — engineering team provides a scope document |
+| `--feature "text"` or `--feature-prompt FILE` | All 6 phases | Starting from scratch — agent does its own research |
+| `--plan-file FILE` | Phase 6 only (execute) | You already have a reviewed `plan.json` |
 
 #### Examples
 
 ```bash
-# Full agentic workflow (research → HW analysis → scoping → plan)
+# ── Recommended: scope document → Jira plan ──────────────────────────
+
+# 1. Generate plan from engineering scope document (dry-run)
+pm_agent --workflow feature-plan --project STL --feature "SPDM Attestation" \
+         --scope-doc scope.json
+
+# 2. Review the generated plan
+cat plans/STL-spdm-attestation/plan.md
+
+# 3. Execute: create tickets in Jira under an Initiative
+pm_agent --workflow feature-plan --project STL \
+         --plan-file plans/STL-spdm-attestation/plan.json \
+         --initiative STL-74071 --execute
+
+# ── Alternative: full agentic workflow (no scope doc) ────────────────
+
+# From a one-line feature description (all 6 phases)
 pm_agent --workflow feature-plan --project STLSB --feature "Add PQC SPDM attestation"
 
-# From a rich feature prompt file
-pm_agent --workflow feature-plan --project STLSB --feature-prompt SPDM_1.2_Attestation.md
+# From a rich feature prompt file with supporting specs
+pm_agent --workflow feature-plan --project STLSB --feature-prompt SPDM_1.2_Attestation.md \
+         --docs spec.pdf datasheet.pdf
 
-# With supporting spec documents
-pm_agent --workflow feature-plan --project STLSB --feature-prompt SPDM.md --docs spec.pdf datasheet.pdf
+# ── Re-execute a previously generated plan ───────────────────────────
 
-# Skip to plan generation from a pre-existing scope document
-pm_agent --workflow feature-plan --project STLSB --feature "SPDM" --scope-doc scope.json
-
-# Load a previously generated plan (dry-run — shows summary only)
+# Dry-run (shows summary only)
 pm_agent --workflow feature-plan --project STLSB --plan-file plans/STLSB-spdm/plan.json
 
-# Execute: create tickets in Jira
+# Execute without an Initiative (Epics created unattached)
 pm_agent --workflow feature-plan --project STLSB --plan-file plans/STLSB-spdm/plan.json --execute
 
-# Execute and attach all Epics to an existing Initiative ticket
-pm_agent --workflow feature-plan --project STL --plan-file plan.json --initiative STL-74071 --execute
+# ── Sandbox testing ──────────────────────────────────────────────────
 
-# Use a sandbox Jira instance
-pm_agent --env .env_sandbox --workflow feature-plan --project STLSB --feature "Redfish RDE" --scope-doc scope.md
+pm_agent --env .env_sandbox --workflow feature-plan --project STLSB \
+         --feature "Redfish RDE" --scope-doc scope.md
 ```
 
 #### Feature Plan Flags
