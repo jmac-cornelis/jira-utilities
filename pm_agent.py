@@ -1456,7 +1456,9 @@ def _workflow_feature_plan(args):
         output(f'  Project:      {project_key}')
         output(f'  Plan file:    {plan_file}')
         if initiative_key:
-            output(f'  Initiative:   {initiative_key}')
+            output(f'  Initiative:   {initiative_key} (supplied)')
+        else:
+            output(f'  Initiative:   (will be auto-created on --execute)')
         output(f'  Execute:      {"YES — will create Jira tickets" if execute else "DRY RUN"}')
         output('')
 
@@ -1566,7 +1568,9 @@ def _workflow_feature_plan(args):
         for dp in doc_paths:
             output(f'            - {dp}')
     if initiative_key:
-        output(f'  Initiative: {initiative_key}')
+        output(f'  Initiative: {initiative_key} (supplied)')
+    else:
+        output(f'  Initiative: (will be auto-created on --execute)')
     output(f'  Execute:  {"YES — will create Jira tickets" if execute else "DRY RUN"}')
     output('')
 
@@ -1869,10 +1873,11 @@ Examples:
                             'Skips all agentic phases. '
                             'Used by --workflow feature-plan.')
     parser.add_argument('--initiative', default=None, metavar='KEY',
-                       help='Existing Initiative ticket key (e.g. STL-74071). '
-                            'When provided with --execute, each created Epic '
-                            'is linked as a child of this Initiative. '
-                            'The ticket must exist and be of type Initiative. '
+                       help='Optional existing Initiative ticket key (e.g. STL-74071). '
+                            'If supplied, the ticket is validated as type Initiative '
+                            'and all created Epics become its children. '
+                            'If omitted, a new Initiative is auto-created from the '
+                            'plan feature name. '
                             'Used by --workflow feature-plan.')
     parser.add_argument('--execute', action='store_true',
                        help='Actually create Jira tickets (default: dry-run). '

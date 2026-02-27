@@ -66,7 +66,11 @@ pm_agent --workflow feature-plan --project STL --feature "SPDM Attestation" \
 # 2. Review the generated plan
 cat plans/STL-spdm-attestation/plan.md
 
-# 3. Execute — create tickets in Jira, attached to an Initiative
+# 3. Execute — create tickets in Jira (Initiative auto-created, Epics linked)
+pm_agent --workflow feature-plan --project STL \
+         --plan-file plans/STL-spdm-attestation/plan.json --execute
+
+# Or attach to an existing Initiative instead of auto-creating one
 pm_agent --workflow feature-plan --project STL \
          --plan-file plans/STL-spdm-attestation/plan.json \
          --initiative STL-74071 --execute
@@ -74,13 +78,17 @@ pm_agent --workflow feature-plan --project STL \
 
 The scope document can be **JSON** (structured items with complexity/confidence), **Markdown**, **PDF**, or **DOCX**. The agent parses it, groups items into vertical-slice Epics, generates Stories with acceptance criteria, and outputs both `plan.json` (machine-readable) and `plan.md` (human-readable).
 
+> **Initiative handling:** On `--execute`, Epics are always attached to an Initiative.
+> If `--initiative KEY` is supplied, that ticket is validated and used.
+> If omitted, a new Initiative is auto-created from the plan's feature name.
+
 ### Key Features
 
 - **Scope-to-Jira pipeline** — Engineering writes a scope doc; the agent produces Initiative → Epics → Stories
 - **Multiple entry points** — Start from a feature description, scope document, or previously generated plan
 - **Multi-agent architecture** — Specialized agents for research, hardware analysis, scoping, plan building, and review
 - **Human-in-the-loop** — Dry-run by default; `--execute` only after review
-- **Initiative linking** — `--initiative KEY` attaches all Epics as children of an existing Initiative ticket
+- **Automatic Initiative** — Epics are always parented to an Initiative; supply `--initiative KEY` or one is auto-created
 - **Custom LLM support** — Works with Cornelis internal LLM or external providers (OpenAI, Anthropic)
 - **Session persistence** — Resume interrupted workflows
 - **Vision capabilities** — Extract data from images, slides, and PDFs
@@ -289,7 +297,7 @@ pm_agent --env .env_sandbox --workflow feature-plan --project STLSB \
 | `--feature-prompt FILE` | Rich feature prompt file (Markdown) — takes precedence over `--feature` |
 | `--scope-doc FILE` | Pre-existing scope document (JSON/MD/PDF/DOCX) — skips research/HW/scoping phases |
 | `--plan-file FILE` | Previously generated `plan.json` — skips all agentic phases |
-| `--initiative KEY` | Existing Initiative ticket key (e.g. `STL-74071`). Created Epics become children of this Initiative. Validated as type Initiative before execution. |
+| `--initiative KEY` | Optional existing Initiative ticket key (e.g. `STL-74071`). If supplied, validated and used as parent for all Epics. If omitted, a new Initiative is auto-created from the plan's feature name. |
 | `--execute` | Actually create Jira tickets (default: dry-run) |
 | `--docs FILE [FILE ...]` | Spec documents / datasheets for the research phase |
 | `--output-dir DIR` | Root directory for output (default: `plans/<PROJECT>-<slug>/`) |
