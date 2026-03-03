@@ -25,6 +25,9 @@ from datetime import date
 
 from dotenv import load_dotenv
 
+import jira_utils
+import excel_utils
+
 # Load environment variables
 load_dotenv()
 
@@ -313,8 +316,6 @@ def cmd_build_excel_map(args):
     except ImportError:
         output('ERROR: openpyxl is required for build-excel-map. Install with: pip install openpyxl')
         return 1
-
-    import jira_utils
 
     hierarchy_depth = args.hierarchy
     limit = getattr(args, 'limit', None)
@@ -1203,9 +1204,6 @@ def _workflow_bug_report(args):
     log.debug(f'Entering _workflow_bug_report(filter={args.workflow_filter}, '
               f'prompt={args.workflow_prompt}, limit={args.limit}, timeout={args.timeout})')
 
-    import jira_utils
-    import excel_utils
-
     filter_name = args.workflow_filter
     prompt_path = args.workflow_prompt or 'config/prompts/cn5000_bugs_clean.md'
     all_created_files = []  # (filepath, description) tuples for final summary
@@ -1467,7 +1465,6 @@ def _workflow_feature_plan(args):
             return 1
 
         try:
-            import jira_utils
             jira = jira_utils.get_connection()
             jira_utils.bulk_delete_tickets(
                 jira,
@@ -1701,7 +1698,6 @@ def _workflow_feature_plan(args):
                 # Convert CSV to Excel workbook via excel_utils
                 if csv_path:
                     try:
-                        import excel_utils
                         xlsx_path = excel_utils.convert_from_csv(csv_path)
                         log.info(f'Converted {csv_path} -> {xlsx_path}')
                         output(f'Excel saved to: {xlsx_path}')
