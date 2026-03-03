@@ -2011,6 +2011,14 @@ Examples:
             parser.error(f'--env file not found: {args.env}')
         load_dotenv(dotenv_path=args.env, override=True)
         log.info(f'Loaded env file: {args.env}')
+
+        # jira_utils.JIRA_URL was captured at import time from the default
+        # .env.  Now that --env has overridden os.environ, refresh the
+        # module-level URL and drop any cached connection so the next call
+        # to get_connection() uses the correct server.
+        jira_utils.JIRA_URL = os.getenv('JIRA_URL', jira_utils.DEFAULT_JIRA_URL)
+        jira_utils.reset_connection()
+        log.info(f'Refreshed jira_utils.JIRA_URL -> {jira_utils.JIRA_URL}')
     
     # ---- Verbose mode: add a stdout handler so debug messages appear on console
     if args.verbose:
