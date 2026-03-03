@@ -3773,6 +3773,12 @@ def bulk_delete_tickets(jira, input_file, delete_subtasks=False, dry_run=True, m
 
     email, api_token = get_jira_credentials()
 
+    # Derive the server URL from the jira connection object so that
+    # --env overrides are honoured even if the module-level JIRA_URL
+    # was captured before the override took effect.
+    server_url = jira.server_url if hasattr(jira, 'server_url') else JIRA_URL
+    log.info(f'bulk_delete_tickets: using server {server_url}')
+
     success_count = 0
     error_count = 0
     errors = []
@@ -3802,7 +3808,7 @@ def bulk_delete_tickets(jira, input_file, delete_subtasks=False, dry_run=True, m
 
         for retry in range(max_retries):
             response = requests.delete(
-                f'{JIRA_URL}/rest/api/3/issue/{ticket_key}',
+                f'{server_url}/rest/api/3/issue/{ticket_key}',
                 auth=(email, api_token),
                 headers={'Accept': 'application/json'},
                 params=params,
