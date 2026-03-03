@@ -1467,6 +1467,7 @@ def _workflow_feature_plan(args):
             return 1
 
         try:
+            import jira_utils
             jira = jira_utils.get_connection()
             jira_utils.bulk_delete_tickets(
                 jira,
