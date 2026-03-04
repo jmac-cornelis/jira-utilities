@@ -205,6 +205,7 @@ You MUST produce a single ```json``` code block containing the plan.  The schema
 {
   "project_key": "PROJECT",
   "feature_name": "Short Feature Name",
+  "product_family": "CN5000",
   "epics": [
     {
       "summary": "[Feature Name] Epic Title — Functional Thread",
@@ -236,6 +237,7 @@ You MUST produce a single ```json``` code block containing the plan.  The schema
 
 ### JSON field rules
 
+- `product_family` — Top-level string identifying the Cornelis product family (e.g. `"CN5000"`, `"CN6000"`, `"CN7000"`). Maps to Jira custom field `customfield_28434`. Set to `null` if unknown.
 - `epics[].stories` — Stories MUST be in topological (dependency) order within each epic
 - `epics[].summary` — Format: `[FeatureName] Functional Thread Name`
 - `stories[].summary` — Format: `[FW|DRV|TOOL] Descriptive title`

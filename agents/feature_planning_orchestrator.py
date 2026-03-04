@@ -1635,6 +1635,10 @@ class FeaturePlanningOrchestrator(BaseAgent):
 
         project_key = plan.get('project_key', '')
         feature_name = plan.get('feature_name', '') or self.state.feature_request or ''
+        # product_family is plan-level (e.g. ["CN5000"]) — passed to every create_ticket call
+        product_family = plan.get('product_family') or None
+        if product_family and isinstance(product_family, str):
+            product_family = [product_family]
 
         # Resolve the Initiative — validate an existing one or create a new one.
         # Every execution always attaches Epics to an Initiative.
@@ -1679,6 +1683,7 @@ class FeaturePlanningOrchestrator(BaseAgent):
                     components=epic_data.get('components'),
                     labels=epic_data.get('labels'),
                     parent_key=initiative_key or None,
+                    product_family=product_family,
                 )
 
                 epic_key = None
@@ -1725,6 +1730,7 @@ class FeaturePlanningOrchestrator(BaseAgent):
                         labels=story_data.get('labels'),
                         parent_key=epic_key,
                         assignee=story_data.get('assignee'),
+                        product_family=product_family,
                     )
 
                     if hasattr(story_result, 'is_success') and story_result.is_success:

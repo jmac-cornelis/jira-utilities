@@ -363,6 +363,7 @@ def create_ticket(
     fix_versions: Optional[List[str]] = None,
     labels: Optional[List[str]] = None,
     parent_key: Optional[str] = None,
+    product_family: Optional[List[str]] = None,
     custom_fields: Optional[Dict[str, Any]] = None
 ) -> ToolResult:
     '''
@@ -378,6 +379,8 @@ def create_ticket(
         fix_versions: Optional list of fix version names.
         labels: Optional list of labels.
         parent_key: Optional parent ticket key (for subtasks or stories under epics).
+        product_family: Optional list of Product Family values (e.g. ['CN5000']).
+            Maps to Jira custom field customfield_28434.
         custom_fields: Optional dictionary of custom field values.
     
     Output:
@@ -431,6 +434,11 @@ def create_ticket(
                 # Epic link field - may vary by Jira configuration
                 fields['parent'] = {'key': parent_key}
         
+        # Product Family — customfield_28434 (array of {"value": ...} objects)
+        if product_family:
+            pf_list = product_family if isinstance(product_family, list) else [product_family]
+            fields['customfield_28434'] = [{'value': v} for v in pf_list]
+
         if custom_fields:
             fields.update(custom_fields)
         

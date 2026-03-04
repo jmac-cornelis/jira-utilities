@@ -65,6 +65,7 @@ BASE_FIELDS: List[str] = [
 # Extra columns specific to feature-plan exports (appended after base fields)
 PLAN_EXTRA_FIELDS: List[str] = [
     'depth',
+    'product_family',
     'complexity',
     'confidence',
     'labels',
@@ -100,6 +101,8 @@ def plan_json_to_rows(
     '''
     rows: List[Dict[str, str]] = []
     project_key = plan.get('project_key', '')
+    # product_family is plan-level (e.g. "CN5000") — applies to every ticket
+    product_family = plan.get('product_family', '')
 
     for epic_idx, epic in enumerate(plan.get('epics', [])):
         # ----- Epic row -----
@@ -121,6 +124,7 @@ def plan_json_to_rows(
             'customer':         '',
             # Plan-specific extras
             'depth':            '0',
+            'product_family':   product_family,
             'complexity':       '',
             'confidence':       '',
             'labels':           '; '.join(epic.get('labels') or []),
@@ -153,6 +157,7 @@ def plan_json_to_rows(
                 'customer':         '',
                 # Plan-specific extras
                 'depth':            '1',
+                'product_family':   product_family,
                 'complexity':       story.get('complexity', ''),
                 'confidence':       story.get('confidence', ''),
                 'labels':           '; '.join(story.get('labels') or []),

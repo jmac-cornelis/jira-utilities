@@ -1495,7 +1495,7 @@ def _get_children_data(jira, root_key, limit=None):
         max_retries = 5
 
         # Fields needed for display/dump; keep aligned with print_ticket_row/dump_tickets_to_file
-        fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'parent', 'customfield_17504']
+        fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'parent', 'customfield_17504', 'customfield_28434']
         if _include_comments:
             fields_to_fetch.append('comment')
 
@@ -1692,7 +1692,7 @@ def _get_related_data(jira, root_key, hierarchy=None, limit=None):
     '''
     log.debug(f'Entering _get_related_data(root_key={root_key}, hierarchy={hierarchy}, limit={limit})')
 
-    fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'issuelinks', 'customfield_17504']
+    fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'issuelinks', 'customfield_17504', 'customfield_28434']
     if _include_comments:
         fields_to_fetch.append('comment')
 
@@ -2181,7 +2181,7 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504', 'customfield_28434']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -2360,7 +2360,7 @@ def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, s
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504', 'customfield_28434']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -2519,7 +2519,7 @@ def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, d
             else:
                 current_batch = batch_size
             
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504', 'customfield_28434']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -2799,7 +2799,7 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
                 current_batch = batch_size
             
             # Build request payload - include extra fields if dumping
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504', 'customfield_28434']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
@@ -3139,6 +3139,13 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
         customer_raw = fields.get('customfield_17504') or []
         customer_str = ', '.join(customer_raw) if isinstance(customer_raw, list) else str(customer_raw) if customer_raw else ''
         
+        # Extract Product Family (customfield_28434 — array of {"value": "CN5000"} objects)
+        pf_raw = fields.get('customfield_28434') or []
+        pf_str = ', '.join(
+            v.get('value', '') if isinstance(v, dict) else str(v)
+            for v in pf_raw
+        ) if isinstance(pf_raw, list) else str(pf_raw) if pf_raw else ''
+        
         # Extract labels (array of strings in Jira API)
         labels_raw = fields.get('labels', [])
         labels_str = ', '.join(labels_raw) if labels_raw else ''
@@ -3161,6 +3168,7 @@ def dump_tickets_to_file(issues, dump_file, dump_format, extra_fields=None, tabl
             'component': component_str,
             'labels': labels_str,
             'customer': customer_str,
+            'product_family': pf_str,
         }
 
         # ── Comment extraction (only when --get-comments is active) ──────
@@ -3436,6 +3444,7 @@ def create_ticket(
     fix_versions=None,
     labels=None,
     parent_key=None,
+    product_family=None,
     dry_run=True,
 ):
     '''
@@ -3456,6 +3465,8 @@ def create_ticket(
         fix_versions: Optional list of fixVersion names.
         labels: Optional list of labels.
         parent_key: Optional parent issue key (sub-task parent / epic parent, depending on project configuration).
+        product_family: Optional list of Product Family values (e.g. ['CN5000']).
+            Maps to Jira custom field customfield_28434 (array of {"value": ...}).
         dry_run: If True, do not create; only print what would be created.
 
     Output:
@@ -3473,7 +3484,7 @@ def create_ticket(
         'Entering create_ticket('
         f'project_key={project_key}, summary={summary}, issue_type={issue_type}, '
         f'assignee={assignee}, components={components}, fix_versions={fix_versions}, '
-        f'labels={labels}, parent_key={parent_key}, dry_run={dry_run})'
+        f'labels={labels}, parent_key={parent_key}, product_family={product_family}, dry_run={dry_run})'
     )
 
     # Build issue fields
@@ -3502,6 +3513,11 @@ def create_ticket(
     if parent_key:
         fields['parent'] = {'key': parent_key}
 
+    # Product Family — customfield_28434 (array of {"value": "CN5000"} objects)
+    if product_family:
+        pf_list = product_family if isinstance(product_family, list) else [product_family]
+        fields['customfield_28434'] = [{'value': v} for v in pf_list]
+
     output('')
     output('=' * 80)
     if dry_run:
@@ -3522,6 +3538,9 @@ def create_ticket(
         output(f'FixVersions: {", ".join(fix_versions)}')
     if labels:
         output(f'Labels:      {", ".join(labels)}')
+    if product_family:
+        pf_display = product_family if isinstance(product_family, list) else [product_family]
+        output(f'Product Family: {", ".join(pf_display)}')
     output('-' * 80)
 
     if dry_run:
@@ -3900,7 +3919,7 @@ def run_jql_query(jira, jql_query, limit=None, dump_file=None, dump_format='csv'
                 current_batch = batch_size
             
             # Build request payload - include extra fields if dumping
-            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504']
+            fields_to_fetch = ['summary', 'status', 'issuetype', 'created', 'updated', 'assignee', 'priority', 'project', 'fixVersions', 'versions', 'components', 'labels', 'customfield_17504', 'customfield_28434']
             if _include_comments:
                 fields_to_fetch.append('comment')
             if dump_file:
