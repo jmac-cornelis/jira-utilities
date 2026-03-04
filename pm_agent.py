@@ -934,10 +934,13 @@ def _invoke_llm(prompt_text, attachments=None, timeout=None, model=None):
     # Heartbeat "Still waiting on LLM return..." messages are now emitted
     # inside CornelisLLM.chat() / chat_with_vision() themselves, so no
     # wrapper thread is needed here.
+    import time as _time
+    _llm_start = _time.monotonic()
     if image_data_uris:
         response = client.chat_with_vision(messages, image_data_uris)
     else:
         response = client.chat(messages)
+    elapsed_total = _time.monotonic() - _llm_start
 
     # ---- display response ---------------------------------------------------
     output('')
