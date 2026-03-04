@@ -589,18 +589,46 @@ class FeaturePlanningOrchestrator(BaseAgent):
                 f'    Epic: {epic.get("summary", "?")} ({story_count} stories)'
             )
 
+        # --- Pre-flight validation (runs on both dry-run and execute) ---
+        preflight_lines = self._preflight_validate(plan_data)
+        summary_lines.extend(preflight_lines)
+
+        # Check if pre-flight found blocking errors
+        has_preflight_errors = any('❌' in ln for ln in preflight_lines)
+
         if not execute:
-            # Dry-run: just show the summary
+            # Dry-run: show the summary + pre-flight results
             summary_lines.append('')
-            summary_lines.append(
-                'DRY RUN — no tickets created. Re-run with --execute to push to Jira.'
-            )
+            if has_preflight_errors:
+                summary_lines.append(
+                    'DRY RUN — pre-flight errors detected. Fix before running with --execute.'
+                )
+            else:
+                summary_lines.append(
+                    'DRY RUN — pre-flight passed. Re-run with --execute to push to Jira.'
+                )
             return AgentResponse.success_response(
                 content='\n'.join(summary_lines),
                 metadata={
                     'state': self.state.to_dict(),
                     'jira_plan': plan_data,
                     'dry_run': True,
+                    'preflight_errors': has_preflight_errors,
+                },
+            )
+
+        # Block execution if pre-flight found errors
+        if has_preflight_errors:
+            summary_lines.append('')
+            summary_lines.append(
+                'ABORTED — pre-flight errors must be resolved before --execute.'
+            )
+            return AgentResponse.error_response(
+                '\n'.join(summary_lines),
+                metadata={
+                    'state': self.state.to_dict(),
+                    'jira_plan': plan_data,
+                    'preflight_errors': True,
                 },
             )
 
@@ -1394,6 +1422,164 @@ class FeaturePlanningOrchestrator(BaseAgent):
             self.state.errors.append(f'Plan generation exception: {e}')
             return f'PHASE 4: Jira Plan Generation — ERROR\n  {e}'
 
+    # ------------------------------------------------------------------
+    # Pre-flight validation (dry-run)
+    # ------------------------------------------------------------------
+
+    def _preflight_validate(self, plan: Dict[str, Any]) -> List[str]:
+        '''
+        Run pre-flight checks against Jira without creating any tickets.
+
+        Validates:
+          1. Jira connectivity and project existence.
+          2. Initiative key (if supplied) — exists and is type Initiative.
+          3. Issue types — Epic and Story are available in the project.
+          4. Components — every component referenced in the plan exists.
+          5. Assignees — flags email-style values that will be skipped.
+          6. Required fields — components present on every epic/story.
+
+        Input:
+            plan: The loaded plan dict (same structure as state.jira_plan).
+
+        Output:
+            List of human-readable status/warning/error lines.
+        '''
+        lines: List[str] = []
+        errors: List[str] = []
+        warnings: List[str] = []
+        project_key = plan.get('project_key', '')
+
+        # --- 1. Connect to Jira and validate project ---
+        try:
+            from tools.jira_tools import get_jira
+            jira = get_jira()
+            lines.append(f'  ✅ Jira connection: OK')
+        except Exception as e:
+            errors.append(f'  ❌ Jira connection FAILED: {e}')
+            # Can't proceed with further checks without a connection
+            return ['\nPre-flight Validation:'] + errors
+
+        try:
+            import jira_utils as _ju
+            project = _ju.validate_project(jira, project_key)
+            lines.append(f'  ✅ Project {project_key}: {project.name}')
+        except Exception as e:
+            errors.append(f'  ❌ Project {project_key}: {e}')
+            return ['\nPre-flight Validation:'] + lines + errors
+
+        # --- 2. Validate Initiative key (if supplied) ---
+        initiative_key = getattr(self, '_initiative_key', '')
+        if initiative_key:
+            init_err = self._validate_initiative(initiative_key)
+            if init_err:
+                errors.append(f'  ❌ Initiative {initiative_key}: {init_err}')
+            else:
+                lines.append(f'  ✅ Initiative {initiative_key}: valid')
+        else:
+            lines.append(f'  ℹ️  Initiative: will be auto-created on --execute')
+
+        # --- 3. Verify issue types (Epic, Story, Initiative) ---
+        try:
+            available_types = {it.name.lower(): it.name for it in project.issueTypes}
+            for needed in ['Epic', 'Story']:
+                if needed.lower() in available_types:
+                    lines.append(f'  ✅ Issue type "{needed}": available')
+                else:
+                    errors.append(
+                        f'  ❌ Issue type "{needed}": NOT available in {project_key}. '
+                        f'Available: {", ".join(sorted(available_types.values()))}'
+                    )
+            # Initiative is optional — warn if missing
+            if not initiative_key and 'initiative' not in available_types:
+                warnings.append(
+                    f'  ⚠️  Issue type "Initiative" not available — '
+                    f'Epics will be created without a parent Initiative'
+                )
+        except Exception as e:
+            warnings.append(f'  ⚠️  Could not fetch issue types: {e}')
+
+        # --- 4. Verify components ---
+        try:
+            project_components = {
+                c.name.lower(): c.name
+                for c in jira.project_components(project_key)
+            }
+            # Collect all unique component names from the plan
+            plan_components: set = set()
+            for epic in plan.get('epics', []):
+                for c in (epic.get('components') or []):
+                    plan_components.add(c)
+                for story in epic.get('stories', []):
+                    for c in (story.get('components') or []):
+                        plan_components.add(c)
+
+            if plan_components:
+                for comp in sorted(plan_components):
+                    if comp.lower() in project_components:
+                        lines.append(f'  ✅ Component "{comp}": exists')
+                    else:
+                        errors.append(
+                            f'  ❌ Component "{comp}": NOT found in {project_key}. '
+                            f'Available: {", ".join(sorted(project_components.values()))}'
+                        )
+            else:
+                warnings.append(
+                    f'  ⚠️  No components specified in plan — some projects '
+                    f'require this field'
+                )
+        except Exception as e:
+            warnings.append(f'  ⚠️  Could not fetch components: {e}')
+
+        # --- 5. Check assignee format ---
+        email_assignees: set = set()
+        for epic in plan.get('epics', []):
+            a = epic.get('assignee')
+            if a and '@' in str(a) and ':' not in str(a):
+                email_assignees.add(a)
+            for story in epic.get('stories', []):
+                a = story.get('assignee')
+                if a and '@' in str(a) and ':' not in str(a):
+                    email_assignees.add(a)
+        if email_assignees:
+            for email in sorted(email_assignees):
+                warnings.append(
+                    f'  ⚠️  Assignee "{email}" is an email, not an accountId — '
+                    f'will be skipped (ticket created unassigned)'
+                )
+
+        # --- 6. Check required fields present on every ticket ---
+        for i, epic in enumerate(plan.get('epics', [])):
+            if not epic.get('summary'):
+                errors.append(f'  ❌ Epic #{i+1}: missing summary')
+            for j, story in enumerate(epic.get('stories', [])):
+                if not story.get('summary'):
+                    errors.append(
+                        f'  ❌ Epic #{i+1} Story #{j+1}: missing summary'
+                    )
+
+        # --- Assemble output ---
+        result = ['\nPre-flight Validation:']
+        result.extend(lines)
+        if warnings:
+            result.append('')
+            result.extend(warnings)
+        if errors:
+            result.append('')
+            result.extend(errors)
+
+        if errors:
+            result.append(
+                f'\n  🛑 {len(errors)} error(s) found — fix before running with --execute'
+            )
+        elif warnings:
+            result.append(
+                f'\n  ✅ Pre-flight passed with {len(warnings)} warning(s)'
+            )
+        else:
+            result.append(f'\n  ✅ Pre-flight passed — ready to --execute')
+
+        return result
+
     def _validate_initiative(self, initiative_key: str) -> Optional[str]:
         '''
         Validate that the initiative_key exists in Jira and is of type Initiative.
@@ -1422,7 +1608,9 @@ class FeaturePlanningOrchestrator(BaseAgent):
         except Exception as e:
             return f'Failed to validate initiative {initiative_key}: {e}'
 
-    def _resolve_initiative(self, project_key: str, feature_name: str) -> tuple:
+    def _resolve_initiative(self, project_key: str, feature_name: str,
+                            components: list = None,
+                            product_family: list = None) -> tuple:
         '''
         Ensure an Initiative ticket exists for this plan.
 
@@ -1434,8 +1622,11 @@ class FeaturePlanningOrchestrator(BaseAgent):
         Epics will be created without a parent Initiative in that case.
 
         Input:
-            project_key:  Jira project key (e.g. STL).
-            feature_name: Human-readable feature name for the Initiative summary.
+            project_key:   Jira project key (e.g. STL).
+            feature_name:  Human-readable feature name for the Initiative summary.
+            components:    Optional list of component names to set on the Initiative
+                           (some Jira projects require this field).
+            product_family: Optional list of product-family values (e.g. ['CN6000']).
 
         Output:
             (initiative_key, error_message) — on success error_message is None;
@@ -1468,6 +1659,8 @@ class FeaturePlanningOrchestrator(BaseAgent):
                 summary=summary,
                 issue_type='Initiative',
                 description=description,
+                components=components or None,
+                product_family=product_family or None,
             )
 
             if hasattr(result, 'is_success') and result.is_success:
@@ -1640,9 +1833,23 @@ class FeaturePlanningOrchestrator(BaseAgent):
         if product_family and isinstance(product_family, str):
             product_family = [product_family]
 
+        # Collect a representative component list for the Initiative.
+        # The STLSB sandbox (and some production projects) require the
+        # "components" field on every issue type, including Initiative.
+        # We gather the union of all epic-level components from the plan.
+        _init_components: List[str] = []
+        for _ep in plan.get('epics', []):
+            for _c in (_ep.get('components') or []):
+                if _c not in _init_components:
+                    _init_components.append(_c)
+
         # Resolve the Initiative — validate an existing one or create a new one.
         # Every execution always attaches Epics to an Initiative.
-        initiative_key, init_error = self._resolve_initiative(project_key, feature_name)
+        initiative_key, init_error = self._resolve_initiative(
+            project_key, feature_name,
+            components=_init_components or None,
+            product_family=product_family,
+        )
         if init_error:
             return AgentResponse.error_response(init_error)
 

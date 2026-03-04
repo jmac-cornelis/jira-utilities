@@ -3498,8 +3498,17 @@ def create_ticket(
         fields['description'] = _adf_from_text(description)
 
     if assignee:
-        # Jira Cloud: `id` is the accountId.
-        fields['assignee'] = {'id': assignee}
+        # Jira Cloud requires an accountId (e.g. "712020:daf767ac-..."), not
+        # an email address.  If the value looks like an email we silently
+        # drop it so the ticket is created unassigned rather than failing
+        # with "Specify a valid value for assignee".
+        if '@' in str(assignee) and ':' not in str(assignee):
+            log.warning(
+                f'Assignee "{assignee}" looks like an email, not an accountId — '
+                f'skipping assignee (ticket will be unassigned)'
+            )
+        else:
+            fields['assignee'] = {'id': assignee}
 
     if components:
         fields['components'] = [{'name': c} for c in components]

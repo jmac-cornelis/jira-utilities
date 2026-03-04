@@ -414,7 +414,17 @@ def create_ticket(
             }
         
         if assignee:
-            fields['assignee'] = {'id': assignee}
+            # Jira Cloud requires an accountId (e.g. "712020:daf767ac-..."),
+            # not an email.  If the value looks like an email we silently
+            # drop it so the ticket is created unassigned rather than failing
+            # with "Specify a valid value for assignee".
+            if '@' in str(assignee) and ':' not in str(assignee):
+                log.warning(
+                    f'Assignee "{assignee}" looks like an email, not an '
+                    f'accountId — skipping (ticket will be unassigned)'
+                )
+            else:
+                fields['assignee'] = {'id': assignee}
         
         if components:
             fields['components'] = [{'name': c} for c in components]
