@@ -1882,11 +1882,14 @@ class FeaturePlanningOrchestrator(BaseAgent):
             # Create the Epic — if an initiative_key is provided, set it as the
             # parent so the Epic appears as a child of the Initiative in Jira.
             try:
+                # Fall back to summary when description is empty — some Jira
+                # projects (e.g. STL) require a non-empty description.
+                epic_description = epic_data.get('description', '') or epic_summary
                 epic_result = create_ticket(
                     project_key=project_key,
                     summary=epic_summary,
                     issue_type='Epic',
-                    description=epic_data.get('description', ''),
+                    description=epic_description,
                     components=epic_data.get('components'),
                     labels=epic_data.get('labels'),
                     parent_key=initiative_key or None,
@@ -1928,11 +1931,13 @@ class FeaturePlanningOrchestrator(BaseAgent):
                         continue
 
                 try:
+                    # Fall back to summary when description is empty.
+                    story_description = story_data.get('description', '') or story_summary
                     story_result = create_ticket(
                         project_key=project_key,
                         summary=story_summary,
                         issue_type='Story',
-                        description=story_data.get('description', ''),
+                        description=story_description,
                         components=story_data.get('components'),
                         labels=story_data.get('labels'),
                         parent_key=epic_key,

@@ -3573,14 +3573,20 @@ def create_ticket(
         output('=' * 80)
         output('')
     except Exception as e:
-        # Handle Product Family field-ID mismatch across projects.
-        # Two scenarios:
-        #   1. The field we set is "not on the appropriate screen" → remove it.
-        #   2. A *different* PF field ID is listed as required → add it.
-        # We iterate through known IDs to find the right one.
         err_text = str(e)
-        _pf_retry = False
+        _needs_retry = False
 
+        # --- Handle missing description ---
+        # Some Jira projects require a non-empty description.  If the
+        # error says "Description is required" and we didn't set one,
+        # auto-fill with the summary text and flag for retry.
+        if 'Description is required' in err_text and 'description' not in fields:
+            log.warning('Description required but not provided — using summary as description')
+            output('  ⚠️  Description required — auto-filling with summary text')
+            fields['description'] = _adf_from_text(summary)
+            _needs_retry = True
+
+        # --- Handle Product Family field-ID mismatch ---
         if _pf_values:
             _rejected_ids = [fid for fid in _PF_FIELD_IDS if fid in err_text and fid in fields]
             _required_ids = [fid for fid in _PF_FIELD_IDS if fid in err_text and fid not in fields]
@@ -3594,7 +3600,7 @@ def create_ticket(
                     log.info(f'Product Family field ({fid}) required — adding')
                     output(f'  ℹ️  Product Family field ({fid}) required — adding')
                     fields[fid] = _pf_values
-                _pf_retry = True
+                _needs_retry = True
 
             # If we only removed a field but the error didn't mention the
             # alternate, proactively try the next known ID.
@@ -3606,8 +3612,8 @@ def create_ticket(
                         fields[fid] = _pf_values
                         break
 
-        if _pf_retry:
-            log.info('Retrying create_issue with corrected Product Family field(s)')
+        if _needs_retry:
+            log.info('Retrying create_issue with corrected fields')
             try:
                 issue = jira.create_issue(fields=fields)
                 output(f'Created: {issue.key}')
@@ -3616,7 +3622,7 @@ def create_ticket(
                 output('')
                 return
             except Exception as e2:
-                log.error(f'Failed to create ticket (PF retry): {e2}')
+                log.error(f'Failed to create ticket (retry): {e2}')
                 raise
         log.error(f'Failed to create ticket: {e}')
         raise

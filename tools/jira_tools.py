@@ -464,33 +464,48 @@ def create_ticket(
         try:
             issue = jira.create_issue(fields=fields)
         except Exception as field_err:
-            # Handle Product Family field-ID mismatch across projects.
+            err_text = str(field_err)
+            _needs_retry = False
+
+            # --- Handle missing description ---
+            # Some Jira projects require a non-empty description.  If the
+            # error says "Description is required" and we didn't set one,
+            # auto-fill with the summary text and flag for retry.
+            if 'Description is required' in err_text and 'description' not in fields:
+                log.warning('Description required but not provided — using summary as description')
+                fields['description'] = {
+                    'type': 'doc',
+                    'version': 1,
+                    'content': [
+                        {
+                            'type': 'paragraph',
+                            'content': [
+                                {'type': 'text', 'text': summary}
+                            ]
+                        }
+                    ]
+                }
+                _needs_retry = True
+
+            # --- Handle Product Family field-ID mismatch ---
             # Two scenarios:
             #   1. The field we set is "not on the appropriate screen" → remove it.
             #   2. A *different* PF field ID is listed as required → add it.
-            # We iterate through known IDs to find the right one.
-            err_text = str(field_err)
-            _pf_retry = False
-
             if _pf_values:
-                # Detect which PF field IDs appear in the error message
                 _rejected_ids = [fid for fid in _PF_FIELD_IDS if fid in err_text and fid in fields]
                 _required_ids = [fid for fid in _PF_FIELD_IDS if fid in err_text and fid not in fields]
 
                 if _rejected_ids or _required_ids:
-                    # Remove any rejected IDs
                     for fid in _rejected_ids:
                         log.warning(f'Product Family field ({fid}) rejected — removing')
                         del fields[fid]
-                    # Add any required IDs that we haven't set yet
                     for fid in _required_ids:
                         log.info(f'Product Family field ({fid}) required — adding')
                         fields[fid] = _pf_values
-                    _pf_retry = True
+                    _needs_retry = True
 
-                # Also handle the case where the error only mentions the
-                # field we set (rejected) but doesn't mention the alternate.
-                # In that case, try the next known ID.
+                # If we only removed a field but the error didn't mention the
+                # alternate, proactively try the next known ID.
                 if _rejected_ids and not _required_ids:
                     for fid in _PF_FIELD_IDS:
                         if fid not in fields and fid not in _rejected_ids:
@@ -498,12 +513,12 @@ def create_ticket(
                             fields[fid] = _pf_values
                             break
 
-            if _pf_retry:
-                log.info('Retrying create_issue with corrected Product Family field(s)')
+            if _needs_retry:
+                log.info('Retrying create_issue with corrected fields')
                 try:
                     issue = jira.create_issue(fields=fields)
                 except Exception as retry_err:
-                    log.error(f'Failed to create ticket (PF retry): {retry_err}')
+                    log.error(f'Failed to create ticket (retry): {retry_err}')
                     raise
             else:
                 raise
