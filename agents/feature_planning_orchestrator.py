@@ -406,6 +406,18 @@ class FeaturePlanningOrchestrator(BaseAgent):
         # --force skips interactive duplicate-ticket confirmation prompts.
         self._force = input_data.get('force', False)
 
+        # --feature-tag overrides the auto-generated [Tag] prefix for Epics.
+        # If set, this value is used instead of the computed tag.
+        feature_tag = input_data.get('feature_tag', None)
+        if feature_tag:
+            # Ensure it's wrapped in brackets
+            feature_tag = feature_tag.strip()
+            if not feature_tag.startswith('['):
+                feature_tag = f'[{feature_tag}]'
+            self._feature_tag_override = feature_tag
+        else:
+            self._feature_tag_override = ''
+
         # Allow callers to set the output directory at run-time
         output_dir = input_data.get('output_dir', '')
         if output_dir:
@@ -502,14 +514,19 @@ class FeaturePlanningOrchestrator(BaseAgent):
         execute: bool = False,
     ) -> AgentResponse:
         '''
-        Load a plan.json from disk and optionally execute it (push to Jira).
+        Load a plan from disk and optionally execute it (push to Jira).
+
+        Accepts JSON, CSV, or Excel (.xlsx) plan files.  CSV and Excel files
+        are auto-converted to the feature-plan JSON dict using the reverse-
+        direction helpers in plan_export_tools (supports both flat and indented
+        table formats).
 
         When --execute is NOT set this is a dry-run: the plan is loaded,
         validated, and a summary is printed.  When --execute IS set the
         tickets are created in Jira via _phase_execution().
 
         Input:
-            plan_file:   Path to a plan.json file produced by a prior run.
+            plan_file:   Path to a plan file (.json, .csv, or .xlsx).
             project_key: Target Jira project key (used to override the
                          project_key inside the JSON if they differ).
             execute:     If True, actually create tickets in Jira.
@@ -521,26 +538,50 @@ class FeaturePlanningOrchestrator(BaseAgent):
 
         if not plan_file:
             return AgentResponse.error_response(
-                'No --plan-file provided. Pass the path to a plan.json.'
+                'No --plan-file provided. Pass the path to a plan file '
+                '(.json, .csv, or .xlsx).'
             )
 
-        # --- Load the plan JSON from disk ---
+        # --- Load the plan from disk ---
         if not os.path.isfile(plan_file):
             return AgentResponse.error_response(
                 f'Plan file not found: {plan_file}'
             )
 
-        try:
-            with open(plan_file, 'r', encoding='utf-8') as fh:
-                plan_data = _json.load(fh)
-        except (_json.JSONDecodeError, OSError) as e:
-            return AgentResponse.error_response(
-                f'Failed to read plan file {plan_file}: {e}'
-            )
+        # Determine file type and load accordingly
+        _ext = os.path.splitext(plan_file)[1].lower()
+
+        if _ext in ('.csv', '.xlsx', '.xls'):
+            # ---- CSV / Excel input: convert to plan dict via plan_export_tools ----
+            try:
+                from tools.plan_export_tools import plan_file_to_json
+                plan_data = plan_file_to_json(
+                    plan_file,
+                    project_key=project_key or '',
+                )
+                log.info(
+                    f'Converted {_ext} plan file to JSON: '
+                    f'{plan_data.get("total_tickets", 0)} tickets '
+                    f'({plan_data.get("total_epics", 0)} epics, '
+                    f'{plan_data.get("total_stories", 0)} stories)'
+                )
+            except Exception as e:
+                return AgentResponse.error_response(
+                    f'Failed to convert {_ext} plan file {plan_file}: {e}'
+                )
+        else:
+            # ---- JSON input (original path) ----
+            try:
+                with open(plan_file, 'r', encoding='utf-8') as fh:
+                    plan_data = _json.load(fh)
+            except (_json.JSONDecodeError, OSError) as e:
+                return AgentResponse.error_response(
+                    f'Failed to read plan file {plan_file}: {e}'
+                )
 
         if not isinstance(plan_data, dict) or 'epics' not in plan_data:
             return AgentResponse.error_response(
-                f'Invalid plan JSON — expected a dict with an "epics" key. '
+                f'Invalid plan data — expected a dict with an "epics" key. '
                 f'Got top-level keys: {list(plan_data.keys()) if isinstance(plan_data, dict) else type(plan_data).__name__}'
             )
 
@@ -1431,12 +1472,15 @@ class FeaturePlanningOrchestrator(BaseAgent):
         Run pre-flight checks against Jira without creating any tickets.
 
         Validates:
-          1. Jira connectivity and project existence.
-          2. Initiative key (if supplied) — exists and is type Initiative.
-          3. Issue types — Epic and Story are available in the project.
-          4. Components — every component referenced in the plan exists.
-          5. Assignees — flags email-style values that will be skipped.
-          6. Required fields — components present on every epic/story.
+           1. Jira connectivity and project existence.
+           2. Initiative key (if supplied) — exists and is type Initiative.
+           3. Issue types — Epic and Story are available in the project.
+           4. Components — every component referenced in the plan exists.
+          4b. Product Family — each value is a valid option in the project.
+           5. Assignees — resolves display names / emails to accountIds.
+           6. Required fields — summary present on every epic/story.
+           7. Duplicates — warns about existing tickets with similar summaries.
+           8. Tag prefix — previews the [Tag] that will be applied to summaries.
 
         Input:
             plan: The loaded plan dict (same structure as state.jira_plan).
@@ -1530,22 +1574,89 @@ class FeaturePlanningOrchestrator(BaseAgent):
         except Exception as e:
             warnings.append(f'  ⚠️  Could not fetch components: {e}')
 
-        # --- 5. Check assignee format ---
-        email_assignees: set = set()
-        for epic in plan.get('epics', []):
-            a = epic.get('assignee')
-            if a and '@' in str(a) and ':' not in str(a):
-                email_assignees.add(a)
-            for story in epic.get('stories', []):
-                a = story.get('assignee')
-                if a and '@' in str(a) and ':' not in str(a):
-                    email_assignees.add(a)
-        if email_assignees:
-            for email in sorted(email_assignees):
-                warnings.append(
-                    f'  ⚠️  Assignee "{email}" is an email, not an accountId — '
-                    f'will be skipped (ticket created unassigned)'
+        # --- 4b. Validate Product Family values ---
+        # The Product Family custom field is a multi-select whose allowed
+        # values vary by project.  We fetch the createmeta for Epic (the
+        # first issue type we create) and check each plan value against
+        # the allowed options.  This catches typos and combined values
+        # like "CN5000; CN6000" that should have been split into two
+        # separate entries.
+        plan_pf = plan.get('product_family') or []
+        if isinstance(plan_pf, str):
+            plan_pf = [v.strip() for v in plan_pf.split(';') if v.strip()]
+        if plan_pf:
+            try:
+                # Known Product Family custom-field IDs (sandbox / production)
+                _PF_FIELD_IDS = ['customfield_28434', 'customfield_28382']
+                create_meta = jira.createmeta(
+                    projectKeys=project_key,
+                    expand='projects.issuetypes.fields'
                 )
+                # Locate the PF field in the first issue type that has it
+                allowed_pf_values: set = set()
+                _pf_field_found = ''
+                if create_meta.get('projects'):
+                    for it in create_meta['projects'][0].get('issuetypes', []):
+                        it_fields = it.get('fields', {})
+                        for fid in _PF_FIELD_IDS:
+                            if fid in it_fields:
+                                for av in it_fields[fid].get('allowedValues', []):
+                                    allowed_pf_values.add(av.get('value', ''))
+                                _pf_field_found = fid
+                                break
+                        if allowed_pf_values:
+                            break
+
+                if allowed_pf_values:
+                    for pf_val in plan_pf:
+                        if pf_val in allowed_pf_values:
+                            lines.append(
+                                f'  ✅ Product Family "{pf_val}": valid'
+                            )
+                        else:
+                            errors.append(
+                                f'  ❌ Product Family "{pf_val}": NOT a valid '
+                                f'option. Allowed: '
+                                f'{", ".join(sorted(allowed_pf_values))}'
+                            )
+                elif _pf_field_found:
+                    warnings.append(
+                        f'  ⚠️  Product Family field ({_pf_field_found}) found '
+                        f'but has no allowedValues — skipping validation'
+                    )
+                else:
+                    warnings.append(
+                        f'  ⚠️  Product Family custom field not found in '
+                        f'createmeta — skipping validation'
+                    )
+            except Exception as e:
+                warnings.append(
+                    f'  ⚠️  Could not validate Product Family values: {e}'
+                )
+        else:
+            lines.append(
+                f'  ℹ️  Product Family: not specified in plan'
+            )
+
+        # --- 5. Resolve assignees via UserResolver ---
+        # Transparently resolve human-readable assignee strings (display names,
+        # emails, usernames) to Jira Cloud accountIds.  This modifies the plan
+        # dict in-place so that _phase_execution() receives valid accountIds.
+        try:
+            from jira_utils import get_user_resolver
+            resolver = get_user_resolver()
+            project_key = plan.get('project_key', '')
+            resolver.resolve_plan(plan, project_key=project_key)
+            # Append the resolution report to the preflight output
+            resolution_lines = resolver.format_resolution_report()
+            lines.extend(resolution_lines)
+        except ImportError:
+            warnings.append(
+                '  ⚠️  jira_utils.get_user_resolver not available — '
+                'assignee resolution skipped'
+            )
+        except Exception as e:
+            warnings.append(f'  ⚠️  Assignee resolution error: {e}')
 
         # --- 6. Check required fields present on every ticket ---
         for i, epic in enumerate(plan.get('epics', [])):
@@ -1556,6 +1667,93 @@ class FeaturePlanningOrchestrator(BaseAgent):
                     errors.append(
                         f'  ❌ Epic #{i+1} Story #{j+1}: missing summary'
                     )
+
+        # --- 7. Check for duplicate tickets in Jira ---
+        # Uses _check_duplicate() which does a JQL summary~"..." search.
+        # This gives the user visibility into what already exists before
+        # they commit to --execute.
+        try:
+            dup_count = 0
+            for i, epic in enumerate(plan.get('epics', [])):
+                epic_summary = epic.get('summary', '')
+                if epic_summary:
+                    dups = self._check_duplicate(project_key, epic_summary, 'Epic')
+                    if dups:
+                        dup_count += 1
+                        dup_keys = ', '.join(
+                            f'{d.get("key", "?")} [{d.get("status", "?")}]'
+                            for d in dups[:3]
+                        )
+                        warnings.append(
+                            f'  ⚠️  Epic #{i+1} "{epic_summary}": '
+                            f'possible duplicate(s): {dup_keys}'
+                        )
+
+                for j, story in enumerate(epic.get('stories', [])):
+                    story_summary = story.get('summary', '')
+                    if story_summary:
+                        dups = self._check_duplicate(
+                            project_key, story_summary, 'Story'
+                        )
+                        if dups:
+                            dup_count += 1
+                            dup_keys = ', '.join(
+                                f'{d.get("key", "?")} [{d.get("status", "?")}]'
+                                for d in dups[:3]
+                            )
+                            warnings.append(
+                                f'  ⚠️  Epic #{i+1} Story #{j+1} '
+                                f'"{story_summary}": '
+                                f'possible duplicate(s): {dup_keys}'
+                            )
+
+            if dup_count:
+                lines.append(
+                    f'  ℹ️  {dup_count} ticket(s) have possible duplicates '
+                    f'in Jira (see warnings below)'
+                )
+            else:
+                lines.append('  ✅ No duplicate tickets found')
+        except Exception as e:
+            warnings.append(f'  ⚠️  Duplicate check error: {e}')
+
+        # --- 8. Preview [Tag] prefix that will be applied to ALL summaries ---
+        # A single tag is derived from the feature/initiative name and applied
+        # uniformly to every Epic and Story summary.  Override with --feature-tag.
+        feature_name = plan.get('feature_name', '')
+        feature_tag = self._make_prefix_tag(feature_name)
+
+        tag_lines: List[str] = []
+        tag_lines.append(f'  Summary Prefix Tag: {feature_tag or "(none)"}')
+        tag_lines.append(f'    (derived from feature name: "{feature_name}")')
+
+        epic_count = len(plan.get('epics', []))
+        story_total = sum(
+            len(e.get('stories', [])) for e in plan.get('epics', [])
+        )
+        tag_lines.append(
+            f'    Applied to {epic_count} epic(s) and {story_total} story/stories'
+        )
+
+        # Show a few examples so the user can verify
+        for i, epic in enumerate(plan.get('epics', [])):
+            raw_summary = epic.get('summary', '')
+            prefixed = self._prefix_summary(raw_summary, feature_tag)
+            tag_lines.append(f'    Epic #{i+1}: "{prefixed}"')
+
+            for j, story in enumerate(epic.get('stories', [])):
+                story_raw = story.get('summary', '')
+                story_prefixed = self._prefix_summary(story_raw, feature_tag)
+                if j == 0:
+                    tag_lines.append(
+                        f'      e.g. Story: "{story_prefixed}"'
+                    )
+
+        lines.extend(tag_lines)
+
+        # Store the computed tag on the plan dict so _phase_execution() can
+        # use it (and so the user can override via --feature-tag).
+        plan['_feature_tag'] = feature_tag
 
         # --- Assemble output ---
         result = ['\nPre-flight Validation:']
@@ -1679,6 +1877,89 @@ class FeaturePlanningOrchestrator(BaseAgent):
             if self._is_invalid_issue_type_error(str(e)):
                 return self._warn_initiative_unavailable(project_key, str(e))
             return ('', f'Failed to create Initiative: {e}')
+
+    @staticmethod
+    def _make_prefix_tag(text: str, max_words: int = 1) -> str:
+        '''Summarize *text* into a short ``[Tag]`` prefix for ticket summaries.
+
+        A single tag is derived from the **feature/initiative name** and
+        applied uniformly to every Epic and Story summary in the plan.
+
+        The algorithm takes the first *max_words* meaningful words from *text*,
+        stripping common filler words, version strings, and product codes.
+        If *text* already starts with ``[...]`` the existing tag is returned
+        as-is.
+
+        Examples:
+            _make_prefix_tag('CN6000 K8s Networking v14.0')  → '[K8s]'
+            _make_prefix_tag('LACP (Link Aggregation)')      → '[LACP]'
+            _make_prefix_tag('[FW] Already tagged')           → '[FW]'
+
+        Input:
+            text:      The feature/initiative name.
+            max_words: Maximum number of words to include in the tag.
+
+        Output:
+            A string like ``[Tag]`` suitable for prefixing ticket summaries.
+        '''
+        if not text:
+            return ''
+
+        text = text.strip()
+
+        # If it already has a bracket prefix, extract and return it
+        if text.startswith('['):
+            end = text.find(']')
+            if end > 0:
+                return text[:end + 1]
+
+        # Strip version-like tokens (e.g. "v14.0"), product codes at the
+        # start (e.g. "CN6000"), and common noise words.
+        import re as _re
+        _noise = {'the', 'a', 'an', 'for', 'and', 'or', 'of', 'in', 'to',
+                  'with', 'on', 'at', 'by', 'from', 'mvp', 'mvp1', 'mvp2'}
+        tokens = _re.split(r'[\s/&,]+', text)
+        # Filter out noise, version strings, and product codes like CN5000/CN6000
+        meaningful = [
+            t for t in tokens
+            if t.lower() not in _noise
+            and not _re.match(r'^v?\d+(\.\d+)*$', t, _re.IGNORECASE)
+            and not _re.match(r'^[A-Z]{2,4}\d{3,5}$', t)
+            and t not in ('(', ')')
+        ]
+
+        # Strip parenthetical suffixes from tokens (e.g. "LACP" from "LACP (Link Aggregation)")
+        cleaned = []
+        for tok in meaningful:
+            # Remove leading/trailing parens
+            tok = tok.strip('()')
+            if tok:
+                cleaned.append(tok)
+
+        if not cleaned:
+            # Fallback: use the first non-empty token from the original
+            cleaned = [t.strip('()') for t in tokens if t.strip('()')]
+
+        tag = ' '.join(cleaned[:max_words])
+        return f'[{tag}]' if tag else ''
+
+    @staticmethod
+    def _prefix_summary(summary: str, prefix: str) -> str:
+        '''Prepend *prefix* to *summary* if it doesn't already have a bracket tag.
+
+        Input:
+            summary: The ticket summary string.
+            prefix:  A ``[Tag]`` string to prepend.
+
+        Output:
+            The prefixed summary, or the original if it already has a tag.
+        '''
+        if not prefix or not summary:
+            return summary
+        # Don't double-prefix if the summary already starts with [...]
+        if summary.strip().startswith('['):
+            return summary
+        return f'{prefix} {summary}'
 
     @staticmethod
     def _is_invalid_issue_type_error(msg: str) -> bool:
@@ -1868,8 +2149,19 @@ class FeaturePlanningOrchestrator(BaseAgent):
                 'parent': None,
             })
 
-        for epic_data in plan.get('epics', []):
-            epic_summary = epic_data.get('summary', '')
+        # A single feature_tag is derived from the feature/initiative name
+        # and applied uniformly to ALL Epics and Stories.
+        # The user can override via --feature-tag CLI arg.
+        feature_tag = getattr(self, '_feature_tag_override', '') or \
+            plan.get('_feature_tag', '') or self._make_prefix_tag(feature_name)
+
+        for epic_idx, epic_data in enumerate(plan.get('epics', [])):
+            epic_summary_raw = epic_data.get('summary', '')
+
+            # Prefix the epic summary with the feature tag:
+            #   feature="K8s Networking" → tag="[K8s]"
+            #   "LACP (Link Aggregation)" → "[K8s] LACP (Link Aggregation)"
+            epic_summary = self._prefix_summary(epic_summary_raw, feature_tag)
 
             # --- Duplicate check for Epic ---
             epic_dups = self._check_duplicate(project_key, epic_summary, 'Epic')
@@ -1920,7 +2212,12 @@ class FeaturePlanningOrchestrator(BaseAgent):
             epic_story_keys: List[str] = []
 
             for story_data in epic_data.get('stories', []):
-                story_summary = story_data.get('summary', '')
+                story_summary_raw = story_data.get('summary', '')
+
+                # Prefix the story summary with the same feature tag:
+                #   feature="K8s Networking" → tag="[K8s]"
+                #   "Implement LACP negotiation" → "[K8s] Implement LACP negotiation"
+                story_summary = self._prefix_summary(story_summary_raw, feature_tag)
 
                 # --- Duplicate check for Story ---
                 story_dups = self._check_duplicate(project_key, story_summary, 'Story')
