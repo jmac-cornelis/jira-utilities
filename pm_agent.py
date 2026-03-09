@@ -1511,6 +1511,7 @@ def _workflow_feature_plan(args):
                 'execute': execute,
                 'initiative_key': initiative_key,
                 'force': force,
+                'feature_tag': getattr(args, 'feature_tag', None),
                 'timeout': getattr(args, 'timeout', None),
             })
 
@@ -1634,6 +1635,7 @@ def _workflow_feature_plan(args):
             'force': force,
             'scope_doc': scope_doc,
             'output_dir': output_dir,
+            'feature_tag': getattr(args, 'feature_tag', None),
             'timeout': args.timeout,
         })
 
@@ -1936,6 +1938,13 @@ Examples:
                             'Without --force, the agent pauses and asks before '
                             'creating a ticket whose summary already exists in '
                             'the project. Used by --workflow feature-plan.')
+    parser.add_argument('--feature-tag', default=None, metavar='TAG',
+                       dest='feature_tag',
+                       help='Override the auto-generated [Tag] prefix for Epic '
+                            'summaries. E.g. --feature-tag "[K8s]". '
+                            'During dry-run the computed tags are shown so you '
+                            'can decide whether to override. '
+                            'Used by --workflow feature-plan.')
     parser.add_argument('--cleanup', default=None, metavar='CSV',
                        help='Delete all tickets listed in a created_tickets.csv '
                             'file (produced by --execute). Dry-run by default; '

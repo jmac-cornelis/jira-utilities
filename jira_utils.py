@@ -508,6 +508,400 @@ def reset_connection():
     _cached_connection = None
 
 
+# ---------------------------------------------------------------------------
+# UserResolver — transparent assignee resolution
+# ---------------------------------------------------------------------------
+
+class UserResolver:
+    '''Resolve human-readable assignee strings to Jira Cloud accountIds.
+
+    Automatically detects whether an assignee value is already an accountId,
+    an email address, a username, or a display name, and resolves it to the
+    correct accountId via the Jira REST API.
+
+    Results are cached in-memory so each unique assignee string triggers at
+    most one API call per session.
+
+    Usage:
+        resolver = get_user_resolver()
+        account_id = resolver.resolve('John Doe', project_key='STL')
+        # Returns '712020:daf767ac-...' or None
+
+        # Resolve all assignees in a feature-plan dict:
+        resolver.resolve_plan(plan_dict, project_key='STL')
+    '''
+
+    # Pattern for Jira Cloud accountIds (e.g. "712020:daf767ac-..." or
+    # "5b10ac8d82e05b22cc7d4ef5")
+    _ACCOUNT_ID_PATTERN = re.compile(
+        r'^[0-9a-f]{24}$|^\d+:[0-9a-f-]+$', re.IGNORECASE
+    )
+
+    def __init__(self, jira=None):
+        '''Initialize with an optional Jira connection.
+
+        Args:
+            jira: A JIRA client instance.  If None, the resolver will
+                  lazily obtain one via get_connection() on first use.
+        '''
+        self._jira = jira
+        # Cache: normalized_key → (accountId_or_None, display_name, status)
+        self._cache: dict = {}
+        # Resolution log for reporting
+        self._log: list = []
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def is_account_id(self, value: str) -> bool:
+        '''Check if a string looks like a Jira Cloud accountId.'''
+        if not value:
+            return False
+        return bool(self._ACCOUNT_ID_PATTERN.match(value.strip()))
+
+    def resolve(self, assignee: str, project_key: str = '') -> 'str | None':
+        '''Resolve a single assignee string to an accountId.
+
+        Args:
+            assignee: A display name, email, username, or accountId.
+            project_key: Target Jira project key (used to scope the search
+                         to users assignable in that project).
+
+        Returns:
+            The accountId string, or None if the assignee could not be
+            resolved.  Already-valid accountIds are returned as-is.
+        '''
+        if not assignee or not assignee.strip():
+            return None
+
+        assignee = assignee.strip()
+
+        # Already an accountId — pass through
+        if self.is_account_id(assignee):
+            self._record(assignee, assignee, assignee, 'already_id')
+            return assignee
+
+        # Check cache
+        cache_key = self._cache_key(assignee, project_key)
+        if cache_key in self._cache:
+            cached = self._cache[cache_key]
+            return cached[0]  # accountId or None
+
+        # Resolve via Jira API
+        account_id, display_name, status = self._search_jira(
+            assignee, project_key
+        )
+
+        # Cache the result (including negative results)
+        self._cache[cache_key] = (account_id, display_name, status)
+        self._record(assignee, account_id, display_name, status)
+
+        return account_id
+
+    def resolve_plan(self, plan: dict, project_key: str = '') -> dict:
+        '''Resolve all assignee fields in a feature-plan dict in-place.
+
+        Walks epics and stories, replacing human-readable assignee values
+        with accountIds.  Unresolvable assignees are set to None.
+
+        Args:
+            plan: The feature-plan dict (modified in-place).
+            project_key: Target Jira project key.
+
+        Returns:
+            The same plan dict (for chaining).
+        '''
+        pk = project_key or plan.get('project_key', '')
+
+        for epic in plan.get('epics', []):
+            a = epic.get('assignee')
+            if a:
+                epic['assignee'] = self.resolve(a, pk)
+
+            for story in epic.get('stories', []):
+                a = story.get('assignee')
+                if a:
+                    story['assignee'] = self.resolve(a, pk)
+
+        return plan
+
+    def get_resolution_report(self) -> list:
+        '''Return a report of all resolution attempts.
+
+        Returns:
+            List of dicts, each with keys:
+              input, resolved_to, display_name, status
+            where status is one of:
+              'resolved', 'not_found', 'ambiguous', 'already_id', 'error'
+        '''
+        return list(self._log)
+
+    def format_resolution_report(self) -> list:
+        '''Format the resolution report as human-readable lines.
+
+        Returns:
+            List of strings suitable for preflight output.
+        '''
+        if not self._log:
+            return ['  ℹ️  No assignees to resolve']
+
+        lines = ['  Assignee Resolution:']
+        resolved_count = 0
+        total_count = 0
+
+        # Deduplicate by input (show each unique assignee once)
+        seen = set()
+        for entry in self._log:
+            inp = entry['input']
+            if inp in seen:
+                continue
+            seen.add(inp)
+            total_count += 1
+
+            status = entry['status']
+            if status == 'already_id':
+                lines.append(
+                    f'    ✅ "{inp}" (already an accountId)'
+                )
+                resolved_count += 1
+            elif status == 'resolved':
+                display = entry.get('display_name') or entry.get('resolved_to', '?')
+                lines.append(
+                    f'    ✅ "{inp}" → {entry["resolved_to"]} ({display})'
+                )
+                resolved_count += 1
+            elif status == 'ambiguous':
+                lines.append(
+                    f'    ⚠️  "{inp}" → ambiguous match (will be unassigned)'
+                )
+            elif status == 'not_found':
+                lines.append(
+                    f'    ⚠️  "{inp}" → not found (will be unassigned)'
+                )
+            elif status == 'error':
+                lines.append(
+                    f'    ⚠️  "{inp}" → API error (will be unassigned)'
+                )
+
+        lines.append(
+            f'    ℹ️  {resolved_count} of {total_count} assignees resolved'
+        )
+        return lines
+
+    @property
+    def cache(self) -> dict:
+        '''The current resolution cache.'''
+        return dict(self._cache)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cache_key(assignee: str, project_key: str) -> str:
+        '''Build a normalized cache key.'''
+        return f'{assignee.strip().lower()}|{project_key.strip().upper()}'
+
+    def _get_jira(self):
+        '''Lazily obtain a Jira connection.'''
+        if self._jira is None:
+            try:
+                self._jira = get_connection()
+            except Exception as e:
+                log.warning(f'UserResolver: cannot connect to Jira: {e}')
+                return None
+        return self._jira
+
+    def _record(self, inp, resolved_to, display_name, status):
+        '''Record a resolution attempt for reporting.'''
+        self._log.append({
+            'input': inp,
+            'resolved_to': resolved_to,
+            'display_name': display_name or '',
+            'status': status,
+        })
+
+    def _search_jira(self, query: str, project_key: str) -> tuple:
+        '''Search Jira for a user matching the query string.
+
+        Returns:
+            (accountId_or_None, display_name_or_empty, status_string)
+        '''
+        jira = self._get_jira()
+        if jira is None:
+            return (None, '', 'error')
+
+        try:
+            # Use the Jira REST API to search for assignable users.
+            # IMPORTANT: On Jira Cloud the "username" positional parameter is
+            # deprecated.  We must pass the search string via the "query"
+            # keyword argument so the library sends it as the ?query= URL
+            # parameter (GET /rest/api/3/user/assignable/search?query=...).
+            candidates = []
+            try:
+                if project_key:
+                    candidates = jira.search_assignable_users_for_issues(
+                        query=query, project=project_key, maxResults=10
+                    )
+                else:
+                    candidates = jira.search_users(
+                        query=query, maxResults=10
+                    )
+            except Exception as e1:
+                log.debug(
+                    f'UserResolver: primary search failed for "{query}": {e1}'
+                )
+                # Fallback: try the general user search if project-scoped
+                # search failed (some Jira instances don't support it).
+                try:
+                    candidates = jira.search_users(
+                        query=query, maxResults=10
+                    )
+                except Exception as e2:
+                    log.warning(
+                        f'UserResolver: user search failed for "{query}": {e2}'
+                    )
+                    return (None, '', 'error')
+
+            if not candidates:
+                log.info(f'UserResolver: no match for "{query}"')
+                return (None, '', 'not_found')
+
+            # --- Scoring: find the best match ---
+            return self._pick_best_match(query, candidates)
+
+        except Exception as e:
+            log.warning(f'UserResolver: error resolving "{query}": {e}')
+            return (None, '', 'error')
+
+    def _pick_best_match(self, query: str, candidates: list) -> tuple:
+        '''Score candidates and return the best match.
+
+        Args:
+            query: The original assignee string (lowercased for comparison).
+            candidates: List of Jira user objects from the API.
+
+        Returns:
+            (accountId, displayName, status)
+        '''
+        query_lower = query.strip().lower()
+
+        scored = []
+        for user in candidates:
+            account_id = getattr(user, 'accountId', None)
+            display_name = getattr(user, 'displayName', '') or ''
+            email = getattr(user, 'emailAddress', '') or ''
+
+            if not account_id:
+                continue
+
+            score = 0
+            dn_lower = display_name.lower()
+            email_lower = email.lower()
+            email_prefix = email_lower.split('@')[0] if '@' in email_lower else ''
+
+            # Exact match on display name (highest priority)
+            if dn_lower == query_lower:
+                score = 100
+
+            # Exact match on email
+            elif email_lower == query_lower:
+                score = 95
+
+            # Exact match on email prefix (e.g. "jdoe" matches "jdoe@company.com")
+            elif email_prefix and email_prefix == query_lower:
+                score = 90
+
+            # Display name starts with query
+            elif dn_lower.startswith(query_lower):
+                score = 70
+
+            # Query is a substring of display name
+            elif query_lower in dn_lower:
+                score = 60
+
+            # Query is a substring of email
+            elif query_lower in email_lower:
+                score = 55
+
+            # Display name words match query words (e.g. "doe john" matches "John Doe")
+            else:
+                query_words = set(query_lower.split())
+                dn_words = set(dn_lower.split())
+                if query_words and query_words.issubset(dn_words):
+                    score = 65
+                elif query_words & dn_words:
+                    # Partial word overlap
+                    overlap = len(query_words & dn_words) / max(len(query_words), 1)
+                    score = int(40 * overlap)
+
+            scored.append((score, account_id, display_name))
+
+        if not scored:
+            return (None, '', 'not_found')
+
+        # Sort by score descending
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        best_score, best_id, best_name = scored[0]
+
+        # If the best score is too low, treat as not found
+        if best_score < 30:
+            log.info(
+                f'UserResolver: no confident match for "{query}" '
+                f'(best score {best_score}: "{best_name}")'
+            )
+            return (None, '', 'not_found')
+
+        # If the top two scores are very close, it's ambiguous
+        if len(scored) > 1:
+            second_score = scored[1][0]
+            if best_score > 0 and second_score >= best_score * 0.9 and best_score < 90:
+                second_name = scored[1][2]
+                log.warning(
+                    f'UserResolver: ambiguous match for "{query}": '
+                    f'"{best_name}" (score {best_score}) vs '
+                    f'"{second_name}" (score {second_score})'
+                )
+                return (None, '', 'ambiguous')
+
+        log.info(
+            f'UserResolver: resolved "{query}" → {best_id} '
+            f'({best_name}, score {best_score})'
+        )
+        return (best_id, best_name, 'resolved')
+
+
+# Module-level singleton for the UserResolver
+_user_resolver: 'UserResolver | None' = None
+
+
+def get_user_resolver() -> UserResolver:
+    '''Get or create the module-level UserResolver singleton.
+
+    Returns the same UserResolver instance on repeated calls, sharing the
+    resolution cache across all callers within the same process.
+
+    Output:
+        UserResolver instance.
+    '''
+    global _user_resolver
+    if _user_resolver is None:
+        _user_resolver = UserResolver()
+    return _user_resolver
+
+
+def reset_user_resolver():
+    '''Clear the module-level UserResolver singleton.
+
+    The next call to get_user_resolver() will create a fresh instance
+    with an empty cache.  Useful for testing.
+    '''
+    global _user_resolver
+    _user_resolver = None
+
+
 def list_projects(jira):
     '''
     List all available Jira projects.
@@ -3499,17 +3893,17 @@ def create_ticket(
         fields['description'] = _adf_from_text(description)
 
     if assignee:
-        # Jira Cloud requires an accountId (e.g. "712020:daf767ac-..."), not
-        # an email address.  If the value looks like an email we silently
-        # drop it so the ticket is created unassigned rather than failing
-        # with "Specify a valid value for assignee".
-        if '@' in str(assignee) and ':' not in str(assignee):
-            log.warning(
-                f'Assignee "{assignee}" looks like an email, not an accountId — '
-                f'skipping assignee (ticket will be unassigned)'
-            )
+        # Transparently resolve human-readable assignee strings (display names,
+        # emails, usernames) to Jira Cloud accountIds via the UserResolver.
+        resolver = get_user_resolver()
+        resolved_id = resolver.resolve(str(assignee), project_key=project_key)
+        if resolved_id:
+            fields['assignee'] = {'id': resolved_id}
         else:
-            fields['assignee'] = {'id': assignee}
+            log.warning(
+                f'Assignee "{assignee}" could not be resolved to an accountId — '
+                f'ticket will be created unassigned'
+            )
 
     if components:
         fields['components'] = [{'name': c} for c in components]

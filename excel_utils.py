@@ -5,11 +5,17 @@
 # Description: Excel utilities for concatenating and manipulating .xlsx workbooks.
 #              Designed for standalone CLI use and integration with the agent pipeline.
 #
+#              Also provides --to-plan-json to convert a flat or indented CSV/Excel
+#              file into the feature-plan JSON format used by the Jira ticket
+#              creation pipeline (see tools/plan_export_tools.py).
+#
 # Author: John Macdonald
 #
 # Usage:
 #   python excel_utils.py --concat fileA.xlsx fileB.xlsx --method merge-sheet --output merged.xlsx
 #   python excel_utils.py --concat fileA.xlsx fileB.xlsx --method add-sheet --output combined.xlsx
+#   python excel_utils.py --to-plan-json plan.csv -o plan.json
+#   python excel_utils.py --to-plan-json plan.xlsx --project XYZ -o plan.json
 #
 ##########################################################################################
 
@@ -64,6 +70,8 @@ __all__ = [
     'concat_merge_sheet', 'concat_add_sheet',
     # Conversion
     'convert_to_csv', 'convert_from_csv',
+    # Plan JSON conversion (CSV/Excel → feature-plan JSON)
+    'convert_to_plan_json',
     # Diff
     'diff_files',
     # Dashboard
@@ -1269,6 +1277,108 @@ def convert_from_csv(input_file, output_file=None, jira_base_url=DEFAULT_JIRA_BA
 
 
 # ****************************************************************************************
+# Plan JSON conversion (CSV/Excel → feature-plan JSON)
+# ****************************************************************************************
+
+def convert_to_plan_json(input_file, output_file=None, project_key='',
+                         product_family='', feature_name=''):
+    '''
+    Convert a flat or indented CSV/Excel file into the feature-plan JSON format
+    used by the Jira ticket creation pipeline.
+
+    This delegates to the core conversion logic in tools/plan_export_tools.py
+    (plan_file_to_json / write_plan_json) but provides a standalone entry point
+    that does not require the agent framework.
+
+    The table format (flat vs indented) is auto-detected from the column headers:
+      - "Indented" format has columns named ``Depth 0``, ``Depth 1``, … instead
+        of a ``key`` column.
+      - "Flat" format has a ``key`` column and optionally a ``depth`` column.
+
+    Input:
+        input_file:     Path to a .csv or .xlsx file containing a feature plan.
+        output_file:    Path for the output JSON file.  If None, derived from
+                        input_file by replacing the extension with .json.
+        project_key:    Override the Jira project key (auto-detected from rows
+                        if empty).
+        product_family: Override the product family (auto-detected if empty).
+        feature_name:   Feature name for the plan (defaults to first epic summary).
+
+    Output:
+        The resolved output file path.
+
+    Raises:
+        FileNotFoundError: If the input file does not exist.
+        ValueError: If the file extension is unsupported or the file is empty.
+        ImportError: If openpyxl is needed but not installed (for .xlsx files).
+    '''
+    log.debug(f'Entering convert_to_plan_json(input_file={input_file})')
+
+    if not os.path.exists(input_file):
+        raise ExcelFileError(f'Input file not found: {input_file}')
+
+    # Derive output path if not provided
+    if not output_file:
+        base, _ = os.path.splitext(input_file)
+        output_file = f'{base}.json'
+
+    # Import the plan_export_tools conversion functions.
+    # These live in tools/ but are pure-Python with no agent framework dependency.
+    try:
+        from tools.plan_export_tools import plan_file_to_json, write_plan_json
+    except ImportError:
+        # Fallback: if tools package is not on the path, try a direct import.
+        # This handles the case where excel_utils.py is run from the repo root.
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            'plan_export_tools',
+            os.path.join(os.path.dirname(__file__), 'tools', 'plan_export_tools.py'),
+        )
+        if _spec is None or _spec.loader is None:
+            raise ImportError(
+                'Cannot import plan_export_tools. Ensure tools/plan_export_tools.py '
+                'is available on the Python path.'
+            )
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        plan_file_to_json = _mod.plan_file_to_json
+        write_plan_json = _mod.write_plan_json
+
+    # Convert the CSV/Excel file to a plan dict
+    plan = plan_file_to_json(
+        input_file,
+        project_key=project_key,
+        product_family=product_family,
+        feature_name=feature_name,
+    )
+
+    # Write the plan dict to JSON
+    write_plan_json(plan, output_file)
+
+    # Summary output
+    n_epics = plan.get('total_epics', 0)
+    n_stories = plan.get('total_stories', 0)
+    n_tickets = plan.get('total_tickets', 0)
+
+    output('')
+    output('=' * 80)
+    output(f'Plan JSON Conversion')
+    output('=' * 80)
+    output(f'Input file:   {input_file}')
+    output(f'Output file:  {output_file}')
+    output(f'Project:      {plan.get("project_key", "?")}')
+    output(f'Feature:      {plan.get("feature_name", "?")}')
+    output(f'Product:      {plan.get("product_family", "?")}')
+    output(f'Epics:        {n_epics}')
+    output(f'Stories:      {n_stories}')
+    output(f'Total tickets:{n_tickets}')
+    output('=' * 80)
+    output('')
+
+    return output_file
+
+
+# ****************************************************************************************
 # Diff function
 # ****************************************************************************************
 
@@ -1592,6 +1702,39 @@ Examples:
         metavar='FILE',
         help='Diff two or more Excel (.xlsx) files and produce a diff report.')
 
+    parser.add_argument(
+        '--to-plan-json',
+        type=str,
+        metavar='FILE',
+        dest='to_plan_json',
+        help='Convert a flat or indented CSV/Excel file into the feature-plan '
+             'JSON format used by the Jira ticket creation pipeline.')
+
+    # --- Plan JSON option arguments ---
+    parser.add_argument(
+        '--project',
+        type=str,
+        default='',
+        dest='project_key',
+        help='Override the Jira project key (used with --to-plan-json). '
+             'Auto-detected from rows if not provided.')
+
+    parser.add_argument(
+        '--product-family',
+        type=str,
+        default='',
+        dest='product_family',
+        help='Override the product family (used with --to-plan-json). '
+             'Auto-detected from rows if not provided.')
+
+    parser.add_argument(
+        '--feature-name',
+        type=str,
+        default='',
+        dest='feature_name',
+        help='Feature name for the plan (used with --to-plan-json). '
+             'Defaults to the first epic summary.')
+
     # --- Option arguments ---
     parser.add_argument(
         '--method',
@@ -1671,6 +1814,8 @@ Examples:
         actions.append('convert_from_csv')
     if args.diff:
         actions.append('diff')
+    if args.to_plan_json:
+        actions.append('to_plan_json')
 
     if len(actions) == 0:
         parser.print_help()
@@ -1678,7 +1823,7 @@ Examples:
 
     if len(actions) > 1:
         parser.error('Only one action may be specified at a time '
-                      '(--concat, --convert-to-csv, --convert-from-csv, --diff)')
+                      '(--concat, --convert-to-csv, --convert-from-csv, --diff, --to-plan-json)')
 
     # --- Validate per-action constraints ---
     if args.concat:
@@ -1711,6 +1856,13 @@ Examples:
             if not os.path.exists(file_path):
                 parser.error(f'Input file not found: {file_path}')
 
+    if args.to_plan_json:
+        if not os.path.exists(args.to_plan_json):
+            parser.error(f'Input file not found: {args.to_plan_json}')
+        ext = os.path.splitext(args.to_plan_json)[1].lower()
+        if ext not in ('.csv', '.xlsx', '.xls'):
+            parser.error(f'--to-plan-json requires a .csv or .xlsx file, got: {ext}')
+
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
     log.info(f'+  {os.path.basename(sys.argv[0])}')
     log.info(f'+  Python Version: {sys.version.split()[0]}')
@@ -1740,6 +1892,17 @@ Examples:
             log.info(f'+    - {f}')
         if args.output_file:
             log.info(f'+  Output file: {args.output_file}')
+    elif args.to_plan_json:
+        log.info(f'+  Action: to-plan-json')
+        log.info(f'+  Input file: {args.to_plan_json}')
+        if args.output_file:
+            log.info(f'+  Output file: {args.output_file}')
+        if args.project_key:
+            log.info(f'+  Project key: {args.project_key}')
+        if args.product_family:
+            log.info(f'+  Product family: {args.product_family}')
+        if args.feature_name:
+            log.info(f'+  Feature name: {args.feature_name}')
 
     log.info('++++++++++++++++++++++++++++++++++++++++++++++')
 
@@ -1785,6 +1948,15 @@ def main():
 
         elif args.diff:
             diff_files(args.diff, args.output_file)
+
+        elif args.to_plan_json:
+            convert_to_plan_json(
+                args.to_plan_json,
+                output_file=args.output_file or None,
+                project_key=getattr(args, 'project_key', ''),
+                product_family=getattr(args, 'product_family', ''),
+                feature_name=getattr(args, 'feature_name', ''),
+            )
 
     except ExcelFileError as e:
         log.error(e.message)

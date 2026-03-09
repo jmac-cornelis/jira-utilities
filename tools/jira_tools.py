@@ -38,6 +38,8 @@ try:
         get_project_components as _get_project_components,
         _get_related_data,
         JIRA_URL,
+        # UserResolver for transparent assignee resolution
+        get_user_resolver,
         # --- New imports for expanded tool coverage ---
         list_filters as _ju_list_filters,
         run_filter as _ju_run_filter,
@@ -414,17 +416,17 @@ def create_ticket(
             }
         
         if assignee:
-            # Jira Cloud requires an accountId (e.g. "712020:daf767ac-..."),
-            # not an email.  If the value looks like an email we silently
-            # drop it so the ticket is created unassigned rather than failing
-            # with "Specify a valid value for assignee".
-            if '@' in str(assignee) and ':' not in str(assignee):
-                log.warning(
-                    f'Assignee "{assignee}" looks like an email, not an '
-                    f'accountId — skipping (ticket will be unassigned)'
-                )
+            # Transparently resolve human-readable assignee strings (display
+            # names, emails, usernames) to Jira Cloud accountIds.
+            resolver = get_user_resolver()
+            resolved_id = resolver.resolve(str(assignee), project_key=project_key)
+            if resolved_id:
+                fields['assignee'] = {'id': resolved_id}
             else:
-                fields['assignee'] = {'id': assignee}
+                log.warning(
+                    f'Assignee "{assignee}" could not be resolved to an '
+                    f'accountId — ticket will be created unassigned'
+                )
         
         if components:
             fields['components'] = [{'name': c} for c in components]

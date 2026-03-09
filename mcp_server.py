@@ -689,7 +689,9 @@ async def assign_ticket(ticket_key: str, assignee: str) -> list:
 
     Args:
         ticket_key: The Jira issue key (e.g. 'STL-1234').
-        assignee: The accountId of the user to assign, or 'unassigned' to clear.
+        assignee: The accountId, display name, email, or username of the user
+                  to assign, or 'unassigned' to clear.  Human-readable values
+                  are automatically resolved to accountIds via UserResolver.
     """
     try:
         jira = jira_utils.get_connection()
@@ -698,7 +700,17 @@ async def assign_ticket(ticket_key: str, assignee: str) -> list:
         if assignee.lower() == 'unassigned':
             issue.update(fields={'assignee': None})
         else:
-            issue.update(fields={'assignee': {'accountId': assignee}})
+            # Resolve human-readable assignee to accountId if needed
+            resolver = jira_utils.get_user_resolver()
+            # Extract project key from the ticket key (e.g. "STL" from "STL-1234")
+            project_key = ticket_key.split('-')[0] if '-' in ticket_key else ''
+            resolved_id = resolver.resolve(assignee, project_key=project_key)
+            if resolved_id:
+                issue.update(fields={'assignee': {'accountId': resolved_id}})
+            else:
+                return _error_result(
+                    f'Could not resolve assignee "{assignee}" to a Jira accountId'
+                )
 
         return _json_result({
             'key': ticket_key,
