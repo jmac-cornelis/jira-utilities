@@ -690,6 +690,7 @@ class TicketMonitorAgent(BaseAgent):
 
                 entry = {
                     'key': ticket.get('key', '?'),
+                    'issue_type': issue_type,
                     'summary': ticket.get('summary', ''),
                     'status': ticket.get('status', ''),
                     'priority': ticket.get('priority', ''),
@@ -747,12 +748,15 @@ class TicketMonitorAgent(BaseAgent):
             lines.append(f'  {issue_type} ({len(entries)} tickets, {flagged_count} flagged)')
             lines.append(f'  {"-" * 76}')
 
-            key_w, status_w, pri_w, assignee_w = 14, 14, 14, 18
+            key_w, type_w, status_w, pri_w, assignee_w = 14, 12, 14, 14, 18
             lines.append(
-                f'  {"Key":<{key_w}} {"Status":<{status_w}} '
+                f'  {"Key":<{key_w}} {"Type":<{type_w}} {"Status":<{status_w}} '
                 f'{"Priority":<{pri_w}} {"Assignee":<{assignee_w}} Missing'
             )
-            lines.append(f'  {"—" * key_w} {"—" * status_w} {"—" * pri_w} {"—" * assignee_w} {"—" * 16}')
+            lines.append(
+                f'  {"—" * key_w} {"—" * type_w} {"—" * status_w} '
+                f'{"—" * pri_w} {"—" * assignee_w} {"—" * 16}'
+            )
 
             for entry in entries:
                 flag = '⚠️ ' if entry['flagged'] else '   '
@@ -764,12 +768,13 @@ class TicketMonitorAgent(BaseAgent):
                 missing_str = ' '.join(missing_parts) if missing_parts else '✓'
 
                 key_str = entry['key'][:key_w]
+                type_str = entry.get('issue_type', issue_type)[:type_w]
                 status_str = entry['status'][:status_w]
                 pri_str = entry['priority'][:pri_w]
                 assignee_str = (entry['assignee'] or 'Unassigned')[:assignee_w]
 
                 lines.append(
-                    f'{flag}{key_str:<{key_w}} {status_str:<{status_w}} '
+                    f'{flag}{key_str:<{key_w}} {type_str:<{type_w}} {status_str:<{status_w}} '
                     f'{pri_str:<{pri_w}} {assignee_str:<{assignee_w}} {missing_str}'
                 )
 
