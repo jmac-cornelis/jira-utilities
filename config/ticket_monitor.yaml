@@ -1,0 +1,44 @@
+project: STL
+poll_interval_minutes: 5
+
+validation_rules:
+  Bug:
+    required:
+      - affectedVersion
+      - components
+      - priority
+      - description
+    warn:
+      - assignee
+      - labels
+  Story:
+    required:
+      - components
+      - fixVersions
+    warn:
+      - assignee
+  Epic:
+    required:
+      - description
+      - fixVersions
+    warn:
+      - components
+  Sub-task:
+    required: []
+    warn: []
+
+learning:
+  enabled: true
+  min_observations: 20
+  confidence_thresholds:
+    auto_fill: 0.90
+    suggest: 0.50
+    flag_only: 0.00
+  feedback_detection: true
+  keyword_extraction: true
+  reporter_profiling: true
+
+notifications:
+  jira_comment: true
+  mention_reporter: true
+  slack_webhook: null

@@ -1,0 +1,21 @@
+project: STL
+releases:
+  - "12.1.1.x"
+  - "12.2.0.x"
+schedule: "0 9 * * *"
+track_priorities:
+  - "P0-Stopper"
+  - "P1-Critical"
+closed_statuses:
+  - "Closed"
+  - "Done"
+  - "Resolved"
+
+learning:
+  cycle_time_window_days: 90
+  stale_threshold_multiplier: 2.0
+  velocity_window_days: 14
+
+output:
+  format: table
+  slack_webhook: null
