@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from tools.base import BaseTool, ToolResult, tool
+from core.tickets import issue_to_dict
 
 # Load environment variables
 load_dotenv()
@@ -844,44 +845,15 @@ def get_related_tickets(
             limit=limit,
         )
 
-        # Convert raw issue dicts returned by _get_related_data() into the
-        # flat dict format expected by ToolResult consumers.
         tickets = []
         for item in ordered:
             raw = item.get('issue', {})
-            fields = raw.get('fields', {})
-            issue_type = fields.get('issuetype', {}) or {}
-            status = fields.get('status', {}) or {}
-            priority = fields.get('priority', {}) or {}
-            assignee = fields.get('assignee', {}) or {}
-            reporter = fields.get('reporter', {}) or {}
-            fix_versions = fields.get('fixVersions', []) or []
-            components = fields.get('components', []) or []
-            labels = fields.get('labels', []) or []
-
-            tickets.append({
-                'key': raw.get('key', ''),
-                'id': raw.get('id', ''),
-                'summary': fields.get('summary', ''),
-                'description': _extract_description(fields.get('description')),
-                'type': issue_type.get('name'),
-                'status': status.get('name'),
-                'priority': priority.get('name'),
-                'assignee': assignee.get('displayName') if assignee else None,
-                'assignee_id': assignee.get('accountId') if assignee else None,
-                'reporter': reporter.get('displayName') if reporter else None,
-                'created': fields.get('created'),
-                'updated': fields.get('updated'),
-                'fix_versions': [v.get('name', '') for v in fix_versions],
-                'components': [c.get('name', '') for c in components],
-                'labels': labels,
-                'url': f'{JIRA_URL}/browse/{raw.get("key", "")}',
-                # Extra traversal metadata from _get_related_data()
-                'depth': item.get('depth', 0),
-                'via': item.get('via'),
-                'relation': item.get('relation'),
-                'from_key': item.get('from_key'),
-            })
+            ticket = issue_to_dict(raw)
+            ticket['depth'] = item.get('depth', 0)
+            ticket['via'] = item.get('via')
+            ticket['relation'] = item.get('relation')
+            ticket['from_key'] = item.get('from_key')
+            tickets.append(ticket)
 
         return ToolResult.success(tickets, count=len(tickets), root_ticket=ticket_key)
 
@@ -967,7 +939,7 @@ def run_filter(filter_id: str, limit: int = 50) -> ToolResult:
         # Do NOT pass dump_file/dump_format so data stays in memory.
         issues = _ju_run_filter(jira, filter_id, limit=limit)
 
-        tickets = [_raw_issue_to_dict(iss) for iss in (issues or [])]
+        tickets = [issue_to_dict(iss) for iss in (issues or [])]
 
         return ToolResult.success(tickets, count=len(tickets), filter_id=filter_id)
 
@@ -1003,7 +975,7 @@ def run_jql_query(jql: str, limit: int = 50) -> ToolResult:
         # Do NOT pass dump_file/dump_format so data stays in memory.
         issues = _ju_run_jql_query(jira, jql, limit=limit)
 
-        tickets = [_raw_issue_to_dict(iss) for iss in (issues or [])]
+        tickets = [issue_to_dict(iss) for iss in (issues or [])]
 
         return ToolResult.success(tickets, count=len(tickets), jql=jql)
 
@@ -1468,98 +1440,11 @@ def bulk_update_tickets(
 # ****************************************************************************************
 
 def _issue_to_dict(issue) -> Dict[str, Any]:
-    '''Convert a Jira issue to a dictionary.'''
-    fields = issue.fields
-    
-    # Extract common fields safely
-    issue_type = getattr(fields, 'issuetype', None)
-    status = getattr(fields, 'status', None)
-    priority = getattr(fields, 'priority', None)
-    assignee = getattr(fields, 'assignee', None)
-    reporter = getattr(fields, 'reporter', None)
-    
-    fix_versions = getattr(fields, 'fixVersions', []) or []
-    components = getattr(fields, 'components', []) or []
-    labels = getattr(fields, 'labels', []) or []
-    
-    return {
-        'key': issue.key,
-        'id': issue.id,
-        'summary': getattr(fields, 'summary', ''),
-        'description': _extract_description(getattr(fields, 'description', None)),
-        'type': issue_type.name if issue_type else None,
-        'status': status.name if status else None,
-        'priority': priority.name if priority else None,
-        'assignee': assignee.displayName if assignee else None,
-        'assignee_id': assignee.accountId if assignee else None,
-        'reporter': reporter.displayName if reporter else None,
-        'created': getattr(fields, 'created', None),
-        'updated': getattr(fields, 'updated', None),
-        'fix_versions': [v.name for v in fix_versions],
-        'components': [c.name for c in components],
-        'labels': labels,
-        'url': f'{JIRA_URL}/browse/{issue.key}'
-    }
+    return issue_to_dict(issue)
 
 
-def _raw_issue_to_dict(raw: dict) -> Dict[str, Any]:
-    '''
-    Convert a raw REST API issue dict (from run_jql_query / run_filter)
-    into the flat dict format used by ToolResult consumers.
-
-    Unlike _issue_to_dict() which works with jira-python Resource objects,
-    this helper operates on plain dicts returned by the REST API.
-    '''
-    fields = raw.get('fields', {}) or {}
-    issue_type = fields.get('issuetype', {}) or {}
-    status = fields.get('status', {}) or {}
-    priority = fields.get('priority', {}) or {}
-    assignee = fields.get('assignee', {}) or {}
-    reporter = fields.get('reporter', {}) or {}
-    fix_versions = fields.get('fixVersions', []) or []
-    components = fields.get('components', []) or []
-    labels = fields.get('labels', []) or []
-
-    return {
-        'key': raw.get('key', ''),
-        'id': raw.get('id', ''),
-        'summary': fields.get('summary', ''),
-        'description': _extract_description(fields.get('description')),
-        'type': issue_type.get('name'),
-        'status': status.get('name'),
-        'priority': priority.get('name'),
-        'assignee': assignee.get('displayName') if assignee else None,
-        'assignee_id': assignee.get('accountId') if assignee else None,
-        'reporter': reporter.get('displayName') if reporter else None,
-        'created': fields.get('created'),
-        'updated': fields.get('updated'),
-        'fix_versions': [v.get('name', '') for v in fix_versions],
-        'components': [c.get('name', '') for c in components],
-        'labels': labels,
-        'url': f'{JIRA_URL}/browse/{raw.get("key", "")}',
-    }
-
-
-def _extract_description(description) -> str:
-    '''Extract plain text from ADF description.'''
-    if not description:
-        return ''
-    
-    if isinstance(description, str):
-        return description
-    
-    # Handle ADF format
-    if isinstance(description, dict):
-        content = description.get('content', [])
-        text_parts = []
-        for block in content:
-            if block.get('type') == 'paragraph':
-                for item in block.get('content', []):
-                    if item.get('type') == 'text':
-                        text_parts.append(item.get('text', ''))
-        return '\n'.join(text_parts)
-    
-    return str(description)
+def _raw_issue_to_dict(raw: dict[str, Any]) -> Dict[str, Any]:
+    return issue_to_dict(raw)
 
 
 # ****************************************************************************************
