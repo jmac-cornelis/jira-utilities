@@ -182,14 +182,27 @@ jobs:
           echo "Report site contents:"
           find report-site -type f | head -30
 
+      - name: Prepare gh-pages deploy
+        if: always()
+        run: |
+          # Clone existing gh-pages content so we don't clobber other branches' reports
+          git fetch origin gh-pages:gh-pages || true
+          mkdir -p deploy-root
+          git worktree add deploy-root gh-pages || true
+          # Copy new report into branch-specific directory
+          rm -rf deploy-root/${{ github.ref_name }}
+          cp -r report-site deploy-root/${{ github.ref_name }}
+          echo "Deployed files:"
+          find deploy-root/${{ github.ref_name }} -type f | head -30
+
       - name: Deploy report to gh-pages branch
         if: always()
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./report-site
-          destination_dir: ${{ github.ref_name }}
-          keep_files: true
+          publish_dir: ./deploy-root
+          force_orphan: false
+          keep_files: false
 
       - name: Post report link to PR
         if: always() && github.event_name == 'pull_request'
