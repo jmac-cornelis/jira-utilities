@@ -636,6 +636,154 @@ class TicketMonitorAgent(BaseAgent):
         }
 
     # ------------------------------------------------------------------
+    # Report generation
+    # ------------------------------------------------------------------
+
+    def generate_report(
+        self,
+        project: Optional[str] = None,
+        since: Optional[str] = None,
+    ) -> AgentResponse:
+        '''
+        Query tickets and produce a categorized report grouped by issue type,
+        flagging tickets that are missing required or warned fields.
+
+        Returns:
+            AgentResponse with formatted report as content and structured
+            data in metadata.
+        '''
+        project = project or self.monitor_config.project
+        if not project:
+            return AgentResponse.error_response('No project configured.')
+
+        since_date = since
+        if since_date:
+            since_date = self._normalize_date(since_date)
+        if not since_date:
+            since_date = (
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            ).strftime('%Y-%m-%d %H:%M')
+
+        jql = f'project = {project} AND created >= "{since_date}" ORDER BY created ASC'
+        log.info('Generating report — project=%s since=%s', project, since_date)
+
+        try:
+            jira = self._get_jira()
+            raw_issues = paginated_jql_search(jira, jql, max_results=None)
+        except Exception as exc:
+            log.error('Report query failed: %s', exc)
+            return AgentResponse.error_response(f'Query failed: {exc}')
+
+        log.info('Found %d tickets for report', len(raw_issues))
+
+        tickets_by_type: Dict[str, list] = {}
+        total_flagged = 0
+
+        for raw_issue in raw_issues:
+            try:
+                ticket = issue_to_dict(raw_issue)
+                validation = validate_ticket(ticket, self.monitor_config)
+
+                issue_type = ticket.get('issue_type', 'Unknown')
+                missing_req = validation.missing_required
+                missing_warn = validation.missing_warned
+
+                entry = {
+                    'key': ticket.get('key', '?'),
+                    'summary': ticket.get('summary', ''),
+                    'status': ticket.get('status', ''),
+                    'priority': ticket.get('priority', ''),
+                    'assignee': ticket.get('assignee', 'Unassigned'),
+                    'components': ', '.join(ticket.get('components', [])) or '—',
+                    'missing_required': missing_req,
+                    'missing_warned': missing_warn,
+                    'flagged': bool(missing_req),
+                }
+
+                if missing_req:
+                    total_flagged += 1
+
+                tickets_by_type.setdefault(issue_type, []).append(entry)
+            except Exception as exc:
+                log.error('Error processing ticket for report: %s', exc)
+
+        report = self._format_report(tickets_by_type, project, since_date, total_flagged)
+
+        return AgentResponse.success_response(
+            content=report,
+            metadata={
+                'project': project,
+                'since': since_date,
+                'total_tickets': sum(len(v) for v in tickets_by_type.values()),
+                'total_flagged': total_flagged,
+                'by_type': {k: len(v) for k, v in tickets_by_type.items()},
+            },
+        )
+
+    @staticmethod
+    def _format_report(
+        tickets_by_type: Dict[str, list],
+        project: str,
+        since: str,
+        total_flagged: int,
+    ) -> str:
+        total = sum(len(v) for v in tickets_by_type.values())
+        lines: list = []
+
+        lines.append(f'Ticket Report — {project} (since {since})')
+        lines.append(f'Total: {total} tickets, {total_flagged} flagged')
+        lines.append('=' * 80)
+
+        type_order = ['Bug', 'Story', 'Epic', 'Sub-task', 'Initiative']
+        sorted_types = sorted(
+            tickets_by_type.keys(),
+            key=lambda t: type_order.index(t) if t in type_order else 999,
+        )
+
+        for issue_type in sorted_types:
+            entries = tickets_by_type[issue_type]
+            flagged_count = sum(1 for e in entries if e['flagged'])
+            lines.append('')
+            lines.append(f'  {issue_type} ({len(entries)} tickets, {flagged_count} flagged)')
+            lines.append(f'  {"-" * 76}')
+
+            key_w, status_w, pri_w, assignee_w = 14, 14, 14, 18
+            lines.append(
+                f'  {"Key":<{key_w}} {"Status":<{status_w}} '
+                f'{"Priority":<{pri_w}} {"Assignee":<{assignee_w}} Missing'
+            )
+            lines.append(f'  {"—" * key_w} {"—" * status_w} {"—" * pri_w} {"—" * assignee_w} {"—" * 16}')
+
+            for entry in entries:
+                flag = '⚠️ ' if entry['flagged'] else '   '
+                missing_parts = []
+                if entry['missing_required']:
+                    missing_parts.append(', '.join(entry['missing_required']))
+                if entry['missing_warned']:
+                    missing_parts.append(f"(warn: {', '.join(entry['missing_warned'])})")
+                missing_str = ' '.join(missing_parts) if missing_parts else '✓'
+
+                key_str = entry['key'][:key_w]
+                status_str = entry['status'][:status_w]
+                pri_str = entry['priority'][:pri_w]
+                assignee_str = (entry['assignee'] or 'Unassigned')[:assignee_w]
+
+                lines.append(
+                    f'{flag}{key_str:<{key_w}} {status_str:<{status_w}} '
+                    f'{pri_str:<{pri_w}} {assignee_str:<{assignee_w}} {missing_str}'
+                )
+
+            lines.append('')
+
+        if not tickets_by_type:
+            lines.append('')
+            lines.append('  No tickets found.')
+            lines.append('')
+
+        lines.append('=' * 80)
+        return '\n'.join(lines)
+
+    # ------------------------------------------------------------------
     # Summary builder
     # ------------------------------------------------------------------
 

@@ -99,6 +99,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help='Show current state and learning stats, then exit',
     )
+    parser.add_argument(
+        '--report',
+        action='store_true',
+        default=False,
+        help='Generate a categorized ticket report with missing-field flags',
+    )
 
     return parser
 
@@ -122,6 +128,17 @@ def main() -> int:
             status = agent.get_status()
             log.info('Current status:\n%s', json.dumps(status, indent=2, default=str))
             return 0
+
+        if args.report:
+            overrides_r: dict = {}
+            if args.project:
+                overrides_r['project'] = args.project
+            response = agent.generate_report(
+                project=overrides_r.get('project'),
+                since=args.since,
+            )
+            print(response.content)
+            return 0 if response.success else 1
 
         if args.reset_learning:
             agent.learning.reset()
