@@ -822,6 +822,138 @@ async def list_dashboards() -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
+# Tool 16: get_tickets_created_on — Tickets created on a specific date
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def get_tickets_created_on(project_key: str, date: str = '') -> list[Any]:
+    """Get all tickets created on a specific date.
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+    """
+    try:
+        from datetime import date as _date
+        from core.reporting import tickets_created_on
+
+        jira = jira_utils.get_connection()
+        target_date = date or _date.today().isoformat()
+        tickets = tickets_created_on(jira, project_key, target_date)
+        return _json_result({
+            'date': target_date,
+            'project': project_key,
+            'count': len(tickets),
+            'tickets': tickets,
+        })
+    except Exception as e:
+        log.error(f'get_tickets_created_on failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tool 17: find_bugs_missing_field — Bugs missing a required field
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def find_bugs_missing_field(
+    project_key: str,
+    field: str = 'affectedVersion',
+    date: str = '',
+) -> list[Any]:
+    """Find bugs missing a required field (e.g. affectedVersion, fixVersion).
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        field: JQL field name to check (default: affectedVersion).
+        date: If given, only flag bugs created on this date (YYYY-MM-DD).
+    """
+    try:
+        from core.reporting import bugs_missing_field
+
+        jira = jira_utils.get_connection()
+        target_date = date or None
+        result = bugs_missing_field(jira, project_key, field=field,
+                                    target_date=target_date)
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'find_bugs_missing_field failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tool 18: get_status_changes — Status transitions by actor type
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def get_status_changes(project_key: str, date: str = '') -> list[Any]:
+    """Get status transitions for a date, split by automation vs human.
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+    """
+    try:
+        from datetime import date as _date
+        from core.reporting import status_changes_by_actor
+
+        target_date = date or _date.today().isoformat()
+        result = status_changes_by_actor(project_key, target_date)
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'get_status_changes failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tool 19: daily_report — Full composite daily report
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def daily_report(
+    project_key: str,
+    date: str = '',
+    export_path: str = '',
+    export_format: str = 'excel',
+) -> list[Any]:
+    """Run a full daily report: created tickets, missing fields, status changes.
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+        export_path: If provided, export report to this file path.
+        export_format: Export format: 'excel' or 'csv' (default: excel).
+    """
+    try:
+        from datetime import date as _date
+        from core.reporting import daily_report as _daily_report
+        from core.reporting import export_daily_report
+
+        jira = jira_utils.get_connection()
+        target_date = date or _date.today().isoformat()
+        report = _daily_report(jira, project_key, target_date)
+
+        response: dict[str, Any] = {
+            'date': target_date,
+            'project': project_key,
+            'created_count': len(report.get('created_tickets', [])),
+            'flagged_bugs_count': len(report.get('bugs_missing_field', {}).get('flagged', [])),
+            'automation_changes': len(report.get('status_changes', {}).get('automation', [])),
+            'human_changes': len(report.get('status_changes', {}).get('human', [])),
+            'report': report,
+        }
+
+        if export_path:
+            path = export_daily_report(report, export_path, fmt=export_format)
+            response['export_path'] = path
+
+        return _json_result(response)
+    except Exception as e:
+        log.error(f'daily_report failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

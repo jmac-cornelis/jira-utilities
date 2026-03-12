@@ -1436,6 +1436,164 @@ def bulk_update_tickets(
 
 
 # ****************************************************************************************
+# Daily Report / Reporting Tools
+# ****************************************************************************************
+
+@tool(
+    name='get_tickets_created_on',
+    description='Find all tickets created on a specific date'
+)
+def get_tickets_created_on(project_key: str, date: str = '') -> ToolResult:
+    '''
+    Find all tickets created on a specific date.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+
+    Output:
+        ToolResult with list of ticket dicts.
+    '''
+    from datetime import date as _date
+    from core.reporting import tickets_created_on
+
+    log.debug(f'get_tickets_created_on(project_key={project_key}, date={date})')
+
+    try:
+        jira = get_jira()
+        target_date = date or _date.today().isoformat()
+        tickets = tickets_created_on(jira, project_key, target_date)
+        return ToolResult.success(tickets, count=len(tickets), date=target_date)
+    except Exception as e:
+        log.error(f'Failed to get tickets created on {date}: {e}')
+        return ToolResult.failure(f'Query failed: {e}')
+
+
+@tool(
+    name='find_bugs_missing_field',
+    description='Find bugs missing a required field like Affects Version'
+)
+def find_bugs_missing_field(
+    project_key: str,
+    field: str = 'affectedVersion',
+    date: str = '',
+) -> ToolResult:
+    '''
+    Find bugs missing a required field.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        field: JQL field name to check (affectedVersion, fixVersion, component, etc.).
+        date: If given, only bugs created on this date.  Otherwise all open bugs.
+
+    Output:
+        ToolResult with {flagged: [...], total_open_count: int, field: str}.
+    '''
+    from core.reporting import bugs_missing_field
+
+    log.debug(f'find_bugs_missing_field(project_key={project_key}, field={field}, date={date})')
+
+    try:
+        jira = get_jira()
+        target_date = date if date else None
+        result = bugs_missing_field(jira, project_key, field=field,
+                                    target_date=target_date)
+        return ToolResult.success(
+            result,
+            flagged_count=len(result['flagged']),
+            total_open_count=result['total_open_count'],
+        )
+    except Exception as e:
+        log.error(f'Failed to find bugs missing {field}: {e}')
+        return ToolResult.failure(f'Query failed: {e}')
+
+
+@tool(
+    name='get_status_changes',
+    description='Get status transitions for a date, separated by automation vs human'
+)
+def get_status_changes(project_key: str, date: str = '') -> ToolResult:
+    '''
+    Get status transitions for a date, split by automation vs human.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+
+    Output:
+        ToolResult with {automation: [...], human: [...], total: int}.
+    '''
+    from datetime import date as _date
+    from core.reporting import status_changes_by_actor
+
+    log.debug(f'get_status_changes(project_key={project_key}, date={date})')
+
+    try:
+        target_date = date or _date.today().isoformat()
+        result = status_changes_by_actor(project_key, target_date)
+        return ToolResult.success(
+            result,
+            automation_count=len(result['automation']),
+            human_count=len(result['human']),
+            total=result['total'],
+        )
+    except Exception as e:
+        log.error(f'Failed to get status changes: {e}')
+        return ToolResult.failure(f'Query failed: {e}')
+
+
+@tool(
+    name='daily_report',
+    description='Run a full daily report: created tickets, missing fields, automation changes'
+)
+def daily_report_tool(
+    project_key: str,
+    date: str = '',
+    dump_file: str = '',
+    dump_format: str = 'excel',
+) -> ToolResult:
+    '''
+    Run a full daily report with optional export.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+        dump_file: If provided, export report to this file path.
+        dump_format: Export format: "excel" or "csv" (default: excel).
+
+    Output:
+        ToolResult with full report dict.  If dump_file is given, includes
+        the export path.
+    '''
+    from datetime import date as _date
+    from core.reporting import daily_report, export_daily_report
+
+    log.debug(f'daily_report_tool(project_key={project_key}, date={date}, '
+              f'dump_file={dump_file}, dump_format={dump_format})')
+
+    try:
+        jira = get_jira()
+        target_date = date or _date.today().isoformat()
+        report = daily_report(jira, project_key, target_date)
+
+        extra_meta: Dict[str, Any] = {
+            'created_count': len(report['created_tickets']),
+            'flagged_bugs_count': len(report['bugs_missing_field']['flagged']),
+            'automation_changes': len(report['status_changes']['automation']),
+        }
+
+        if dump_file:
+            export_path = export_daily_report(report, dump_file, fmt=dump_format)
+            extra_meta['export_path'] = export_path
+
+        return ToolResult.success(report, **extra_meta)
+
+    except Exception as e:
+        log.error(f'Failed to run daily report: {e}')
+        return ToolResult.failure(f'Daily report failed: {e}')
+
+
+# ****************************************************************************************
 # Helper Functions
 # ****************************************************************************************
 
@@ -1596,3 +1754,32 @@ class JiraTools(BaseTool):
         set_labels: Optional[str] = None
     ) -> ToolResult:
         return bulk_update_tickets(input_file, set_release, set_labels)
+
+    # --- Daily reporting delegates ---
+
+    @tool(description='Get all tickets created on a specific date')
+    def get_tickets_created_on(self, project_key: str, date: str = '') -> ToolResult:
+        return get_tickets_created_on(project_key, date)
+
+    @tool(description='Find bugs missing a required field (e.g. affectedVersion)')
+    def find_bugs_missing_field(
+        self,
+        project_key: str,
+        field: str = 'affectedVersion',
+        date: str = '',
+    ) -> ToolResult:
+        return find_bugs_missing_field(project_key, field, date)
+
+    @tool(description='Get status transitions split by automation vs human')
+    def get_status_changes(self, project_key: str, date: str = '') -> ToolResult:
+        return get_status_changes(project_key, date)
+
+    @tool(description='Run a full daily report with optional export')
+    def daily_report(
+        self,
+        project_key: str,
+        date: str = '',
+        dump_file: str = '',
+        dump_format: str = 'excel',
+    ) -> ToolResult:
+        return daily_report_tool(project_key, date, dump_file, dump_format)
