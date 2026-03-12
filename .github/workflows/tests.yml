@@ -10,8 +10,6 @@ permissions:
   contents: write
   checks: write
   pull-requests: write
-  pages: write
-  id-token: write
 
 jobs:
   test:
@@ -47,16 +45,15 @@ jobs:
             --junitxml=test-results.xml \
             -v
 
-      - name: Build GitHub Pages site
+      - name: Build report site
         if: always()
         run: |
-          mkdir -p pages-site
-          
+          mkdir -p report-site
+
           python - <<'PYEOF'
           import xml.etree.ElementTree as ET
-          import os, datetime, shutil
+          import os, datetime
 
-          # Parse junit XML for test summary
           tree = ET.parse('test-results.xml')
           root = tree.getroot()
           ts = root.find('.//testsuite') or root
@@ -67,12 +64,10 @@ jobs:
           passed = tests - failures - errors - skipped
           time_taken = float(ts.get('time', 0))
 
-          # Parse coverage XML for summary
           cov_tree = ET.parse('coverage.xml')
           cov_root = cov_tree.getroot()
           line_rate = float(cov_root.get('line-rate', 0)) * 100
 
-          # Per-package coverage
           packages = []
           for pkg in cov_root.findall('.//package'):
               name = pkg.get('name', '').replace('.', '/')
@@ -91,7 +86,7 @@ jobs:
           <html>
           <head>
             <meta charset="utf-8">
-            <title>Test & Coverage Report — cornelis-jira-tools</title>
+            <title>Test & Coverage Report</title>
             <style>
               * {{ margin: 0; padding: 0; box-sizing: border-box; }}
               body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }}
@@ -170,20 +165,34 @@ jobs:
           </body>
           </html>"""
 
-          with open('pages-site/index.html', 'w') as f:
+          with open('report-site/index.html', 'w') as f:
               f.write(html)
           print(f'Summary: {passed}/{tests} passed, {line_rate:.0f}% coverage')
           PYEOF
 
-          # Copy reports into pages site
-          cp test-report.html pages-site/test-report.html
-          cp -r coverage-html pages-site/coverage
+          cp test-report.html report-site/test-report.html
+          cp -r coverage-html report-site/coverage
 
-      - name: Upload Pages artifact
+      - name: Deploy report to gh-pages branch
         if: always()
-        uses: actions/upload-pages-artifact@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: pages-site
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./report-site
+          destination_dir: ${{ github.ref_name }}
+
+      - name: Post report link to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: test-report
+          message: |
+            ## 📊 Test & Coverage Report
+            
+            **[View Full Report](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.head_ref }}/)**
+            
+            - [Detailed Test Report](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.head_ref }}/test-report.html)
+            - [Coverage Report](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.head_ref }}/coverage/)
 
       - name: Publish test results to PR
         if: always() && github.event_name == 'pull_request'
@@ -200,21 +209,3 @@ jobs:
           coverageFile: coverage.xml
           token: ${{ secrets.GITHUB_TOKEN }}
           thresholdAll: 0.75
-
-  deploy-report:
-    needs: test
-    if: always() && needs.test.result == 'success'
-    runs-on: ubuntu-latest
-    
-    permissions:
-      pages: write
-      id-token: write
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
