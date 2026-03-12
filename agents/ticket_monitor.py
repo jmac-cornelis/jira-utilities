@@ -1,0 +1,639 @@
+##########################################################################################
+#
+# Module: agents/ticket_monitor.py
+#
+# Description: Ticket Monitor Agent — watches for newly created Jira tickets,
+#              validates required fields, auto-fills when confident, flags
+#              creators when not.  Purely programmatic (no LLM).
+#
+# Author: Cornelis Networks
+#
+##########################################################################################
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from agents.base import BaseAgent, AgentConfig, AgentResponse
+from core.monitoring import (
+    MonitorConfig,
+    ValidationResult,
+    determine_actions,
+    load_monitor_config,
+    validate_ticket,
+)
+from core.queries import paginated_jql_search
+from core.tickets import issue_to_dict
+from notifications.jira_comments import JiraCommentNotifier
+from state.learning import LearningStore
+from state.monitor_state import MonitorState
+
+# Logging config — follows jira_utils.py pattern
+log = logging.getLogger(os.path.basename(sys.argv[0]))
+
+# Default config file path
+_DEFAULT_CONFIG_PATH = os.path.join('config', 'ticket_monitor.yaml')
+_DEFAULT_DB_DIR = 'state'
+
+
+class TicketMonitorAgent(BaseAgent):
+    '''
+    Agent that monitors newly created Jira tickets, validates required fields,
+    and takes action (auto-fill, suggest, or flag) based on learned patterns.
+
+    This agent is purely programmatic — no LLM is needed.  The run() method
+    orchestrates a deterministic validation + notification loop.
+    '''
+
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        db_dir: Optional[str] = None,
+        dry_run: bool = False,
+    ):
+        '''
+        Initialize the Ticket Monitor agent.
+
+        Input:
+            config_path: Path to ticket_monitor.yaml (default: config/ticket_monitor.yaml).
+            db_dir:      Directory for SQLite state databases (default: state/).
+            dry_run:     If True, validate and report but do not update tickets or
+                         post comments.
+        '''
+        resolved_config_path = config_path or _DEFAULT_CONFIG_PATH
+        if os.path.exists(resolved_config_path):
+            self.monitor_config: MonitorConfig = load_monitor_config(resolved_config_path)
+        else:
+            log.warning(
+                'Config file not found at %s — using defaults', resolved_config_path
+            )
+            self.monitor_config = MonitorConfig()
+
+        self.dry_run = dry_run
+
+        resolved_db_dir = db_dir or _DEFAULT_DB_DIR
+        Path(resolved_db_dir).mkdir(parents=True, exist_ok=True)
+
+        self.state = MonitorState(
+            db_path=os.path.join(resolved_db_dir, 'monitor_state.db')
+        )
+        self.learning = LearningStore(
+            db_path=os.path.join(resolved_db_dir, 'learning.db')
+        )
+
+        self._jira: Any = None
+        self._notifier: Optional[JiraCommentNotifier] = None
+
+        agent_config = AgentConfig(
+            name='ticket_monitor',
+            description=(
+                'Monitors newly created Jira tickets, validates required fields, '
+                'and auto-fills or flags missing data based on learned patterns.'
+            ),
+            instruction='Programmatic agent — no LLM instruction required.',
+        )
+
+        super().__init__(config=agent_config, llm=None, tools=None)
+
+    # ------------------------------------------------------------------
+    # Lazy Jira connection helpers
+    # ------------------------------------------------------------------
+
+    def _get_jira(self) -> Any:
+        '''Return (and cache) a live Jira connection.'''
+        if self._jira is None:
+            from tools.jira_tools import get_jira
+            self._jira = get_jira()
+        return self._jira
+
+    def _get_notifier(self) -> JiraCommentNotifier:
+        '''Return (and cache) the Jira comment notifier.'''
+        if self._notifier is None:
+            self._notifier = JiraCommentNotifier(self._get_jira())
+        return self._notifier
+
+    # ------------------------------------------------------------------
+    # Field-update helper for Jira Cloud
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_update_fields(field: str, value: str) -> Dict[str, Any]:
+        '''
+        Build the ``fields`` dict for a ``jira.issue(key).update(fields=...)``
+        call.  Jira Cloud expects array-of-objects for components, fixVersions,
+        and versions (affectedVersion).
+
+        Input:
+            field:  Canonical field name from the action dict (e.g. 'components').
+            value:  The predicted string value.
+
+        Output:
+            Dict suitable for ``issue.update(fields=result)``.
+        '''
+        lower = field.lower().replace('_', '').replace('-', '')
+
+        if lower in {'component', 'components'}:
+            return {'components': [{'name': value}]}
+        if lower in {'affectedversion', 'affectedversions', 'affectsversion',
+                      'affectsversions', 'versions'}:
+            return {'versions': [{'name': value}]}
+        if lower in {'fixversion', 'fixversions'}:
+            return {'fixVersions': [{'name': value}]}
+        if lower == 'priority':
+            return {'priority': {'name': value}}
+        if lower == 'labels':
+            return {'labels': [value]}
+
+        return {field: value}
+
+    # ------------------------------------------------------------------
+    # Core orchestration — implements the monitoring loop
+    # ------------------------------------------------------------------
+
+    def run(self, input_data: Any = None) -> AgentResponse:
+        '''
+        Run the ticket monitoring loop.
+
+        Input:
+            input_data: Optional dict with overrides:
+                - since (str):   ISO timestamp to use instead of last_checked.
+                - project (str): Override project from config.
+
+        Output:
+            AgentResponse with a summary of actions taken.
+        '''
+        overrides = input_data if isinstance(input_data, dict) else {}
+        project = overrides.get('project') or self.monitor_config.project
+        since_override: Optional[str] = overrides.get('since')
+
+        if not project:
+            return AgentResponse.error_response('No project configured or provided.')
+
+        log.info('TicketMonitorAgent.run() — project=%s dry_run=%s', project, self.dry_run)
+
+        stats: Dict[str, int] = {
+            'tickets_queried': 0,
+            'tickets_skipped': 0,
+            'tickets_processed': 0,
+            'auto_fills': 0,
+            'suggestions': 0,
+            'flags': 0,
+            'errors': 0,
+            'corrections_detected': 0,
+        }
+
+        try:
+            jira = self._get_jira()
+        except Exception as exc:
+            log.error('Failed to connect to Jira: %s', exc)
+            return AgentResponse.error_response(f'Jira connection failed: {exc}')
+
+        last_checked = since_override or self.state.get_last_checked(project)
+        if not last_checked:
+            last_checked = (
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            ).strftime('%Y-%m-%d %H:%M')
+
+        log.info('Querying tickets created since %s', last_checked)
+
+        jql = f'project = {project} AND created >= "{last_checked}" ORDER BY created ASC'
+        try:
+            raw_issues = paginated_jql_search(jira, jql, max_results=None)
+        except Exception as exc:
+            log.error('JQL search failed: %s', exc)
+            return AgentResponse.error_response(f'JQL search failed: {exc}')
+
+        stats['tickets_queried'] = len(raw_issues)
+        log.info('Found %d tickets since %s', len(raw_issues), last_checked)
+
+        for raw_issue in raw_issues:
+            try:
+                ticket = issue_to_dict(raw_issue)
+            except Exception as exc:
+                log.error('Failed to convert issue to dict: %s', exc)
+                stats['errors'] += 1
+                continue
+
+            ticket_key = ticket.get('key', '')
+            if not ticket_key:
+                stats['errors'] += 1
+                continue
+
+            if self.state.is_processed(ticket_key):
+                stats['tickets_skipped'] += 1
+                continue
+
+            try:
+                self._process_ticket(ticket, project, stats)
+            except Exception as exc:
+                log.error('Error processing %s: %s', ticket_key, exc, exc_info=True)
+                stats['errors'] += 1
+
+        try:
+            self._check_corrections(jira, project, last_checked, stats)
+        except Exception as exc:
+            log.error('Feedback loop error: %s', exc, exc_info=True)
+
+        self.state.set_last_checked(project)
+
+        summary = self._build_summary(stats, project)
+        log.info(summary)
+
+        return AgentResponse.success_response(
+            content=summary,
+            metadata={'stats': stats, 'project': project},
+        )
+
+    # ------------------------------------------------------------------
+    # Per-ticket processing
+    # ------------------------------------------------------------------
+
+    def _process_ticket(
+        self,
+        ticket: Dict[str, Any],
+        project: str,
+        stats: Dict[str, int],
+    ) -> None:
+        '''Validate a single ticket and execute resulting actions.'''
+        ticket_key = ticket['key']
+        log.debug('Processing %s (%s)', ticket_key, ticket.get('issue_type', '?'))
+
+        self.learning.record_ticket(ticket)
+
+        validation = validate_ticket(ticket, self.monitor_config)
+
+        if not validation.missing_required and not validation.missing_warned:
+            self.state.mark_processed(ticket_key, project=project)
+            stats['tickets_processed'] += 1
+            log.debug('%s — all fields present, no action needed', ticket_key)
+            return
+
+        validation = determine_actions(validation, self.learning, self.monitor_config)
+
+        for action in validation.actions:
+            self._execute_action(ticket_key, action, ticket, stats)
+
+        result_dict = {
+            'issue_type': validation.issue_type,
+            'missing_required': validation.missing_required,
+            'missing_warned': validation.missing_warned,
+            'actions': validation.actions,
+        }
+        self.state.mark_processed(ticket_key, project=project, result=result_dict)
+        stats['tickets_processed'] += 1
+
+    def _execute_action(
+        self,
+        ticket_key: str,
+        action: Dict[str, Any],
+        ticket: Dict[str, Any],
+        stats: Dict[str, int],
+    ) -> None:
+        '''Execute a single action (auto_fill, suggest, flag, or warn).'''
+        action_type = action.get('action', 'flag')
+        field = action.get('field', '')
+        value = action.get('value')
+        confidence = action.get('confidence', 0.0)
+
+        if action_type == 'auto_fill':
+            self._do_auto_fill(ticket_key, field, value, confidence, stats)
+        elif action_type == 'suggest':
+            self._do_suggest(ticket_key, field, value, confidence, stats)
+        elif action_type == 'flag':
+            self._do_flag(ticket_key, field, stats)
+        elif action_type == 'warn':
+            # Warnings are informational — log but don't notify.
+            log.info('%s — warn: missing optional field %s', ticket_key, field)
+        else:
+            log.warning('%s — unknown action type: %s', ticket_key, action_type)
+
+    def _do_auto_fill(
+        self,
+        ticket_key: str,
+        field: str,
+        value: Any,
+        confidence: float,
+        stats: Dict[str, int],
+    ) -> None:
+        '''Auto-fill a field on the ticket and notify.'''
+        if not value:
+            log.warning('%s — auto_fill requested but no predicted value for %s', ticket_key, field)
+            return
+
+        log.info(
+            '%s — auto_fill: %s = %s (confidence: %.0f%%)',
+            ticket_key, field, value, confidence * 100,
+        )
+
+        if self.dry_run:
+            stats['auto_fills'] += 1
+            return
+
+        try:
+            jira = self._get_jira()
+            update_fields = self._build_update_fields(field, str(value))
+            issue = jira.issue(ticket_key)
+            issue.update(fields=update_fields)
+            log.info('%s — updated field %s to %s', ticket_key, field, value)
+        except Exception as exc:
+            log.error('%s — failed to update field %s: %s', ticket_key, field, exc)
+            stats['errors'] += 1
+            return
+
+        try:
+            notifier = self._get_notifier()
+            reason = f'learned patterns (confidence {confidence:.0%})'
+            notifier.send_auto_fill(ticket_key, field, str(value), confidence, reason)
+        except Exception as exc:
+            log.error('%s — failed to post auto_fill comment: %s', ticket_key, exc)
+
+        self.learning.record_auto_fill(ticket_key, field, str(value), confidence)
+        self.learning.record_observation(ticket_key, field, str(value), str(value), correct=True)
+        stats['auto_fills'] += 1
+
+    def _do_suggest(
+        self,
+        ticket_key: str,
+        field: str,
+        value: Any,
+        confidence: float,
+        stats: Dict[str, int],
+    ) -> None:
+        '''Post a suggestion comment on the ticket.'''
+        if not value:
+            log.warning('%s — suggest requested but no predicted value for %s', ticket_key, field)
+            return
+
+        log.info(
+            '%s — suggest: %s = %s (confidence: %.0f%%)',
+            ticket_key, field, value, confidence * 100,
+        )
+
+        if self.dry_run:
+            stats['suggestions'] += 1
+            return
+
+        try:
+            notifier = self._get_notifier()
+            reason = f'similar tickets (confidence {confidence:.0%})'
+            notifier.send_suggestion(ticket_key, field, str(value), confidence, reason)
+        except Exception as exc:
+            log.error('%s — failed to post suggestion comment: %s', ticket_key, exc)
+            stats['errors'] += 1
+            return
+
+        stats['suggestions'] += 1
+
+    def _do_flag(
+        self,
+        ticket_key: str,
+        field: str,
+        stats: Dict[str, int],
+    ) -> None:
+        '''Flag a missing required field on the ticket.'''
+        log.info('%s — flag: missing required field %s', ticket_key, field)
+
+        if self.dry_run:
+            stats['flags'] += 1
+            return
+
+        try:
+            notifier = self._get_notifier()
+            notifier.send_flag(ticket_key, [field])
+        except Exception as exc:
+            log.error('%s — failed to post flag comment: %s', ticket_key, exc)
+            stats['errors'] += 1
+            return
+
+        stats['flags'] += 1
+
+    # ------------------------------------------------------------------
+    # Feedback loop — detect human corrections to auto-filled fields
+    # ------------------------------------------------------------------
+
+    def _check_corrections(
+        self,
+        jira: Any,
+        project: str,
+        last_checked: str,
+        stats: Dict[str, int],
+    ) -> None:
+        '''
+        Query tickets that were updated since last_checked and that we
+        previously auto-filled.  If a human changed the value we set,
+        record the correction so the learning store can improve.
+        '''
+        if not self.monitor_config.feedback_detection:
+            return
+
+        conn = self.learning._require_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT DISTINCT ticket_key, field, value_set
+            FROM auto_fill_log
+            WHERE corrected_by_human = 0
+            ORDER BY ticket_key
+            '''
+        )
+        auto_filled_rows = cursor.fetchall()
+
+        if not auto_filled_rows:
+            return
+
+        ticket_fields: Dict[str, List[Dict[str, str]]] = {}
+        for row in auto_filled_rows:
+            tk = str(row['ticket_key'])
+            ticket_fields.setdefault(tk, []).append({
+                'field': str(row['field']),
+                'value_set': str(row['value_set']),
+            })
+
+        ticket_keys = list(ticket_fields.keys())
+        batch_size = 50
+        for i in range(0, len(ticket_keys), batch_size):
+            batch = ticket_keys[i:i + batch_size]
+            keys_jql = ', '.join(batch)
+            jql = (
+                f'key IN ({keys_jql}) '
+                f'AND updated >= "{last_checked}"'
+            )
+            try:
+                updated_issues = paginated_jql_search(jira, jql, max_results=None)
+            except Exception as exc:
+                log.error('Feedback query failed: %s', exc)
+                continue
+
+            for raw_issue in updated_issues:
+                try:
+                    ticket = issue_to_dict(raw_issue)
+                except Exception:
+                    continue
+
+                tk = ticket.get('key', '')
+                if tk not in ticket_fields:
+                    continue
+
+                for entry in ticket_fields[tk]:
+                    af_field = entry['field']
+                    af_value = entry['value_set']
+                    current_value = self._get_current_field_value(ticket, af_field)
+
+                    if current_value and current_value != af_value:
+                        log.info(
+                            '%s — correction detected: %s changed from %s to %s',
+                            tk, af_field, af_value, current_value,
+                        )
+                        self.learning.update_from_correction(
+                            tk, af_field, af_value, current_value
+                        )
+                        stats['corrections_detected'] += 1
+
+    @staticmethod
+    def _get_current_field_value(ticket: Dict[str, Any], field: str) -> str:
+        '''
+        Extract the current value of a field from a ticket dict.
+        Handles the various key aliases produced by issue_to_dict().
+        '''
+        lower = field.lower().replace('_', '')
+
+        if field in ticket:
+            val = ticket[field]
+            if isinstance(val, list):
+                return ', '.join(str(v) for v in val) if val else ''
+            return str(val).strip() if val else ''
+
+        alias_map: Dict[str, List[str]] = {
+            'component': ['component', 'components'],
+            'components': ['component', 'components'],
+            'affectsversion': ['affects_version', 'affects_versions'],
+            'affectsversions': ['affects_version', 'affects_versions'],
+            'versions': ['affects_version', 'affects_versions'],
+            'fixversion': ['fix_version', 'fix_versions'],
+            'fixversions': ['fix_version', 'fix_versions'],
+            'priority': ['priority', 'priority_name'],
+            'labels': ['labels_csv', 'labels'],
+        }
+
+        for candidate in alias_map.get(lower, []):
+            val = ticket.get(candidate)
+            if val is not None:
+                if isinstance(val, list):
+                    return ', '.join(str(v) for v in val) if val else ''
+                return str(val).strip() if val else ''
+
+        return ''
+
+    # ------------------------------------------------------------------
+    # Learning-only mode
+    # ------------------------------------------------------------------
+
+    def run_learning_only(self, since: Optional[str] = None) -> AgentResponse:
+        '''
+        Process tickets to build the learning store without taking any actions.
+
+        Input:
+            since: Optional ISO timestamp.  Defaults to 24h ago.
+
+        Output:
+            AgentResponse with a summary of tickets processed.
+        '''
+        project = self.monitor_config.project
+        if not project:
+            return AgentResponse.error_response('No project configured.')
+
+        log.info('run_learning_only — project=%s', project)
+
+        last_checked = since
+        if not last_checked:
+            last_checked = (
+                datetime.now(timezone.utc) - timedelta(hours=24)
+            ).strftime('%Y-%m-%d %H:%M')
+
+        jql = f'project = {project} AND created >= "{last_checked}" ORDER BY created ASC'
+
+        try:
+            jira = self._get_jira()
+            raw_issues = paginated_jql_search(jira, jql, max_results=None)
+        except Exception as exc:
+            log.error('Learning-only query failed: %s', exc)
+            return AgentResponse.error_response(f'Query failed: {exc}')
+
+        processed = 0
+        errors = 0
+        for raw_issue in raw_issues:
+            try:
+                ticket = issue_to_dict(raw_issue)
+                self.learning.record_ticket(ticket)
+                processed += 1
+            except Exception as exc:
+                log.error('Failed to record ticket for learning: %s', exc)
+                errors += 1
+
+        summary = (
+            f'Learning-only complete: {processed} tickets recorded, '
+            f'{errors} errors.'
+        )
+        log.info(summary)
+        return AgentResponse.success_response(
+            content=summary,
+            metadata={'tickets_recorded': processed, 'errors': errors},
+        )
+
+    # ------------------------------------------------------------------
+    # Status / stats
+    # ------------------------------------------------------------------
+
+    def get_status(self) -> Dict[str, Any]:
+        '''
+        Return current state stats and learning stats.
+
+        Output:
+            Dict with monitor_state and learning_store statistics.
+        '''
+        return {
+            'monitor_state': self.state.get_stats(),
+            'learning_store': self.learning.get_stats(),
+            'project': self.monitor_config.project,
+            'dry_run': self.dry_run,
+        }
+
+    # ------------------------------------------------------------------
+    # Summary builder
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_summary(stats: Dict[str, int], project: str) -> str:
+        '''Build a human-readable summary string from run stats.'''
+        lines = [
+            f'Ticket Monitor run complete for project {project}:',
+            f'  Tickets queried:  {stats["tickets_queried"]}',
+            f'  Tickets skipped:  {stats["tickets_skipped"]}',
+            f'  Tickets processed:{stats["tickets_processed"]}',
+            f'  Auto-fills:       {stats["auto_fills"]}',
+            f'  Suggestions:      {stats["suggestions"]}',
+            f'  Flags:            {stats["flags"]}',
+            f'  Corrections:      {stats["corrections_detected"]}',
+            f'  Errors:           {stats["errors"]}',
+        ]
+        return '\n'.join(lines)
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+
+    def close(self) -> None:
+        '''Close database connections.'''
+        try:
+            self.state.close()
+        except Exception:
+            pass
+        try:
+            self.learning.close()
+        except Exception:
+            pass
