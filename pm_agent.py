@@ -22,11 +22,16 @@ import re
 import sys
 import os
 from datetime import date
+from typing import Any, cast
 
 from dotenv import load_dotenv
 
+from core.utils import output, validate_and_repair_csv
+
 import jira_utils
 import excel_utils
+
+jira_api = cast(Any, jira_utils)
 
 # Load environment variables
 load_dotenv()
@@ -49,27 +54,6 @@ log.addHandler(fh)
 
 # Output control
 _quiet_mode = False
-
-
-def output(message=''):
-    '''
-    Print user-facing output, respecting quiet mode.
-    '''
-    if message:
-        record = logging.LogRecord(
-            name=log.name,
-            level=logging.INFO,
-            pathname=__file__,
-            lineno=0,
-            msg=f'OUTPUT: {message}',
-            args=(),
-            exc_info=None,
-            func='output'
-        )
-        fh.emit(record)
-    
-    if not _quiet_mode:
-        print(message)
 
 
 # ****************************************************************************************
@@ -279,58 +263,23 @@ def cmd_sessions(args):
 
 
 def cmd_build_excel_map(args):
-    '''
-    Build a multi-sheet Excel workbook mapping one or more tickets and all
-    their related issues' child hierarchies.
-
-    Accepts a list of ticket keys. For each ticket, calls _get_related_data()
-    with hierarchy=1 to get the first-level children only.  These go into an
-    indented "Tickets" overview sheet with Depth 0 / Depth 1 columns.  Then
-    each first-level child gets its own sheet with unlimited child hierarchy
-    via _get_children_data().
-
-    Steps:
-        1. Connect to Jira
-        2. For each root ticket, _get_related_data(hierarchy=1) — first level only
-        3. Merge into one "Tickets" sheet with Depth 0/1 columns (deduplicating by key)
-        4. For each depth=1 ticket, _get_children_data(limit=None) — unlimited depth
-        5. Write each as a temp .xlsx via dump_tickets_to_file
-        6. Assemble all into one workbook: Tickets (indented depth 0-1) + per-ticket sheets (indented unlimited)
-        7. Cleanup temp files
-
-    Uses jira_utils functions:
-        connect_to_jira, _get_related_data, _get_children_data,
-        dump_tickets_to_file
-    '''
-    import tempfile
-    import shutil
-    from copy import copy
-
     ticket_keys = [k.upper() for k in args.ticket_keys]
-
-    log.debug(f'cmd_build_excel_map(ticket_keys={ticket_keys}, hierarchy={args.hierarchy}, limit={getattr(args, "limit", None)}, output={getattr(args, "output", None)})')
-
-    try:
-        from openpyxl import load_workbook, Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    except ImportError:
-        output('ERROR: openpyxl is required for build-excel-map. Install with: pip install openpyxl')
-        return 1
-
     hierarchy_depth = args.hierarchy
     limit = getattr(args, 'limit', None)
-    # Default output filename: first ticket key, or combined if multiple
+
     if getattr(args, 'output', None):
         output_file = args.output
     elif len(ticket_keys) == 1:
         output_file = f'{ticket_keys[0]}.xlsx'
     else:
         output_file = f'{"_".join(ticket_keys)}.xlsx'
+
     keep_intermediates = getattr(args, 'keep_intermediates', False)
 
-    # Ensure output has .xlsx extension
     if not output_file.endswith('.xlsx'):
         output_file = f'{output_file}.xlsx'
+
+    log.debug(f'cmd_build_excel_map(ticket_keys={ticket_keys}, hierarchy={args.hierarchy}, limit={limit}, output={output_file})')
 
     output('')
     output('=' * 60)
@@ -343,302 +292,31 @@ def cmd_build_excel_map(args):
         output(f'Limit:           {limit}')
     output('')
 
-    # Create a temp directory for intermediate files
-    temp_dir = tempfile.mkdtemp(prefix='excel_map_')
-    temp_files = []
-
     try:
-        # ---------------------------------------------------------------
-        # Step 1: Connect to Jira
-        # ---------------------------------------------------------------
-        output('Step 1/4: Connecting to Jira...')
-        jira = jira_utils.get_connection()
-
-        # Validate project if provided
-        if getattr(args, 'project', None):
-            jira_utils.validate_project(jira, args.project)
-
-        # ---------------------------------------------------------------
-        # Step 2: Get first-level related issues for each root ticket.
-        #         Always use hierarchy=1 so the overview sheet contains
-        #         only the root(s) and their direct children — not the
-        #         full recursive tree.  Merge results, deduplicating by
-        #         issue key while preserving insertion order.
-        # ---------------------------------------------------------------
-        output(f'Step 2/4: Getting first-level issues for {len(ticket_keys)} root ticket(s)...')
-
-        merged_data = []       # combined ordered list (deduplicated)
-        seen_keys = set()      # track keys already in merged_data
-
-        for root_key in ticket_keys:
-            output(f'  Fetching related for {root_key}...')
-            # hierarchy=1 → root + direct children only (flat overview)
-            related_data = jira_utils._get_related_data(jira, root_key, hierarchy=1, limit=limit)
-
-            added = 0
-            for item in related_data:
-                issue_key = item['issue'].get('key', '')
-                if issue_key and issue_key not in seen_keys:
-                    seen_keys.add(issue_key)
-                    merged_data.append(item)
-                    added += 1
-
-            depth0_count = sum(1 for item in related_data if item['depth'] == 0)
-            depth1_count = sum(1 for item in related_data if item['depth'] == 1)
-            output(f'    {len(related_data)} issues ({depth0_count} root + {depth1_count} depth=1), {added} new after dedup')
-
-        output(f'  Merged total: {len(merged_data)} unique issues')
-
-        # Write Map sheet to temp file — indented format with Depth 0 /
-        # Depth 1 columns, but only first-level data (hierarchy=1).
-        map_temp = os.path.join(temp_dir, '_map_temp.xlsx')
-        temp_files.append(map_temp)
-
-        map_extras = {
-            item['issue'].get('key', ''): {
-                'depth': item.get('depth'),
-                'via': item.get('via'),
-                'relation': item.get('relation'),
-                'from_key': item.get('from_key'),
-            }
-            for item in merged_data
-        }
-        jira_utils.dump_tickets_to_file(
-            [item['issue'] for item in merged_data],
-            map_temp, 'excel', map_extras, table_format='indented'
+        result = excel_utils.build_excel_map(
+            ticket_keys=ticket_keys,
+            hierarchy_depth=hierarchy_depth,
+            limit=limit,
+            output_file=output_file,
+            project_key=getattr(args, 'project', None),
+            keep_intermediates=keep_intermediates,
+            output_callback=output,
         )
-        output(f'  Map sheet: {len(merged_data)} rows, indented format (depth 0-1)')
 
-        # ---------------------------------------------------------------
-        # Step 3: Get children for each depth=1 ticket (unlimited depth)
-        # ---------------------------------------------------------------
-        depth1_keys = [item['issue'].get('key', '') for item in merged_data if item['depth'] == 1]
-        output(f'Step 3/4: Getting children for {len(depth1_keys)} depth=1 tickets...')
+        if keep_intermediates:
+            temp_dir = result.get('temp_dir')
+            temp_files = result.get('temp_files', [])
+            if temp_dir:
+                output(f'Intermediate files kept in: {temp_dir}')
+                for temp_file in temp_files:
+                    output(f'  {temp_file}')
 
-        children_temps = []  # list of (ticket_key, temp_file_path, row_count)
-        for idx, ticket_key in enumerate(depth1_keys, 1):
-            try:
-                children_data = jira_utils._get_children_data(jira, ticket_key, limit=None)
-                child_count = len(children_data) - 1  # subtract root itself
-
-                # Write to temp file
-                child_temp = os.path.join(temp_dir, f'temp_{ticket_key}.xlsx')
-                temp_files.append(child_temp)
-
-                child_extras = {
-                    item['issue'].get('key', ''): {
-                        'depth': item.get('depth'),
-                    }
-                    for item in children_data
-                }
-                jira_utils.dump_tickets_to_file(
-                    [item['issue'] for item in children_data],
-                    child_temp, 'excel', child_extras, table_format='indented'
-                )
-
-                children_temps.append((ticket_key, child_temp, len(children_data)))
-                output(f'  [{idx}/{len(depth1_keys)}] {ticket_key}: {child_count} children')
-
-            except Exception as e:
-                log.warning(f'Failed to get children for {ticket_key}: {e}')
-                output(f'  [{idx}/{len(depth1_keys)}] {ticket_key}: ERROR - {e}')
-
-        # ---------------------------------------------------------------
-        # Step 4: Assemble final workbook
-        # ---------------------------------------------------------------
-        output(f'Step 4/4: Assembling final workbook...')
-
-        final_wb = Workbook()
-        # Remove the default sheet created by Workbook()
-        final_wb.remove(final_wb.active)
-
-        total_rows = 0
-        sheet_count = 0
-
-        def _copy_sheet(src_wb_path, dest_wb, sheet_name):
-            '''
-            Copy the first sheet from a source workbook into the destination
-            workbook as a new sheet with the given name. Preserves cell values,
-            hyperlinks, font, fill, alignment, border, number_format, column
-            widths, and conditional formatting.
-            '''
-            nonlocal total_rows, sheet_count
-
-            src_wb = load_workbook(src_wb_path)
-            src_ws = src_wb.active
-
-            # Truncate sheet name to 31 chars (Excel limit)
-            safe_name = sheet_name[:31]
-            dest_ws = dest_wb.create_sheet(title=safe_name)
-
-            # Copy cell values and formatting
-            row_count = 0
-            for row in src_ws.iter_rows():
-                row_count += 1
-                for cell in row:
-                    dest_cell = dest_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-
-                    # Copy formatting
-                    if cell.font:
-                        dest_cell.font = copy(cell.font)
-                    if cell.fill:
-                        dest_cell.fill = copy(cell.fill)
-                    if cell.alignment:
-                        dest_cell.alignment = copy(cell.alignment)
-                    if cell.border:
-                        dest_cell.border = copy(cell.border)
-                    if cell.number_format:
-                        dest_cell.number_format = cell.number_format
-
-                    # Copy hyperlink
-                    if cell.hyperlink:
-                        dest_cell.hyperlink = cell.hyperlink
-
-            # Copy column widths
-            for col_letter, dim in src_ws.column_dimensions.items():
-                dest_ws.column_dimensions[col_letter].width = dim.width
-
-            # Copy merged cells
-            for merged_range in src_ws.merged_cells.ranges:
-                dest_ws.merge_cells(str(merged_range))
-
-            # Copy conditional formatting rules.
-            # openpyxl's add() expects a plain string for the cell range
-            # (e.g. "A2:A100").  Internally it wraps the string into a
-            # MultiCellRange.  Passing a MultiCellRange directly causes
-            # a 'to_tree' AttributeError at save time.
-            for cf_rule in src_ws.conditional_formatting:
-                try:
-                    cell_range = str(cf_rule.sqref)
-                except AttributeError:
-                    cell_range = str(cf_rule)
-                for rule in cf_rule.rules:
-                    try:
-                        dest_ws.conditional_formatting.add(cell_range, rule)
-                    except Exception as cf_err:
-                        log.debug(f'Skipping conditional formatting rule: {cf_err}')
-
-            # Copy freeze panes
-            if src_ws.freeze_panes:
-                dest_ws.freeze_panes = src_ws.freeze_panes
-
-            src_wb.close()
-
-            data_rows = max(0, row_count - 1)  # subtract header
-            total_rows += data_rows
-            sheet_count += 1
-            return data_rows
-
-        # Sheet 1: Tickets (merged get-related overview from all root tickets)
-        map_rows = _copy_sheet(map_temp, final_wb, 'Tickets')
-        output(f'  Sheet 1: Tickets ({map_rows} rows)')
-
-        # Sheets 2..N: Per-ticket children
-        for idx, (ticket_key, child_temp, child_row_count) in enumerate(children_temps, 2):
-            child_rows = _copy_sheet(child_temp, final_wb, ticket_key)
-            output(f'  Sheet {idx}: {ticket_key} ({child_rows} rows)')
-
-        # Save the final workbook
-        final_wb.save(output_file)
-        final_wb.close()
-
-        output('')
-        output(f'Output: {output_file} ({sheet_count} sheets, {total_rows} total rows)')
+        return 0
 
     except Exception as e:
         log.error(f'Failed to build Excel map: {e}', exc_info=True)
         output(f'ERROR: {e}')
         return 1
-
-    finally:
-        # ---------------------------------------------------------------
-        # Step 5: Cleanup
-        # ---------------------------------------------------------------
-        if keep_intermediates:
-            output(f'Intermediate files kept in: {temp_dir}')
-            for tf in temp_files:
-                if os.path.exists(tf):
-                    output(f'  {tf}')
-        else:
-            # Clean up temp directory
-            try:
-                shutil.rmtree(temp_dir)
-                log.debug(f'Cleaned up {len(temp_files)} intermediate files in {temp_dir}')
-            except Exception as cleanup_err:
-                log.warning(f'Failed to clean up temp dir {temp_dir}: {cleanup_err}')
-
-    return 0
-
-
-def _validate_and_repair_csv(filepath):
-    '''
-    Validate a CSV file and repair rows that have more columns than the header.
-
-    LLMs sometimes emit CSV with unquoted commas inside fields — for example
-    a summary like ``12.1.0.0.72,78, 12.1.0.1.4 - hfi1_0: CPORT …`` ends up
-    split across multiple columns.  This function detects such rows and merges
-    the excess columns back into the widest text field (heuristically the
-    "summary" or the longest-valued column in that row).
-
-    The file is rewritten in-place only if repairs were needed.
-
-    Returns the filepath (unchanged).
-    '''
-    import csv as _csv
-
-    with open(filepath, 'r', encoding='utf-8') as f:
-        reader = _csv.reader(f)
-        header = next(reader, None)
-        if not header:
-            return filepath
-        expected = len(header)
-        rows = []
-        needs_repair = False
-        for row in reader:
-            if len(row) > expected:
-                needs_repair = True
-                # Find the best column to merge excess into.
-                # Prefer 'summary' if it exists; otherwise pick the column
-                # with the longest value in this row.
-                summary_idx = None
-                for i, h in enumerate(header):
-                    if h.strip().lower() == 'summary':
-                        summary_idx = i
-                        break
-                if summary_idx is None:
-                    # Fallback: pick the column with the longest value
-                    summary_idx = max(range(min(expected, len(row))),
-                                      key=lambda i: len(row[i]))
-
-                # Merge: take the first `expected` cells, but fold the extra
-                # cells into the summary column by joining with commas.
-                extra_count = len(row) - expected
-                # The extra cells are the ones that were split out of the
-                # summary column.  They sit right after summary_idx.
-                merged_value = ','.join(
-                    row[summary_idx : summary_idx + 1 + extra_count])
-                repaired = (row[:summary_idx]
-                            + [merged_value]
-                            + row[summary_idx + 1 + extra_count:])
-                log.debug(
-                    f'CSV repair: row had {len(row)} cols, merged '
-                    f'{extra_count} extra into column "{header[summary_idx]}"')
-                rows.append(repaired)
-            elif len(row) < expected:
-                # Pad short rows with empty strings
-                needs_repair = True
-                rows.append(row + [''] * (expected - len(row)))
-            else:
-                rows.append(row)
-
-    if needs_repair:
-        log.info(f'Repairing CSV: {filepath} ({len(rows)} data rows)')
-        with open(filepath, 'w', newline='', encoding='utf-8') as f:
-            writer = _csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-
-    return filepath
 
 
 def _extract_and_save_files(response_text):
@@ -821,7 +499,7 @@ def _extract_and_save_files(response_text):
             # re-reading with the csv module and merging excess columns back
             # into the widest text field (typically 'summary').
             if filepath.lower().endswith('.csv'):
-                filepath = _validate_and_repair_csv(filepath)
+                validate_and_repair_csv(filepath)
 
             written.append(filepath)
             log.info(f'Saved extracted file: {filepath} ({len(content)} chars)')
@@ -1144,7 +822,7 @@ def cmd_workflow(args):
 # Shared workflow summary helper
 # ---------------------------------------------------------------------------
 
-def _print_workflow_summary(workflow_name: str, created_files: list):
+def _print_workflow_summary(workflow_name: str, created_files: list[tuple[str, str]]):
     '''Print a standardised "WORKFLOW COMPLETE" banner with a file table.
 
     Input:
@@ -1219,7 +897,7 @@ def _workflow_bug_report(args):
     output('')
     output('Step 1/6: Connecting to Jira...')
     try:
-        jira = jira_utils.get_connection()
+        jira = jira_api.get_connection()
         log.info('Jira connection established')
     except Exception as e:
         log.error(f'Step 1/6 failed: Jira connection error: {e}', exc_info=True)
@@ -1289,7 +967,7 @@ def _workflow_bug_report(args):
         # Strip any extension the user may have provided — we force .json here
         dump_basename = os.path.splitext(dump_basename)[0]
 
-        dump_path = jira_utils.dump_tickets_to_file(
+        dump_path = jira_api.dump_tickets_to_file(
             issues, dump_basename, 'json', include_comments='latest')
         log.info(f'Tickets dumped to: {dump_path}')
         output(f'  Saved: {dump_path}')
@@ -1468,7 +1146,7 @@ def _workflow_feature_plan(args):
             return 1
 
         try:
-            jira = jira_utils.get_connection()
+            jira = jira_api.get_connection()
             jira_utils.bulk_delete_tickets(
                 jira,
                 input_file=cleanup_csv,
@@ -1645,7 +1323,7 @@ def _workflow_feature_plan(args):
             # Save the plan to JSON inside the output directory
             jira_plan = response.metadata.get('state', {}).get('jira_plan')
             # Track all output files for the summary table
-            all_created_files: list = []
+            all_created_files: list[tuple[str, str]] = []
 
             # Include intermediate files created by the orchestrator
             # (research.json, hw_profile.json, scope.json, debug/*.md)
@@ -1689,14 +1367,17 @@ def _workflow_feature_plan(args):
                 try:
                     from tools.plan_export_tools import plan_to_csv as _plan_to_csv
                     csv_basename = os.path.join(output_dir, 'plan')
-                    csv_result = _plan_to_csv(json_path, output_path=csv_basename)
-                    if hasattr(csv_result, 'data') and csv_result.data:
-                        csv_path = csv_result.data.get('output_path', '')
+                    csv_result = cast(Any, _plan_to_csv(json_path, output_path=csv_basename))
+                    csv_data = getattr(csv_result, 'data', None)
+                    if csv_data:
+                        csv_path = csv_data.get('output_path', '')
                         if csv_path:
                             output(f'CSV saved to: {csv_path}')
                             all_created_files.append((csv_path, 'Jira CSV (indented)'))
-                    elif hasattr(csv_result, 'error') and csv_result.error:
-                        log.warning(f'CSV export warning: {csv_result.error}')
+                    else:
+                        csv_error = getattr(csv_result, 'error', None)
+                        if csv_error:
+                            log.warning(f'CSV export warning: {csv_error}')
                 except Exception as csv_err:
                     log.warning(f'CSV export failed (plan JSON still saved): {csv_err}')
 
@@ -2029,7 +1710,7 @@ Examples:
         # module-level URL and drop any cached connection so the next call
         # to get_connection() uses the correct server.
         jira_utils.JIRA_URL = os.getenv('JIRA_URL', jira_utils.DEFAULT_JIRA_URL)
-        jira_utils.reset_connection()
+        jira_api.reset_connection()
         log.info(f'Refreshed jira_utils.JIRA_URL -> {jira_utils.JIRA_URL}')
     
     # ---- Verbose mode: add a stdout handler so debug messages appear on console

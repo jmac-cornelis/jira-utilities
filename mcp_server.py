@@ -31,7 +31,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from dotenv import load_dotenv
 
@@ -54,7 +54,11 @@ log = logging.getLogger('jira-mcp-server')
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import Tool, TextContent
+    from mcp.types import TextContent
+    try:
+        from mcp.server import FastMCP
+    except ImportError:
+        FastMCP = None
 except ImportError:
     log.error('MCP SDK not installed. Install with: pip install "mcp[cli]"')
     sys.exit(1)
@@ -73,24 +77,38 @@ jira_utils._quiet_mode = True
 # ---------------------------------------------------------------------------
 # MCP Server instance
 # ---------------------------------------------------------------------------
-server = Server("cornelis-jira")
+if FastMCP is not None:
+    server = FastMCP("cornelis-jira")
+else:
+    server = Server("cornelis-jira")
+
+
+def _tool_decorator():
+    if hasattr(server, 'tool'):
+        dynamic_server = cast(Any, server)
+        return dynamic_server.tool()
+
+    def _passthrough(func):
+        return func
+
+    return _passthrough
 
 
 # ---------------------------------------------------------------------------
 # Helper: format results as JSON text for MCP responses
 # ---------------------------------------------------------------------------
 
-def _json_result(data: Any) -> list:
+def _json_result(data: Any) -> list[Any]:
     """Format *data* as a JSON ``TextContent`` list for MCP tool responses."""
     return [TextContent(type="text", text=json.dumps(data, indent=2, default=str))]
 
 
-def _error_result(message: str) -> list:
+def _error_result(message: str) -> list[Any]:
     """Format an error message as a ``TextContent`` list."""
     return [TextContent(type="text", text=json.dumps({"error": message}, indent=2))]
 
 
-def _issue_to_dict(issue: dict) -> dict:
+def _issue_to_dict(issue: dict[str, Any]) -> dict[str, Any]:
     """Convert a raw Jira issue dict (from REST API) to a clean serialisable dict.
 
     The Jira REST API returns issues as nested dicts with a ``key`` and
@@ -169,8 +187,8 @@ def _extract_description(desc: Any) -> str:
 # Tool 1: search_tickets — Run a JQL query
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def search_tickets(jql: str, limit: int = 50) -> list:
+@_tool_decorator()
+async def search_tickets(jql: str, limit: int = 50) -> list[Any]:
     """Search Jira tickets using a JQL query.
 
     Args:
@@ -191,8 +209,8 @@ async def search_tickets(jql: str, limit: int = 50) -> list:
 # Tool 2: get_ticket — Get a single ticket's details
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def get_ticket(ticket_key: str) -> list:
+@_tool_decorator()
+async def get_ticket(ticket_key: str) -> list[Any]:
     """Get detailed information for a single Jira ticket.
 
     Args:
@@ -214,7 +232,7 @@ async def get_ticket(ticket_key: str) -> list:
 # Tool 3: create_ticket — Create a new Jira ticket
 # ---------------------------------------------------------------------------
 
-@server.tool()
+@_tool_decorator()
 async def create_ticket(
     project_key: str,
     summary: str,
@@ -225,7 +243,7 @@ async def create_ticket(
     fix_version: Optional[str] = None,
     labels: Optional[str] = None,
     parent_key: Optional[str] = None,
-) -> list:
+) -> list[Any]:
     """Create a new Jira ticket.
 
     Args:
@@ -284,7 +302,7 @@ async def create_ticket(
 # Tool 4: update_ticket — Update fields on an existing ticket
 # ---------------------------------------------------------------------------
 
-@server.tool()
+@_tool_decorator()
 async def update_ticket(
     ticket_key: str,
     summary: Optional[str] = None,
@@ -294,7 +312,7 @@ async def update_ticket(
     fix_version: Optional[str] = None,
     labels: Optional[str] = None,
     description: Optional[str] = None,
-) -> list:
+) -> list[Any]:
     """Update fields on an existing Jira ticket.
 
     Only the fields you provide will be changed; others are left untouched.
@@ -368,8 +386,8 @@ async def update_ticket(
 # Tool 5: list_filters — List Jira saved filters
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def list_filters(favourite_only: bool = False) -> list:
+@_tool_decorator()
+async def list_filters(favourite_only: bool = False) -> list[Any]:
     """List accessible Jira saved filters.
 
     Args:
@@ -423,8 +441,8 @@ async def list_filters(favourite_only: bool = False) -> list:
 # Tool 6: run_filter — Run a saved Jira filter by ID
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def run_filter(filter_id: str, limit: int = 50) -> list:
+@_tool_decorator()
+async def run_filter(filter_id: str, limit: int = 50) -> list[Any]:
     """Run a saved Jira filter by its ID and return matching tickets.
 
     Args:
@@ -469,8 +487,8 @@ async def run_filter(filter_id: str, limit: int = 50) -> list:
 # Tool 7: get_releases — Get project releases/versions
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def get_releases(project_key: str, pattern: Optional[str] = None) -> list:
+@_tool_decorator()
+async def get_releases(project_key: str, pattern: Optional[str] = None) -> list[Any]:
     """Get releases (versions) for a Jira project.
 
     Args:
@@ -510,12 +528,12 @@ async def get_releases(project_key: str, pattern: Optional[str] = None) -> list:
 # Tool 8: get_release_tickets — Get tickets for a specific release
 # ---------------------------------------------------------------------------
 
-@server.tool()
+@_tool_decorator()
 async def get_release_tickets(
     project_key: str,
     release_name: str,
     limit: int = 50,
-) -> list:
+) -> list[Any]:
     """Get tickets associated with a specific release/version.
 
     Args:
@@ -543,8 +561,8 @@ async def get_release_tickets(
 # Tool 9: get_children — Get child ticket hierarchy
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def get_children(root_key: str, limit: int = 50) -> list:
+@_tool_decorator()
+async def get_children(root_key: str, limit: int = 50) -> list[Any]:
     """Get the child ticket hierarchy for a given Jira issue.
 
     Recursively retrieves all child issues (sub-tasks, stories under epics, etc.).
@@ -572,8 +590,8 @@ async def get_children(root_key: str, limit: int = 50) -> list:
 # Tool 10: get_related — Get related tickets via link traversal
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def get_related(root_key: str, depth: Optional[int] = None, limit: int = 50) -> list:
+@_tool_decorator()
+async def get_related(root_key: str, depth: Optional[int] = None, limit: int = 50) -> list[Any]:
     """Get related tickets for a given issue via link and child traversal.
 
     Related includes linked issues (issuelinks) and children discovered
@@ -606,8 +624,8 @@ async def get_related(root_key: str, depth: Optional[int] = None, limit: int = 5
 # Tool 11: get_project_info — Get project metadata
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def get_project_info(project_key: str) -> list:
+@_tool_decorator()
+async def get_project_info(project_key: str) -> list[Any]:
     """Get metadata for a Jira project (name, lead, description, issue types, etc.).
 
     Args:
@@ -651,8 +669,8 @@ async def get_project_info(project_key: str) -> list:
 # Tool 12: get_components — Get project components
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def get_components(project_key: str) -> list:
+@_tool_decorator()
+async def get_components(project_key: str) -> list[Any]:
     """Get the components defined for a Jira project.
 
     Args:
@@ -683,8 +701,8 @@ async def get_components(project_key: str) -> list:
 # Tool 13: assign_ticket — Assign a ticket to a user
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def assign_ticket(ticket_key: str, assignee: str) -> list:
+@_tool_decorator()
+async def assign_ticket(ticket_key: str, assignee: str) -> list[Any]:
     """Assign a Jira ticket to a user.
 
     Args:
@@ -726,8 +744,8 @@ async def assign_ticket(ticket_key: str, assignee: str) -> list:
 # Tool 14: link_tickets — Link two Jira tickets
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def link_tickets(from_key: str, to_key: str, link_type: str = 'Relates') -> list:
+@_tool_decorator()
+async def link_tickets(from_key: str, to_key: str, link_type: str = 'Relates') -> list[Any]:
     """Create a link between two Jira tickets.
 
     Args:
@@ -758,8 +776,8 @@ async def link_tickets(from_key: str, to_key: str, link_type: str = 'Relates') -
 # Tool 15: list_dashboards — List Jira dashboards
 # ---------------------------------------------------------------------------
 
-@server.tool()
-async def list_dashboards() -> list:
+@_tool_decorator()
+async def list_dashboards() -> list[Any]:
     """List accessible Jira dashboards."""
     try:
         jira = jira_utils.get_connection()
@@ -804,14 +822,145 @@ async def list_dashboards() -> list:
 
 
 # ---------------------------------------------------------------------------
+# Tool 16: get_tickets_created_on — Tickets created on a specific date
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def get_tickets_created_on(project_key: str, date: str = '') -> list[Any]:
+    """Get all tickets created on a specific date.
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+    """
+    try:
+        from datetime import date as _date
+        from core.reporting import tickets_created_on
+
+        jira = jira_utils.get_connection()
+        target_date = date or _date.today().isoformat()
+        tickets = tickets_created_on(jira, project_key, target_date)
+        return _json_result({
+            'date': target_date,
+            'project': project_key,
+            'count': len(tickets),
+            'tickets': tickets,
+        })
+    except Exception as e:
+        log.error(f'get_tickets_created_on failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tool 17: find_bugs_missing_field — Bugs missing a required field
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def find_bugs_missing_field(
+    project_key: str,
+    field: str = 'affectedVersion',
+    date: str = '',
+) -> list[Any]:
+    """Find bugs missing a required field (e.g. affectedVersion, fixVersion).
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        field: JQL field name to check (default: affectedVersion).
+        date: If given, only flag bugs created on this date (YYYY-MM-DD).
+    """
+    try:
+        from core.reporting import bugs_missing_field
+
+        jira = jira_utils.get_connection()
+        target_date = date or None
+        result = bugs_missing_field(jira, project_key, field=field,
+                                    target_date=target_date)
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'find_bugs_missing_field failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tool 18: get_status_changes — Status transitions by actor type
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def get_status_changes(project_key: str, date: str = '') -> list[Any]:
+    """Get status transitions for a date, split by automation vs human.
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+    """
+    try:
+        from datetime import date as _date
+        from core.reporting import status_changes_by_actor
+
+        target_date = date or _date.today().isoformat()
+        result = status_changes_by_actor(project_key, target_date)
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'get_status_changes failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Tool 19: daily_report — Full composite daily report
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def daily_report(
+    project_key: str,
+    date: str = '',
+    export_path: str = '',
+    export_format: str = 'excel',
+) -> list[Any]:
+    """Run a full daily report: created tickets, missing fields, status changes.
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+        export_path: If provided, export report to this file path.
+        export_format: Export format: 'excel' or 'csv' (default: excel).
+    """
+    try:
+        from datetime import date as _date
+        from core.reporting import daily_report as _daily_report
+        from core.reporting import export_daily_report
+
+        jira = jira_utils.get_connection()
+        target_date = date or _date.today().isoformat()
+        report = _daily_report(jira, project_key, target_date)
+
+        response: dict[str, Any] = {
+            'date': target_date,
+            'project': project_key,
+            'created_count': len(report.get('created_tickets', [])),
+            'flagged_bugs_count': len(report.get('bugs_missing_field', {}).get('flagged', [])),
+            'automation_changes': len(report.get('status_changes', {}).get('automation', [])),
+            'human_changes': len(report.get('status_changes', {}).get('human', [])),
+            'report': report,
+        }
+
+        if export_path:
+            path = export_daily_report(report, export_path, fmt=export_format)
+            response['export_path'] = path
+
+        return _json_result(response)
+    except Exception as e:
+        log.error(f'daily_report failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def main():
+def main():
     """Run the Cornelis Jira MCP server over stdio."""
     log.info('Starting Cornelis Jira MCP server...')
 
-    # Verify Jira credentials are available
     jira_url = os.environ.get('JIRA_URL', '')
     jira_email = os.environ.get('JIRA_EMAIL', '')
     if not jira_url or not jira_email:
@@ -820,14 +969,24 @@ async def main():
         log.info(f'Jira URL: {jira_url}')
         log.info(f'Jira user: {jira_email}')
 
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+    if hasattr(server, 'tool'):
+        dynamic_server = cast(Any, server)
+        dynamic_server.run(transport='stdio')
+        return
+
+    import asyncio
+
+    async def _run_lowlevel() -> None:
+        lowlevel_server = cast(Any, server)
+        async with stdio_server() as (read_stream, write_stream):
+            await lowlevel_server.run(read_stream, write_stream, lowlevel_server.create_initialization_options())
+
+    asyncio.run(_run_lowlevel())
 
 
 def run():
     """Synchronous entry point for console_scripts (pyproject.toml)."""
-    import asyncio
-    asyncio.run(main())
+    main()
 
 
 if __name__ == '__main__':

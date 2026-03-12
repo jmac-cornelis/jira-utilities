@@ -1,0 +1,229 @@
+name: Tests & Coverage
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master, refactor-jira-utils]
+
+concurrency:
+  group: pages-deploy-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  checks: write
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[agents]"
+          pip install pytest pytest-cov pytest-asyncio pytest-html
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=core \
+            --cov=jira_utils \
+            --cov=excel_utils \
+            --cov=mcp_server \
+            --cov-report=html:coverage-html \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term \
+            --html=test-report.html \
+            --self-contained-html \
+            --junitxml=test-results.xml \
+            -v
+
+      - name: Build report site
+        if: always()
+        run: |
+          mkdir -p report-site/coverage
+
+          # Copy test report
+          cp test-report.html report-site/test-report.html
+
+          # Copy coverage HTML report
+          if [ -d coverage-html ]; then
+            cp -r coverage-html/* report-site/coverage/
+            echo "Coverage HTML: $(find report-site/coverage -type f | wc -l) files"
+          else
+            echo "<html><body><h1>Coverage report not generated</h1></body></html>" > report-site/coverage/index.html
+            echo "WARNING: coverage-html not found"
+          fi
+
+          # Build dashboard index
+          python - <<'PYEOF'
+          import xml.etree.ElementTree as ET
+          import os, datetime
+
+          tree = ET.parse('test-results.xml')
+          root = tree.getroot()
+          ts = root.find('.//testsuite') or root
+          tests = int(ts.get('tests', 0))
+          failures = int(ts.get('failures', 0))
+          errors = int(ts.get('errors', 0))
+          skipped = int(ts.get('skipped', 0))
+          passed = tests - failures - errors - skipped
+          time_taken = float(ts.get('time', 0))
+
+          cov_tree = ET.parse('coverage.xml')
+          cov_root = cov_tree.getroot()
+          line_rate = float(cov_root.get('line-rate', 0)) * 100
+
+          packages = []
+          for pkg in cov_root.findall('.//package'):
+              name = pkg.get('name', '').replace('.', '/')
+              rate = float(pkg.get('line-rate', 0)) * 100
+              packages.append((name, rate))
+          packages.sort(key=lambda x: x[0])
+
+          status_emoji = '\u2705' if failures == 0 and errors == 0 else '\u274c'
+          cov_color = '#4caf50' if line_rate >= 80 else '#ff9800' if line_rate >= 60 else '#f44336'
+          run_id = os.environ.get('GITHUB_RUN_ID', '')
+          repo = os.environ.get('GITHUB_REPOSITORY', '')
+          sha = os.environ.get('GITHUB_SHA', '')[:8]
+          ref = os.environ.get('GITHUB_REF_NAME', '')
+
+          html = f"""<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Test & Coverage Report</title>
+            <style>
+              * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+              body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }}
+              .container {{ max-width: 900px; margin: 0 auto; }}
+              h1 {{ color: #f0f6fc; margin-bottom: 0.5rem; font-size: 1.8rem; }}
+              h2 {{ color: #f0f6fc; margin: 1.5rem 0 0.75rem; }}
+              .subtitle {{ color: #8b949e; margin-bottom: 2rem; }}
+              .cards {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem; }}
+              .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; text-align: center; }}
+              .card .value {{ font-size: 2.5rem; font-weight: 700; }}
+              .card .label {{ color: #8b949e; font-size: 0.9rem; margin-top: 0.3rem; }}
+              .pass {{ color: #3fb950; }}
+              .fail {{ color: #f85149; }}
+              .cov {{ color: {cov_color}; }}
+              table {{ width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; margin-bottom: 2rem; }}
+              th {{ background: #21262d; color: #f0f6fc; padding: 0.75rem 1rem; text-align: left; font-weight: 600; }}
+              td {{ padding: 0.75rem 1rem; border-top: 1px solid #30363d; }}
+              .bar-bg {{ background: #21262d; border-radius: 4px; height: 8px; width: 100%; }}
+              .bar {{ height: 8px; border-radius: 4px; }}
+              .links {{ display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 2rem; }}
+              .links a {{ color: #58a6ff; text-decoration: none; padding: 0.6rem 1.2rem; border: 1px solid #30363d; border-radius: 6px; background: #161b22; font-weight: 500; }}
+              .links a:hover {{ background: #21262d; border-color: #58a6ff; }}
+              .meta {{ color: #484f58; font-size: 0.8rem; margin-top: 2rem; }}
+              .meta a {{ color: #58a6ff; text-decoration: none; }}
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>{status_emoji} Test & Coverage Report</h1>
+              <p class="subtitle">cornelis-jira-tools &mdash; <code>{ref}</code> @ <code>{sha}</code></p>
+
+              <div class="cards">
+                <div class="card">
+                  <div class="value pass">{passed}</div>
+                  <div class="label">Tests Passed</div>
+                </div>
+                <div class="card">
+                  <div class="value {'fail' if failures + errors > 0 else 'pass'}">{failures + errors}</div>
+                  <div class="label">Failed / Errors</div>
+                </div>
+                <div class="card">
+                  <div class="value cov">{line_rate:.0f}%</div>
+                  <div class="label">Line Coverage</div>
+                </div>
+              </div>
+
+              <h2>Coverage by Module</h2>
+              <table>
+                <tr><th>Module</th><th>Coverage</th><th></th></tr>
+          """
+
+          for name, rate in packages:
+              bar_color = '#3fb950' if rate >= 80 else '#d29922' if rate >= 60 else '#f85149'
+              html += f"""
+                <tr>
+                  <td><code>{name}</code></td>
+                  <td style="width:80px; text-align:right;">{rate:.0f}%</td>
+                  <td style="width:40%;">
+                    <div class="bar-bg"><div class="bar" style="width:{rate}%; background:{bar_color};"></div></div>
+                  </td>
+                </tr>"""
+
+          html += f"""
+              </table>
+
+              <div class="links">
+                <a href="test-report.html">\U0001f9ea Detailed Test Report</a>
+                <a href="coverage/index.html">\U0001f4ca Full Coverage Report</a>
+              </div>
+
+              <p class="meta">
+                Generated {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')} &mdash; {time_taken:.2f}s
+                &mdash; <a href="https://github.com/{repo}/actions/runs/{run_id}">View workflow run</a>
+              </p>
+            </div>
+          </body>
+          </html>"""
+
+          with open('report-site/index.html', 'w') as f:
+              f.write(html)
+          print(f'Summary: {passed}/{tests} passed, {line_rate:.0f}% coverage')
+          PYEOF
+
+          echo "Report site contents:"
+          find report-site -type f | wc -l
+          find report-site -type f | head -30
+
+      - name: Deploy report to gh-pages branch
+        if: always()
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./report-site
+          destination_dir: ${{ github.ref_name }}
+
+      - name: Post report link to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: test-report
+          message: |
+            ## 📊 Test & Coverage Report
+            
+            **[View Full Report](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.head_ref }}/)**
+            
+            - [Detailed Test Report](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.head_ref }}/test-report.html)
+            - [Coverage Report](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/${{ github.head_ref }}/coverage/)
+
+      - name: Publish test results to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: test-results.xml
+          comment_mode: always
+          check_name: Test Results
+
+      - name: Add coverage comment to PR
+        if: always() && github.event_name == 'pull_request'
+        uses: orgoro/coverage@v3.2
+        with:
+          coverageFile: coverage.xml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          thresholdAll: 0.75

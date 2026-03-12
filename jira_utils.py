@@ -24,7 +24,7 @@ import os
 import time
 import json
 import csv
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import re
 import requests
 
@@ -920,21 +920,30 @@ def list_projects(jira):
     try:
         projects = jira.projects()
         log.debug(f'Found {len(projects)} projects')
-        
+
+        project_rows = []
+
         output('')
         output('=' * 80)
         output(f'{"Key":<15} {"Name":<40} {"Lead":<20}')
         output('=' * 80)
-        
+
         for project in sorted(projects, key=lambda p: p.key):
             lead = getattr(project, 'lead', None)
             lead_name = lead.displayName if lead else 'N/A'
+            project_rows.append({
+                'key': project.key,
+                'name': project.name,
+                'lead': lead_name,
+            })
             output(f'{project.key:<15} {project.name:<40} {lead_name:<20}')
-        
+
         output('=' * 80)
         output(f'Total projects: {len(projects)}')
         output('')
-        
+
+        return project_rows
+
     except Exception as e:
         log.error(f'Failed to list projects: {e}')
         raise
@@ -982,37 +991,45 @@ def get_project_workflows(jira, project_key):
     project = validate_project(jira, project_key)
     
     try:
-        # Get all statuses available in the project
         statuses = jira.statuses()
         log.debug(f'Found {len(statuses)} total statuses')
-        
-        # Get issue types for the project to find relevant workflows
-        issue_types = jira.project(project_key).issueTypes
-        
+
         output('')
         output('=' * 80)
         output(f'Workflow Statuses for Project: {project_key} ({project.name})')
         output('=' * 80)
-        
-        # Group statuses by category
+
         status_categories = {}
         for status in statuses:
-            category = status.statusCategory.name
+            status_category = getattr(status, 'statusCategory', None)
+            category = getattr(status_category, 'name', 'Unknown')
             if category not in status_categories:
                 status_categories[category] = []
             status_categories[category].append(status)
-        
+
+        status_rows = []
         for category in sorted(status_categories.keys()):
             output(f'\n{category}:')
             output('-' * 40)
             for status in sorted(status_categories[category], key=lambda s: s.name):
+                status_rows.append({
+                    'id': status.id,
+                    'name': status.name,
+                    'category': category,
+                })
                 output(f'  {status.name:<30} (ID: {status.id})')
-        
+
         output('')
         output('=' * 80)
         output(f'Total statuses: {len(statuses)}')
         output('')
-        
+
+        return {
+            'project': project_key,
+            'project_name': project.name,
+            'statuses': status_rows,
+        }
+
     except JiraProjectError:
         raise
     except Exception as e:
@@ -1041,26 +1058,38 @@ def get_project_issue_types(jira, project_key):
     try:
         issue_types = project.issueTypes
         log.debug(f'Found {len(issue_types)} issue types')
-        
+
         output('')
         output('=' * 80)
         output(f'Issue Types for Project: {project_key} ({project.name})')
         output('=' * 80)
         output(f'{"Name":<25} {"ID":<12} {"Subtask":<10} {"Description":<30}')
         output('-' * 80)
-        
+
+        issue_type_rows = []
         for issue_type in sorted(issue_types, key=lambda t: t.name):
             is_subtask = getattr(issue_type, 'subtask', False)
             description = getattr(issue_type, 'description', 'N/A') or 'N/A'
-            # Truncate description if too long
+            issue_type_rows.append({
+                'id': issue_type.id,
+                'name': issue_type.name,
+                'subtask': bool(is_subtask),
+                'description': description,
+            })
             if len(description) > 27:
                 description = description[:27] + '...'
             output(f'{issue_type.name:<25} {issue_type.id:<12} {str(is_subtask):<10} {description:<30}')
-        
+
         output('=' * 80)
         output(f'Total issue types: {len(issue_types)}')
         output('')
-        
+
+        return {
+            'project': project_key,
+            'project_name': project.name,
+            'issue_types': issue_type_rows,
+        }
+
     except JiraProjectError:
         raise
     except Exception as e:
@@ -1078,96 +1107,111 @@ def get_project_fields(jira, project_key, issue_type_names=None):
         issue_type_names: List of issue type names to show, or None/empty for all.
 
     Output:
-        None; prints fields per issue type to stdout.
+        Dict containing per-issue-type create/edit/transition field metadata.
 
     Side Effects:
         Logs field information and prints formatted field list.
     '''
     log.debug(f'Entering get_project_fields(project_key={project_key}, issue_type_names={issue_type_names})')
-    
+
     project = validate_project(jira, project_key)
-    
+
     try:
-        # Get all issue types for the project
         all_issue_types = {it.name: it for it in project.issueTypes}
         log.debug(f'Found {len(all_issue_types)} issue types in project')
-        
-        # Determine which issue types to process (case-insensitive)
+
         if issue_type_names:
-            # Normalize issue types using case-insensitive matching
             types_to_process = normalize_issue_types(jira, project_key, issue_type_names)
         else:
             types_to_process = sorted(all_issue_types.keys())
-        
+
         log.debug(f'Processing issue types: {types_to_process}')
-        
-        # Get create metadata for all issue types
+
         create_meta = jira.createmeta(
             projectKeys=project_key,
             expand='projects.issuetypes.fields'
         )
-        
-        # Build lookup for create fields by issue type name
+
         create_fields_by_type = {}
-        if create_meta['projects']:
-            project_meta = create_meta['projects'][0]
-            for it in project_meta['issuetypes']:
-                create_fields_by_type[it['name']] = it.get('fields', {})
-        
-        # For edit and transition fields, we need to find an existing issue of each type
-        # or use the editmeta endpoint with a sample issue
+        project_entries = create_meta.get('projects', [])
+        if project_entries:
+            project_meta = project_entries[0]
+            for it in project_meta.get('issuetypes', []):
+                create_fields_by_type[it.get('name', '')] = it.get('fields', {})
+
+        results = {
+            'project': project_key,
+            'project_name': project.name,
+            'issue_types': [],
+        }
+
         for issue_type_name in types_to_process:
             output('')
             output('=' * 100)
             output(f'Issue Type: {issue_type_name}')
             output(f'Project: {project_key} ({project.name})')
             output('=' * 100)
-            
-            # === CREATE SCREEN FIELDS ===
+
+            issue_type_result = {
+                'name': issue_type_name,
+                'create_fields': [],
+                'edit_fields': [],
+                'transitions': [],
+            }
+
             output(f'\n  CREATE SCREEN FIELDS:')
             output(f'  ' + '-' * 90)
             output(f'    {"Field Name":<30} {"Field Key":<25} {"Required":<10} {"Type":<15}')
             output(f'    {"-" * 30} {"-" * 25} {"-" * 10} {"-" * 15}')
-            
+
             create_fields = create_fields_by_type.get(issue_type_name, {})
             if create_fields:
-                sorted_fields = sorted(
+                sorted_create_fields = sorted(
                     create_fields.items(),
                     key=lambda x: (not x[1].get('required', False), x[1].get('name', x[0]))
                 )
-                for field_key, field_info in sorted_fields:
+                for field_key, field_info in sorted_create_fields:
                     _print_field_row(field_key, field_info)
+                    issue_type_result['create_fields'].append({
+                        'key': field_key,
+                        'name': field_info.get('name', field_key),
+                        'required': bool(field_info.get('required', False)),
+                        'type': field_info.get('schema', {}).get('type', 'unknown'),
+                    })
             else:
                 output(f'    No create fields found.')
-            
-            # === EDIT SCREEN FIELDS ===
+
             output(f'\n  EDIT SCREEN FIELDS:')
             output(f'  ' + '-' * 90)
-            
-            # Find an existing issue of this type to get edit metadata
+
             sample_issue = _find_sample_issue(jira, project_key, issue_type_name)
             if sample_issue:
                 log.debug(f'Found sample issue {sample_issue.key} for edit metadata')
                 edit_meta = jira.editmeta(sample_issue.key)
                 edit_fields = edit_meta.get('fields', {})
-                
+
                 output(f'    {"Field Name":<30} {"Field Key":<25} {"Required":<10} {"Type":<15}')
                 output(f'    {"-" * 30} {"-" * 25} {"-" * 10} {"-" * 15}')
-                
-                sorted_fields = sorted(
+
+                sorted_edit_fields = sorted(
                     edit_fields.items(),
                     key=lambda x: (not x[1].get('required', False), x[1].get('name', x[0]))
                 )
-                for field_key, field_info in sorted_fields:
+                for field_key, field_info in sorted_edit_fields:
                     _print_field_row(field_key, field_info)
+                    issue_type_result['edit_fields'].append({
+                        'key': field_key,
+                        'name': field_info.get('name', field_key),
+                        'required': bool(field_info.get('required', False)),
+                        'type': field_info.get('schema', {}).get('type', 'unknown'),
+                    })
             else:
                 output(f'    No existing {issue_type_name} issues found to retrieve edit fields.')
                 output(f'    Create an issue of this type to see edit screen fields.')
-            
-            # === TRANSITION FIELDS ===
+
             output(f'\n  TRANSITIONS (Status Changes):')
             output(f'  ' + '-' * 90)
-            
+
             if sample_issue:
                 transitions = jira.transitions(sample_issue.key, expand='transitions.fields')
                 if transitions:
@@ -1176,29 +1220,47 @@ def get_project_fields(jira, project_key, issue_type_names=None):
                         trans_id = transition['id']
                         trans_to = transition.get('to', {}).get('name', 'Unknown')
                         output(f'\n    Transition: "{trans_name}" (ID: {trans_id}) -> {trans_to}')
-                        
+
+                        transition_entry = {
+                            'id': trans_id,
+                            'name': trans_name,
+                            'to': trans_to,
+                            'fields': [],
+                        }
+
                         trans_fields = transition.get('fields', {})
                         if trans_fields:
                             output(f'      {"Field Name":<28} {"Field Key":<23} {"Required":<10} {"Type":<15}')
                             output(f'      {"-" * 28} {"-" * 23} {"-" * 10} {"-" * 15}')
-                            sorted_fields = sorted(
+                            sorted_transition_fields = sorted(
                                 trans_fields.items(),
                                 key=lambda x: (not x[1].get('required', False), x[1].get('name', x[0]))
                             )
-                            for field_key, field_info in sorted_fields:
+                            for field_key, field_info in sorted_transition_fields:
                                 _print_field_row(field_key, field_info, indent=6)
+                                transition_entry['fields'].append({
+                                    'key': field_key,
+                                    'name': field_info.get('name', field_key),
+                                    'required': bool(field_info.get('required', False)),
+                                    'type': field_info.get('schema', {}).get('type', 'unknown'),
+                                })
                         else:
                             output(f'      (No additional fields required)')
+
+                        issue_type_result['transitions'].append(transition_entry)
                 else:
                     output(f'    No transitions available from current status.')
             else:
                 output(f'    No existing {issue_type_name} issues found to retrieve transitions.')
-            
+
             output('')
-        
+            results['issue_types'].append(issue_type_result)
+
         output('=' * 100)
         output('')
-        
+
+        return results
+
     except JiraProjectError:
         raise
     except Exception as e:
@@ -1528,47 +1590,61 @@ def get_project_versions(jira, project_key):
     try:
         versions = jira.project_versions(project_key)
         log.debug(f'Found {len(versions)} versions')
-        
+
+        sorted_versions = sorted(
+            versions,
+            key=lambda v: (
+                not getattr(v, 'released', False),
+                getattr(v, 'releaseDate', '9999-99-99') or '9999-99-99',
+                v.name
+            )
+        ) if versions else []
+
         output('')
         output('=' * 100)
         output(f'Versions (Releases) for Project: {project_key} ({project.name})')
         output('=' * 100)
         output(f'{"Name":<30} {"ID":<12} {"Released":<10} {"Archived":<10} {"Release Date":<15} {"Description":<20}')
         output('-' * 100)
-        
+
+        version_rows = []
         if not versions:
             output('  No versions defined for this project.')
         else:
-            # Sort by release date (unreleased last), then by name
-            sorted_versions = sorted(
-                versions,
-                key=lambda v: (
-                    not getattr(v, 'released', False),
-                    getattr(v, 'releaseDate', '9999-99-99') or '9999-99-99',
-                    v.name
-                )
-            )
-            
             for version in sorted_versions:
                 name = version.name
                 vid = version.id
-                released = 'Yes' if getattr(version, 'released', False) else 'No'
-                archived = 'Yes' if getattr(version, 'archived', False) else 'No'
+                released_value = bool(getattr(version, 'released', False))
+                archived_value = bool(getattr(version, 'archived', False))
                 release_date = getattr(version, 'releaseDate', 'N/A') or 'N/A'
                 description = getattr(version, 'description', '') or ''
-                
-                # Truncate if too long
-                if len(name) > 28:
-                    name = name[:28] + '..'
-                if len(description) > 18:
-                    description = description[:18] + '..'
-                
-                output(f'{name:<30} {vid:<12} {released:<10} {archived:<10} {release_date:<15} {description:<20}')
-        
+
+                version_rows.append({
+                    'name': version.name,
+                    'id': vid,
+                    'released': released_value,
+                    'archived': archived_value,
+                    'release_date': release_date,
+                    'description': description,
+                })
+
+                released = 'Yes' if released_value else 'No'
+                archived = 'Yes' if archived_value else 'No'
+                display_name = name[:28] + '..' if len(name) > 28 else name
+                display_description = description[:18] + '..' if len(description) > 18 else description
+
+                output(f'{display_name:<30} {vid:<12} {released:<10} {archived:<10} {release_date:<15} {display_description:<20}')
+
         output('=' * 100)
         output(f'Total versions: {len(versions)}')
         output('')
-        
+
+        return {
+            'project': project_key,
+            'project_name': project.name,
+            'versions': version_rows,
+        }
+
     except JiraProjectError:
         raise
     except Exception as e:
@@ -2659,7 +2735,9 @@ def get_release_tickets(jira, project_key, release_name, issue_types=None, statu
         
         if dump_file:
             dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
-        
+
+        return all_issues
+
     except JiraProjectError:
         raise
     except ValueError as e:
@@ -2835,7 +2913,9 @@ def get_releases_tickets(jira, project_key, release_pattern, issue_types=None, s
         # Dump to file if requested
         if dump_file and all_issues:
             dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
-        
+
+        return all_issues
+
     except JiraProjectError:
         raise
     except ValueError as e:
@@ -2997,7 +3077,9 @@ def get_no_release_tickets(jira, project_key, issue_types=None, statuses=None, d
         
         if dump_file:
             dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
-        
+
+        return all_issues
+
     except JiraProjectError:
         raise
     except ValueError as e:
@@ -3105,7 +3187,15 @@ def get_ticket_totals(jira, project_key, issue_types=None, statuses=None, date_f
         output(f'Total tickets: {total_count}')
         output('=' * 60)
         output('')
-        
+
+        return {
+            'project': project_key,
+            'count': total_count,
+            'jql': jql,
+            'issue_types': normalized_types,
+            'statuses': normalized_statuses,
+        }
+
     except JiraProjectError:
         raise
     except ValueError as e:
@@ -3283,7 +3373,9 @@ def get_tickets(jira, project_key, issue_types=None, statuses=None, date_filter=
         # Dump to file if requested
         if dump_file:
             dump_tickets_to_file(all_issues, dump_file, dump_format, include_comments=_include_comments)
-        
+
+        return all_issues
+
     except JiraProjectError:
         raise
     except ValueError as e:

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from tools.base import BaseTool, ToolResult, tool
+from core.tickets import issue_to_dict
 
 # Load environment variables
 load_dotenv()
@@ -844,44 +845,15 @@ def get_related_tickets(
             limit=limit,
         )
 
-        # Convert raw issue dicts returned by _get_related_data() into the
-        # flat dict format expected by ToolResult consumers.
         tickets = []
         for item in ordered:
             raw = item.get('issue', {})
-            fields = raw.get('fields', {})
-            issue_type = fields.get('issuetype', {}) or {}
-            status = fields.get('status', {}) or {}
-            priority = fields.get('priority', {}) or {}
-            assignee = fields.get('assignee', {}) or {}
-            reporter = fields.get('reporter', {}) or {}
-            fix_versions = fields.get('fixVersions', []) or []
-            components = fields.get('components', []) or []
-            labels = fields.get('labels', []) or []
-
-            tickets.append({
-                'key': raw.get('key', ''),
-                'id': raw.get('id', ''),
-                'summary': fields.get('summary', ''),
-                'description': _extract_description(fields.get('description')),
-                'type': issue_type.get('name'),
-                'status': status.get('name'),
-                'priority': priority.get('name'),
-                'assignee': assignee.get('displayName') if assignee else None,
-                'assignee_id': assignee.get('accountId') if assignee else None,
-                'reporter': reporter.get('displayName') if reporter else None,
-                'created': fields.get('created'),
-                'updated': fields.get('updated'),
-                'fix_versions': [v.get('name', '') for v in fix_versions],
-                'components': [c.get('name', '') for c in components],
-                'labels': labels,
-                'url': f'{JIRA_URL}/browse/{raw.get("key", "")}',
-                # Extra traversal metadata from _get_related_data()
-                'depth': item.get('depth', 0),
-                'via': item.get('via'),
-                'relation': item.get('relation'),
-                'from_key': item.get('from_key'),
-            })
+            ticket = issue_to_dict(raw)
+            ticket['depth'] = item.get('depth', 0)
+            ticket['via'] = item.get('via')
+            ticket['relation'] = item.get('relation')
+            ticket['from_key'] = item.get('from_key')
+            tickets.append(ticket)
 
         return ToolResult.success(tickets, count=len(tickets), root_ticket=ticket_key)
 
@@ -967,7 +939,7 @@ def run_filter(filter_id: str, limit: int = 50) -> ToolResult:
         # Do NOT pass dump_file/dump_format so data stays in memory.
         issues = _ju_run_filter(jira, filter_id, limit=limit)
 
-        tickets = [_raw_issue_to_dict(iss) for iss in (issues or [])]
+        tickets = [issue_to_dict(iss) for iss in (issues or [])]
 
         return ToolResult.success(tickets, count=len(tickets), filter_id=filter_id)
 
@@ -1003,7 +975,7 @@ def run_jql_query(jql: str, limit: int = 50) -> ToolResult:
         # Do NOT pass dump_file/dump_format so data stays in memory.
         issues = _ju_run_jql_query(jira, jql, limit=limit)
 
-        tickets = [_raw_issue_to_dict(iss) for iss in (issues or [])]
+        tickets = [issue_to_dict(iss) for iss in (issues or [])]
 
         return ToolResult.success(tickets, count=len(tickets), jql=jql)
 
@@ -1464,102 +1436,173 @@ def bulk_update_tickets(
 
 
 # ****************************************************************************************
+# Daily Report / Reporting Tools
+# ****************************************************************************************
+
+@tool(
+    name='get_tickets_created_on',
+    description='Find all tickets created on a specific date'
+)
+def get_tickets_created_on(project_key: str, date: str = '') -> ToolResult:
+    '''
+    Find all tickets created on a specific date.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+
+    Output:
+        ToolResult with list of ticket dicts.
+    '''
+    from datetime import date as _date
+    from core.reporting import tickets_created_on
+
+    log.debug(f'get_tickets_created_on(project_key={project_key}, date={date})')
+
+    try:
+        jira = get_jira()
+        target_date = date or _date.today().isoformat()
+        tickets = tickets_created_on(jira, project_key, target_date)
+        return ToolResult.success(tickets, count=len(tickets), date=target_date)
+    except Exception as e:
+        log.error(f'Failed to get tickets created on {date}: {e}')
+        return ToolResult.failure(f'Query failed: {e}')
+
+
+@tool(
+    name='find_bugs_missing_field',
+    description='Find bugs missing a required field like Affects Version'
+)
+def find_bugs_missing_field(
+    project_key: str,
+    field: str = 'affectedVersion',
+    date: str = '',
+) -> ToolResult:
+    '''
+    Find bugs missing a required field.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        field: JQL field name to check (affectedVersion, fixVersion, component, etc.).
+        date: If given, only bugs created on this date.  Otherwise all open bugs.
+
+    Output:
+        ToolResult with {flagged: [...], total_open_count: int, field: str}.
+    '''
+    from core.reporting import bugs_missing_field
+
+    log.debug(f'find_bugs_missing_field(project_key={project_key}, field={field}, date={date})')
+
+    try:
+        jira = get_jira()
+        target_date = date if date else None
+        result = bugs_missing_field(jira, project_key, field=field,
+                                    target_date=target_date)
+        return ToolResult.success(
+            result,
+            flagged_count=len(result['flagged']),
+            total_open_count=result['total_open_count'],
+        )
+    except Exception as e:
+        log.error(f'Failed to find bugs missing {field}: {e}')
+        return ToolResult.failure(f'Query failed: {e}')
+
+
+@tool(
+    name='get_status_changes',
+    description='Get status transitions for a date, separated by automation vs human'
+)
+def get_status_changes(project_key: str, date: str = '') -> ToolResult:
+    '''
+    Get status transitions for a date, split by automation vs human.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+
+    Output:
+        ToolResult with {automation: [...], human: [...], total: int}.
+    '''
+    from datetime import date as _date
+    from core.reporting import status_changes_by_actor
+
+    log.debug(f'get_status_changes(project_key={project_key}, date={date})')
+
+    try:
+        target_date = date or _date.today().isoformat()
+        result = status_changes_by_actor(project_key, target_date)
+        return ToolResult.success(
+            result,
+            automation_count=len(result['automation']),
+            human_count=len(result['human']),
+            total=result['total'],
+        )
+    except Exception as e:
+        log.error(f'Failed to get status changes: {e}')
+        return ToolResult.failure(f'Query failed: {e}')
+
+
+@tool(
+    name='daily_report',
+    description='Run a full daily report: created tickets, missing fields, automation changes'
+)
+def daily_report_tool(
+    project_key: str,
+    date: str = '',
+    dump_file: str = '',
+    dump_format: str = 'excel',
+) -> ToolResult:
+    '''
+    Run a full daily report with optional export.
+
+    Input:
+        project_key: Jira project key (e.g. "STL").
+        date: Target date YYYY-MM-DD (defaults to today if empty).
+        dump_file: If provided, export report to this file path.
+        dump_format: Export format: "excel" or "csv" (default: excel).
+
+    Output:
+        ToolResult with full report dict.  If dump_file is given, includes
+        the export path.
+    '''
+    from datetime import date as _date
+    from core.reporting import daily_report, export_daily_report
+
+    log.debug(f'daily_report_tool(project_key={project_key}, date={date}, '
+              f'dump_file={dump_file}, dump_format={dump_format})')
+
+    try:
+        jira = get_jira()
+        target_date = date or _date.today().isoformat()
+        report = daily_report(jira, project_key, target_date)
+
+        extra_meta: Dict[str, Any] = {
+            'created_count': len(report['created_tickets']),
+            'flagged_bugs_count': len(report['bugs_missing_field']['flagged']),
+            'automation_changes': len(report['status_changes']['automation']),
+        }
+
+        if dump_file:
+            export_path = export_daily_report(report, dump_file, fmt=dump_format)
+            extra_meta['export_path'] = export_path
+
+        return ToolResult.success(report, **extra_meta)
+
+    except Exception as e:
+        log.error(f'Failed to run daily report: {e}')
+        return ToolResult.failure(f'Daily report failed: {e}')
+
+
+# ****************************************************************************************
 # Helper Functions
 # ****************************************************************************************
 
 def _issue_to_dict(issue) -> Dict[str, Any]:
-    '''Convert a Jira issue to a dictionary.'''
-    fields = issue.fields
-    
-    # Extract common fields safely
-    issue_type = getattr(fields, 'issuetype', None)
-    status = getattr(fields, 'status', None)
-    priority = getattr(fields, 'priority', None)
-    assignee = getattr(fields, 'assignee', None)
-    reporter = getattr(fields, 'reporter', None)
-    
-    fix_versions = getattr(fields, 'fixVersions', []) or []
-    components = getattr(fields, 'components', []) or []
-    labels = getattr(fields, 'labels', []) or []
-    
-    return {
-        'key': issue.key,
-        'id': issue.id,
-        'summary': getattr(fields, 'summary', ''),
-        'description': _extract_description(getattr(fields, 'description', None)),
-        'type': issue_type.name if issue_type else None,
-        'status': status.name if status else None,
-        'priority': priority.name if priority else None,
-        'assignee': assignee.displayName if assignee else None,
-        'assignee_id': assignee.accountId if assignee else None,
-        'reporter': reporter.displayName if reporter else None,
-        'created': getattr(fields, 'created', None),
-        'updated': getattr(fields, 'updated', None),
-        'fix_versions': [v.name for v in fix_versions],
-        'components': [c.name for c in components],
-        'labels': labels,
-        'url': f'{JIRA_URL}/browse/{issue.key}'
-    }
+    return issue_to_dict(issue)
 
 
-def _raw_issue_to_dict(raw: dict) -> Dict[str, Any]:
-    '''
-    Convert a raw REST API issue dict (from run_jql_query / run_filter)
-    into the flat dict format used by ToolResult consumers.
-
-    Unlike _issue_to_dict() which works with jira-python Resource objects,
-    this helper operates on plain dicts returned by the REST API.
-    '''
-    fields = raw.get('fields', {}) or {}
-    issue_type = fields.get('issuetype', {}) or {}
-    status = fields.get('status', {}) or {}
-    priority = fields.get('priority', {}) or {}
-    assignee = fields.get('assignee', {}) or {}
-    reporter = fields.get('reporter', {}) or {}
-    fix_versions = fields.get('fixVersions', []) or []
-    components = fields.get('components', []) or []
-    labels = fields.get('labels', []) or []
-
-    return {
-        'key': raw.get('key', ''),
-        'id': raw.get('id', ''),
-        'summary': fields.get('summary', ''),
-        'description': _extract_description(fields.get('description')),
-        'type': issue_type.get('name'),
-        'status': status.get('name'),
-        'priority': priority.get('name'),
-        'assignee': assignee.get('displayName') if assignee else None,
-        'assignee_id': assignee.get('accountId') if assignee else None,
-        'reporter': reporter.get('displayName') if reporter else None,
-        'created': fields.get('created'),
-        'updated': fields.get('updated'),
-        'fix_versions': [v.get('name', '') for v in fix_versions],
-        'components': [c.get('name', '') for c in components],
-        'labels': labels,
-        'url': f'{JIRA_URL}/browse/{raw.get("key", "")}',
-    }
-
-
-def _extract_description(description) -> str:
-    '''Extract plain text from ADF description.'''
-    if not description:
-        return ''
-    
-    if isinstance(description, str):
-        return description
-    
-    # Handle ADF format
-    if isinstance(description, dict):
-        content = description.get('content', [])
-        text_parts = []
-        for block in content:
-            if block.get('type') == 'paragraph':
-                for item in block.get('content', []):
-                    if item.get('type') == 'text':
-                        text_parts.append(item.get('text', ''))
-        return '\n'.join(text_parts)
-    
-    return str(description)
+def _raw_issue_to_dict(raw: dict[str, Any]) -> Dict[str, Any]:
+    return issue_to_dict(raw)
 
 
 # ****************************************************************************************
@@ -1711,3 +1754,32 @@ class JiraTools(BaseTool):
         set_labels: Optional[str] = None
     ) -> ToolResult:
         return bulk_update_tickets(input_file, set_release, set_labels)
+
+    # --- Daily reporting delegates ---
+
+    @tool(description='Get all tickets created on a specific date')
+    def get_tickets_created_on(self, project_key: str, date: str = '') -> ToolResult:
+        return get_tickets_created_on(project_key, date)
+
+    @tool(description='Find bugs missing a required field (e.g. affectedVersion)')
+    def find_bugs_missing_field(
+        self,
+        project_key: str,
+        field: str = 'affectedVersion',
+        date: str = '',
+    ) -> ToolResult:
+        return find_bugs_missing_field(project_key, field, date)
+
+    @tool(description='Get status transitions split by automation vs human')
+    def get_status_changes(self, project_key: str, date: str = '') -> ToolResult:
+        return get_status_changes(project_key, date)
+
+    @tool(description='Run a full daily report with optional export')
+    def daily_report(
+        self,
+        project_key: str,
+        date: str = '',
+        dump_file: str = '',
+        dump_format: str = 'excel',
+    ) -> ToolResult:
+        return daily_report_tool(project_key, date, dump_file, dump_format)

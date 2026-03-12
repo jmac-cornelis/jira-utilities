@@ -26,6 +26,9 @@ import sys
 import os
 from collections import OrderedDict
 from datetime import date
+from typing import Any, cast
+
+from core.utils import output, validate_and_repair_csv
 
 try:
     from openpyxl import Workbook, load_workbook
@@ -68,6 +71,7 @@ __all__ = [
     '_apply_header_style', '_auto_fit_columns',
     # Concatenation
     'concat_merge_sheet', 'concat_add_sheet',
+    'build_excel_map',
     # Conversion
     'convert_to_csv', 'convert_from_csv',
     # Plan JSON conversion (CSV/Excel → feature-plan JSON)
@@ -83,39 +87,6 @@ __all__ = [
     # Display
     'output',
 ]
-
-
-def output(message=''):
-    '''
-    Print user-facing output, respecting quiet mode.
-    Always logs to file regardless of quiet mode.
-
-    Input:
-        message: String to output (default empty for blank line).
-
-    Output:
-        None; prints to stdout unless in quiet mode.
-
-    Side Effects:
-        Always logs message to log file at INFO level.
-    '''
-    # Log to file only (bypass stdout handler by writing directly to file handler)
-    if message:
-        record = logging.LogRecord(
-            name=log.name,
-            level=logging.INFO,
-            pathname=__file__,
-            lineno=0,
-            msg=f'OUTPUT: {message}',
-            args=(),
-            exc_info=None,
-            func='output'
-        )
-        fh.emit(record)
-
-    # Print to stdout unless quiet mode
-    if not _quiet_mode:
-        print(message)
 
 
 # ****************************************************************************************
@@ -483,7 +454,7 @@ def concat_merge_sheet(input_files, output_file):
 
     # Phase 2: Build the output workbook
     out_wb = Workbook()
-    out_ws = out_wb.active
+    out_ws = cast(Any, out_wb.active)
     out_ws.title = 'Merged'
 
     # Write header row
@@ -572,8 +543,9 @@ def concat_add_sheet(input_files, output_file):
 
     out_wb = Workbook()
     # Remove the default empty sheet (we'll add named sheets)
-    default_ws = out_wb.active
-    out_wb.remove(default_ws)
+    default_ws = cast(Any, out_wb.active)
+    if default_ws is not None:
+        out_wb.remove(default_ws)
 
     used_names = set()
 
@@ -654,218 +626,232 @@ def concat_add_sheet(input_files, output_file):
     output('')
 
 
+def build_excel_map(ticket_keys, hierarchy_depth=1, limit=None, output_file=None,
+                    project_key=None, keep_intermediates=False, output_callback=None):
+    import importlib
+    import tempfile
+    import shutil
+
+    jira_api = cast(Any, importlib.import_module('jira_utils'))
+
+    if isinstance(ticket_keys, str):
+        keys = [ticket_keys.upper()]
+    else:
+        keys = [str(k).upper() for k in ticket_keys if str(k).strip()]
+
+    if not keys:
+        raise ValueError('At least one ticket key is required')
+
+    if output_file:
+        out_file = output_file
+    elif len(keys) == 1:
+        out_file = f'{keys[0]}.xlsx'
+    else:
+        out_file = f'{"_".join(keys)}.xlsx'
+
+    if not out_file.endswith('.xlsx'):
+        out_file = f'{out_file}.xlsx'
+
+    if output_callback is None:
+        def default_output_callback(_message=''):
+            return None
+        output_callback = default_output_callback
+
+    temp_dir = tempfile.mkdtemp(prefix='excel_map_')
+    temp_files = []
+
+    try:
+        output_callback('Step 1/4: Connecting to Jira...')
+        jira = jira_api.get_connection()
+
+        if project_key:
+            jira_api.validate_project(jira, project_key)
+
+        output_callback(f'Step 2/4: Getting first-level issues for {len(keys)} root ticket(s)...')
+
+        merged_data = []
+        seen_keys = set()
+
+        for root_key in keys:
+            output_callback(f'  Fetching related for {root_key}...')
+            related_data = jira_api._get_related_data(jira, root_key, hierarchy=1, limit=limit)
+
+            added = 0
+            for item in related_data:
+                issue_key = item['issue'].get('key', '')
+                if issue_key and issue_key not in seen_keys:
+                    seen_keys.add(issue_key)
+                    merged_data.append(item)
+                    added += 1
+
+            depth0_count = sum(1 for item in related_data if item['depth'] == 0)
+            depth1_count = sum(1 for item in related_data if item['depth'] == 1)
+            output_callback(f'    {len(related_data)} issues ({depth0_count} root + {depth1_count} depth=1), {added} new after dedup')
+
+        output_callback(f'  Merged total: {len(merged_data)} unique issues')
+
+        map_temp = os.path.join(temp_dir, '_map_temp.xlsx')
+        temp_files.append(map_temp)
+
+        map_extras = {
+            item['issue'].get('key', ''): {
+                'depth': item.get('depth'),
+                'via': item.get('via'),
+                'relation': item.get('relation'),
+                'from_key': item.get('from_key'),
+            }
+            for item in merged_data
+        }
+
+        jira_api.dump_tickets_to_file(
+            [item['issue'] for item in merged_data],
+            map_temp,
+            'excel',
+            map_extras,
+            table_format='indented',
+        )
+        output_callback(f'  Map sheet: {len(merged_data)} rows, indented format (depth 0-1)')
+
+        depth1_keys = [item['issue'].get('key', '') for item in merged_data if item['depth'] == 1]
+        output_callback(f'Step 3/4: Getting children for {len(depth1_keys)} depth=1 tickets...')
+
+        children_temps = []
+        for idx, ticket_key in enumerate(depth1_keys, 1):
+            try:
+                children_data = jira_api._get_children_data(jira, ticket_key, limit=None)
+                child_count = len(children_data) - 1
+
+                child_temp = os.path.join(temp_dir, f'temp_{ticket_key}.xlsx')
+                temp_files.append(child_temp)
+
+                child_extras = {
+                    item['issue'].get('key', ''): {
+                        'depth': item.get('depth'),
+                    }
+                    for item in children_data
+                }
+                jira_api.dump_tickets_to_file(
+                    [item['issue'] for item in children_data],
+                    child_temp,
+                    'excel',
+                    child_extras,
+                    table_format='indented',
+                )
+
+                children_temps.append((ticket_key, child_temp, len(children_data)))
+                output_callback(f'  [{idx}/{len(depth1_keys)}] {ticket_key}: {child_count} children')
+            except Exception as e:
+                log.warning(f'Failed to get children for {ticket_key}: {e}')
+                output_callback(f'  [{idx}/{len(depth1_keys)}] {ticket_key}: ERROR - {e}')
+
+        output_callback('Step 4/4: Assembling final workbook...')
+
+        final_wb = Workbook()
+        active_sheet = cast(Any, final_wb.active)
+        if active_sheet is not None:
+            final_wb.remove(active_sheet)
+
+        total_rows = 0
+        sheet_count = 0
+
+        def _copy_sheet(src_wb_path, dest_wb, sheet_name):
+            nonlocal total_rows, sheet_count
+
+            src_wb = load_workbook(src_wb_path)
+            src_ws = cast(Any, src_wb.active)
+
+            safe_name = sheet_name[:31]
+            dest_ws = cast(Any, dest_wb.create_sheet(title=safe_name))
+
+            row_count = 0
+            for row in src_ws.iter_rows():
+                row_count += 1
+                for cell in row:
+                    dest_cell = dest_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+
+                    if cell.font:
+                        dest_cell.font = copy(cell.font)
+                    if cell.fill:
+                        dest_cell.fill = copy(cell.fill)
+                    if cell.alignment:
+                        dest_cell.alignment = copy(cell.alignment)
+                    if cell.border:
+                        dest_cell.border = copy(cell.border)
+                    if cell.number_format:
+                        dest_cell.number_format = cell.number_format
+                    if cell.hyperlink:
+                        dest_cell.hyperlink = cell.hyperlink
+
+            for col_letter, dim in src_ws.column_dimensions.items():
+                dest_ws.column_dimensions[col_letter].width = dim.width
+
+            for merged_range in src_ws.merged_cells.ranges:
+                dest_ws.merge_cells(str(merged_range))
+
+            for cf_rule in src_ws.conditional_formatting:
+                try:
+                    cell_range = str(cf_rule.sqref)
+                except AttributeError:
+                    cell_range = str(cf_rule)
+                for rule in cf_rule.rules:
+                    try:
+                        dest_ws.conditional_formatting.add(cell_range, rule)
+                    except Exception as cf_err:
+                        log.debug(f'Skipping conditional formatting rule: {cf_err}')
+
+            if src_ws.freeze_panes:
+                dest_ws.freeze_panes = src_ws.freeze_panes
+
+            src_wb.close()
+
+            data_rows = max(0, row_count - 1)
+            total_rows += data_rows
+            sheet_count += 1
+            return data_rows
+
+        map_rows = _copy_sheet(map_temp, final_wb, 'Tickets')
+        output_callback(f'  Sheet 1: Tickets ({map_rows} rows)')
+
+        for idx, (ticket_key, child_temp, _child_row_count) in enumerate(children_temps, 2):
+            child_rows = _copy_sheet(child_temp, final_wb, ticket_key)
+            output_callback(f'  Sheet {idx}: {ticket_key} ({child_rows} rows)')
+
+        final_wb.save(out_file)
+        final_wb.close()
+
+        output_callback('')
+        output_callback(f'Output: {out_file} ({sheet_count} sheets, {total_rows} total rows)')
+
+        result = {
+            'output_file': out_file,
+            'sheet_count': sheet_count,
+            'total_rows': total_rows,
+            'depth1_tickets': len(depth1_keys),
+            'related_count': len(merged_data),
+            'root_tickets': keys,
+            'hierarchy_depth': hierarchy_depth,
+        }
+
+        if keep_intermediates:
+            result['temp_dir'] = temp_dir
+            result['temp_files'] = [tf for tf in temp_files if os.path.exists(tf)]
+
+        return result
+
+    finally:
+        if not keep_intermediates:
+            try:
+                shutil.rmtree(temp_dir)
+                log.debug(f'Cleaned up {len(temp_files)} intermediate files in {temp_dir}')
+            except Exception as cleanup_err:
+                log.warning(f'Failed to clean up temp dir {temp_dir}: {cleanup_err}')
+
+
 # ****************************************************************************************
 # CSV validation and repair
 # ****************************************************************************************
 
-def _validate_and_repair_csv(input_file):
-    '''
-    Validate a CSV file for column-count consistency and attempt to repair
-    misaligned rows in-place.
-
-    LLM-generated CSV files frequently contain rows where a field (typically
-    summary, assignee, or fix_version) has an unquoted comma, producing one
-    or more extra delimiter fields.  This shifts every subsequent column to
-    the right and breaks the Excel output.
-
-    The repair strategy for rows with TOO MANY fields:
-      1. Identify "anchor" columns whose values are highly recognisable
-         (e.g. Jira keys like STL-NNNNN, issue types like "Bug", status
-         values like "In Progress", priority values like "P0-Stopper").
-      2. Walk the row fields and find the best alignment of anchors to
-         headers.  Where extra fields appear between two anchors, merge
-         them back into a single quoted value (they were one cell that
-         got split by a bare comma).
-      3. If heuristic alignment fails, fall back to merging the LAST
-         extra fields (rightmost), which is usually the summary or
-         fix_version — the most common offenders.
-
-    For rows with TOO FEW fields: pad with empty strings on the right.
-
-    Input:
-        input_file: Path to the .csv file (modified in-place when repairs
-                    are needed).
-
-    Output:
-        Tuple of (repaired: bool, stats: dict).
-        stats keys: total_rows, ok_rows, repaired_rows, padded_rows,
-                    unfixable_rows.
-
-    Side Effects:
-        Overwrites input_file with the repaired CSV when any rows are
-        changed.  The original is logged but not preserved (the caller
-        should keep the LLM raw output in llm_output.md).
-    '''
-    log.debug(f'Entering _validate_and_repair_csv(input_file={input_file})')
-
-    # ------------------------------------------------------------------
-    # Phase 1: Read raw lines and parse with csv.reader (not DictReader)
-    #          so we get positional field lists.
-    # ------------------------------------------------------------------
-    with open(input_file, 'r', encoding='utf-8', newline='') as f:
-        raw_rows = list(csv.reader(f))
-
-    if len(raw_rows) < 2:
-        log.debug('CSV has fewer than 2 rows — nothing to validate')
-        return False, {'total_rows': max(len(raw_rows) - 1, 0),
-                       'ok_rows': max(len(raw_rows) - 1, 0),
-                       'repaired_rows': 0, 'padded_rows': 0,
-                       'unfixable_rows': 0}
-
-    header = raw_rows[0]
-    expected = len(header)
-    log.debug(f'CSV header has {expected} columns: {header}')
-
-    # ------------------------------------------------------------------
-    # Build anchor-detection helpers.
-    # For each header position, define a recogniser function that returns
-    # True when a cell value "looks right" for that column.
-    # ------------------------------------------------------------------
-    # Jira key pattern: PROJECT-DIGITS (e.g. STL-76636)
-    import re as _re
-    _jira_key_re = _re.compile(r'^[A-Z]{2,10}-\d+$')
-
-    # Known categorical values per column name (lowered).
-    _known_values = {
-        'issue_type': {'bug', 'story', 'task', 'epic', 'sub-task', 'subtask',
-                       'improvement', 'new feature', 'change request'},
-        'status':     {'open', 'in progress', 'closed', 'verify', 'ready',
-                       'to do', 'done', 'resolved', 'reopened', 'in review'},
-        'priority':   {'p0-stopper', 'p1-critical', 'p2-major', 'p3-minor',
-                       'p4-trivial', 'blocker', 'critical', 'major', 'minor',
-                       'trivial'},
-        'project':    {'stl', 'stlsb', 'cn', 'opx'},
-        'product':    {'nic', 'switch'},
-        'module':     {'driver', 'bts', 'fw', 'opx', 'gpu'},
-    }
-
-    def _score_alignment(fields, header_list):
-        '''Return a score (higher = better) for how well *fields* align to *header_list*.'''
-        score = 0
-        for i, hdr in enumerate(header_list):
-            if i >= len(fields):
-                break
-            val = (fields[i] or '').strip()
-            hdr_low = hdr.strip().lower()
-
-            # Jira key column
-            if hdr_low == 'key' and _jira_key_re.match(val):
-                score += 10
-            # Known categorical columns
-            elif hdr_low in _known_values and val.lower() in _known_values[hdr_low]:
-                score += 5
-            # Date-like column (updated)
-            elif hdr_low == 'updated' and _re.match(r'^\d{4}-\d{2}-\d{2}', val):
-                score += 5
-            # Non-empty value in a column that usually has data
-            elif val and hdr_low in ('customer', 'summary', 'assignee', 'fix_version'):
-                score += 1
-        return score
-
-    # ------------------------------------------------------------------
-    # Phase 2: Check each data row and repair if needed.
-    # ------------------------------------------------------------------
-    stats = {'total_rows': len(raw_rows) - 1, 'ok_rows': 0,
-             'repaired_rows': 0, 'padded_rows': 0, 'unfixable_rows': 0}
-    any_changed = False
-
-    for row_idx in range(1, len(raw_rows)):
-        fields = raw_rows[row_idx]
-        n = len(fields)
-
-        if n == expected:
-            stats['ok_rows'] += 1
-            continue
-
-        if n < expected:
-            # Too few fields — pad with empty strings on the right.
-            log.warning(f'CSV row {row_idx + 1}: {n} fields (expected {expected}) — '
-                        f'padding {expected - n} empty field(s)')
-            fields.extend([''] * (expected - n))
-            raw_rows[row_idx] = fields
-            stats['padded_rows'] += 1
-            any_changed = True
-            continue
-
-        # Too many fields — attempt heuristic merge.
-        extra = n - expected
-        log.warning(f'CSV row {row_idx + 1}: {n} fields (expected {expected}), '
-                    f'{extra} extra — attempting merge repair')
-
-        # Strategy: try every possible way to merge `extra` adjacent field
-        # pairs and pick the merge that produces the best anchor score.
-        # For efficiency, limit to merging at most 3 extra fields (covers
-        # the vast majority of LLM CSV errors).
-        best_score = -1
-        best_fields = None
-
-        if extra <= 4:
-            # Generate candidate merges.  Each candidate is defined by a
-            # set of merge-start indices: at each such index i, fields[i]
-            # and fields[i+1] are joined with a comma.  We need exactly
-            # `extra` merges.
-            from itertools import combinations
-            merge_candidates = list(range(n - 1))  # possible merge points
-            for merge_points in combinations(merge_candidates, extra):
-                # Build merged field list
-                candidate = []
-                skip_until = -1
-                i = 0
-                while i < n:
-                    if i in merge_points:
-                        # Merge this field with the next one(s) in a
-                        # contiguous run of merge points starting at i.
-                        merged = fields[i]
-                        while i in merge_points:
-                            i += 1
-                            if i < n:
-                                merged += ',' + fields[i]
-                        candidate.append(merged)
-                    else:
-                        candidate.append(fields[i])
-                    i += 1
-
-                if len(candidate) != expected:
-                    continue  # shouldn't happen, but guard
-
-                score = _score_alignment(candidate, header)
-                if score > best_score:
-                    best_score = score
-                    best_fields = candidate
-        else:
-            # Too many extras for combinatorial search — fall back to
-            # merging the rightmost extra fields into the last-but-one
-            # column (usually summary or fix_version).
-            # Find the last anchor column from the right to anchor the
-            # merge boundary.
-            best_fields = fields[:expected - 1]
-            # Join all remaining fields into the last column
-            best_fields.append(','.join(fields[expected - 1:]))
-
-        if best_fields and len(best_fields) == expected:
-            raw_rows[row_idx] = best_fields
-            stats['repaired_rows'] += 1
-            any_changed = True
-            log.info(f'CSV row {row_idx + 1}: repaired by merging {extra} extra field(s) '
-                     f'(alignment score={best_score})')
-        else:
-            # Could not repair — leave as-is (DictReader will handle overflow)
-            stats['unfixable_rows'] += 1
-            log.warning(f'CSV row {row_idx + 1}: could not repair {extra} extra field(s)')
-
-    # ------------------------------------------------------------------
-    # Phase 3: Write back if anything changed.
-    # ------------------------------------------------------------------
-    if any_changed:
-        log.info(f'Rewriting repaired CSV: {input_file} '
-                 f'(repaired={stats["repaired_rows"]}, padded={stats["padded_rows"]})')
-        with open(input_file, 'w', encoding='utf-8', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerows(raw_rows)
-    else:
-        log.debug('All CSV rows have correct column count — no repairs needed')
-
-    return any_changed, stats
+_validate_and_repair_csv = validate_and_repair_csv
 
 
 # ****************************************************************************************
@@ -1115,7 +1101,7 @@ def _create_dashboard_sheet(wb, ws_data, headers, dashboard_columns=None):
 DEFAULT_JIRA_BASE_URL = 'https://cornelisnetworks.atlassian.net'
 
 
-def convert_from_csv(input_file, output_file=None, jira_base_url=DEFAULT_JIRA_BASE_URL,
+def convert_from_csv(input_file, output_file=None, jira_base_url: str | None = DEFAULT_JIRA_BASE_URL,
                      dashboard_columns=None):
     '''
     Convert a comma-delimited CSV file to an Excel (.xlsx) file.
@@ -1215,7 +1201,7 @@ def convert_from_csv(input_file, output_file=None, jira_base_url=DEFAULT_JIRA_BA
     link_font = Font(color='0563C1', underline='single')
 
     wb = Workbook()
-    ws = wb.active
+    ws = cast(Any, wb.active)
     ws.title = os.path.splitext(os.path.basename(input_file))[0][:31]
 
     # Write header row
@@ -1324,25 +1310,20 @@ def convert_to_plan_json(input_file, output_file=None, project_key='',
 
     # Import the plan_export_tools conversion functions.
     # These live in tools/ but are pure-Python with no agent framework dependency.
-    try:
-        from tools.plan_export_tools import plan_file_to_json, write_plan_json
-    except ImportError:
-        # Fallback: if tools package is not on the path, try a direct import.
-        # This handles the case where excel_utils.py is run from the repo root.
-        import importlib.util
-        _spec = importlib.util.spec_from_file_location(
-            'plan_export_tools',
-            os.path.join(os.path.dirname(__file__), 'tools', 'plan_export_tools.py'),
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        'plan_export_tools',
+        os.path.join(os.path.dirname(__file__), 'tools', 'plan_export_tools.py'),
+    )
+    if _spec is None or _spec.loader is None:
+        raise ImportError(
+            'Cannot import plan_export_tools. Ensure tools/plan_export_tools.py '
+            'is available on the Python path.'
         )
-        if _spec is None or _spec.loader is None:
-            raise ImportError(
-                'Cannot import plan_export_tools. Ensure tools/plan_export_tools.py '
-                'is available on the Python path.'
-            )
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        plan_file_to_json = _mod.plan_file_to_json
-        write_plan_json = _mod.write_plan_json
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    plan_file_to_json = _mod.plan_file_to_json
+    write_plan_json = _mod.write_plan_json
 
     # Convert the CSV/Excel file to a plan dict
     plan = plan_file_to_json(
@@ -1533,6 +1514,8 @@ def diff_files(input_files, output_file=None):
 
     # --- Summary sheet ---
     ws_summary = out_wb.active
+    if ws_summary is None:
+        raise ExcelFileError('Failed to create Summary sheet')
     ws_summary.title = 'Summary'
     summary_headers = ['Comparison', 'File A Rows', 'File B Rows', 'Added', 'Removed', 'Changed', 'Same']
     for col_idx, h in enumerate(summary_headers, 1):
