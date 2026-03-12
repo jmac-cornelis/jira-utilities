@@ -171,7 +171,16 @@ jobs:
           PYEOF
 
           cp test-report.html report-site/test-report.html
-          cp -r coverage-html report-site/coverage
+          if [ -d coverage-html ]; then
+            cp -r coverage-html report-site/coverage
+            echo "Coverage HTML copied: $(find report-site/coverage -type f | wc -l) files"
+          else
+            mkdir -p report-site/coverage
+            echo "<html><body><h1>Coverage report not available</h1></body></html>" > report-site/coverage/index.html
+            echo "WARNING: coverage-html directory not found"
+          fi
+          echo "Report site contents:"
+          find report-site -type f | head -30
 
       - name: Deploy report to gh-pages branch
         if: always()
@@ -180,6 +189,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./report-site
           destination_dir: ${{ github.ref_name }}
+          keep_files: true
 
       - name: Post report link to PR
         if: always() && github.event_name == 'pull_request'
