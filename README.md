@@ -19,6 +19,9 @@ AI-powered project management agents and standalone CLI utilities for Jira, Exce
   - [Feature Plan Workflow](#feature-plan-workflow)
   - [Bug Report Workflow](#bug-report-workflow)
   - [Release Planning Workflow](#release-planning-workflow)
+- [PM Agents](#pm-agents)
+  - [Ticket Monitor Agent](#ticket-monitor-agent)
+  - [Release Tracker Agent](#release-tracker-agent)
 - [Standalone Utilities](#standalone-utilities)
   - [Jira CLI (`jira_utils.py`)](#jira-cli-jira_utilspy)
   - [Excel CLI (`excel_utils.py`)](#excel-cli-excel_utilspy)
@@ -411,6 +414,151 @@ These flags apply to all agentic workflows:
 
 ---
 
+## PM Agents
+
+Automated project management agents that run on a schedule or on-demand. These agents are **purely programmatic** — no LLM required. They use SQLite-backed learning stores to improve predictions over time.
+
+| Agent | Purpose | Schedule | CLI |
+|-------|---------|----------|-----|
+| **Ticket Monitor** | Validate new tickets, auto-fill missing fields, flag creators | Every 5 min (cron) | `ticket_monitor_cli.py` |
+| **Release Tracker** | Snapshot releases, track velocity, predict readiness | Daily at 9 AM (cron) | `release_tracker_cli.py` |
+
+---
+
+### Ticket Monitor Agent
+
+Watches for newly created Jira tickets, validates required fields per issue type, and takes action based on learned confidence:
+
+| Confidence | Action | Example |
+|------------|--------|---------|
+| ≥ 90% | **Auto-fill** the field and post an explanatory comment | Sets component to "JKR Host Driver" based on keyword match |
+| ≥ 50% | **Suggest** a value in a comment, ask creator to confirm | "This looks like component=BTS/verbs. Can you confirm?" |
+| < 50% | **Flag** the missing field to the creator | "Missing required field: components" |
+
+The agent learns from human corrections — when someone changes a field the agent auto-filled, it records the correction and adjusts future predictions.
+
+#### Validation Rules
+
+| Issue Type | Required Fields | Warn Fields |
+|------------|----------------|-------------|
+| Bug | affectedVersion, components, priority, description | assignee, labels |
+| Story | components, fixVersions | assignee |
+| Epic | description, fixVersions | components |
+
+#### Running the Ticket Monitor
+
+```bash
+# Standard run — validate new tickets, take actions
+python3 ticket_monitor_cli.py --project STL
+
+# Dry run — validate and report, but don't update tickets or post comments
+python3 ticket_monitor_cli.py --project STL --dry-run
+
+# Process tickets since a specific date
+python3 ticket_monitor_cli.py --project STL --since "2026-03-01"
+
+# Build the learning store without taking any actions
+python3 ticket_monitor_cli.py --project STL --learn-only
+
+# Show current state and learning statistics
+python3 ticket_monitor_cli.py --status
+
+# Reset the learning store and start fresh
+python3 ticket_monitor_cli.py --reset-learning
+
+# Verbose logging
+python3 ticket_monitor_cli.py --project STL --dry-run -v
+```
+
+#### Ticket Monitor CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--project KEY` | Jira project key (default: from config) |
+| `--dry-run` | Validate and report only — no Jira updates or comments |
+| `--since DATE` | ISO date string — override the last-checked timestamp |
+| `--learn-only` | Process tickets to build learning store, but take no actions |
+| `--reset-learning` | Clear the learning store and start fresh |
+| `--status` | Show current monitor state and learning stats, then exit |
+| `--config PATH` | Path to config YAML (default: `config/ticket_monitor.yaml`) |
+| `--db-dir DIR` | Directory for SQLite databases (default: `state/`) |
+| `-v`, `--verbose` | Enable verbose (DEBUG-level) logging |
+
+#### Cron Setup
+
+```bash
+# Run every 5 minutes
+*/5 * * * * cd /path/to/jira-utilities && .venv/bin/python ticket_monitor_cli.py --project STL >> logs/ticket_monitor.log 2>&1
+```
+
+---
+
+### Release Tracker Agent
+
+Monitors releases throughout the day, tracks status changes, computes velocity, and predicts release readiness.
+
+For each tracked release, the agent:
+1. **Snapshots** all tickets by status, priority, component, and assignee
+2. **Computes delta** — what moved, what's new, what closed since last snapshot
+3. **Highlights** new P0/P1 tickets and status transitions
+4. **Calculates velocity** — opened vs. closed per day over a rolling window
+5. **Predicts readiness** — "At current velocity, this release needs ~N more days"
+6. **Flags stale tickets** — stuck in the same status longer than 2× the average cycle time
+
+#### Running the Release Tracker
+
+```bash
+# Track all configured releases
+python3 release_tracker_cli.py --project STL
+
+# Track a specific release
+python3 release_tracker_cli.py --project STL --release "12.1.1.x"
+
+# Track multiple specific releases
+python3 release_tracker_cli.py --project STL --release "12.1.1.x" --release "12.2.0.x"
+
+# Include cycle time predictions and readiness estimates
+python3 release_tracker_cli.py --project STL --predict
+
+# Output as JSON
+python3 release_tracker_cli.py --project STL --format json
+
+# Output as CSV to a file
+python3 release_tracker_cli.py --project STL --format csv --output release_report.csv
+
+# Output as Excel
+python3 release_tracker_cli.py --project STL --format excel --output release_report.xlsx
+
+# Show current tracking stats
+python3 release_tracker_cli.py --status
+
+# Verbose logging
+python3 release_tracker_cli.py --project STL --predict -v
+```
+
+#### Release Tracker CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--project KEY` | Jira project key (default: from config) |
+| `--release VERSION` | Specific release to track (repeatable; default: all from config) |
+| `--format FORMAT` | Output format: `table`, `json`, `csv`, `excel` (default: `table`) |
+| `-o`, `--output FILE` | Output file path (default: stdout) |
+| `--predict` | Include cycle time predictions and release readiness estimate |
+| `--config PATH` | Path to config YAML (default: `config/release_tracker.yaml`) |
+| `--db-dir DIR` | Directory for SQLite databases (default: `state/`) |
+| `-v`, `--verbose` | Enable verbose (DEBUG-level) logging |
+| `--status` | Show current tracking stats, then exit |
+
+#### Cron Setup
+
+```bash
+# Run daily at 9 AM
+0 9 * * * cd /path/to/jira-utilities && .venv/bin/python release_tracker_cli.py --project STL --predict >> logs/release_tracker.log 2>&1
+```
+
+---
+
 ## Standalone Utilities
 
 These CLI tools work **without any LLM** and can be installed globally via `pipx`.
@@ -781,16 +929,18 @@ See [`data/templates/create_ticket_input.schema.json`](data/templates/create_tic
 
 ### Agents
 
-| Agent | Role |
-|-------|------|
-| **Feature Planning Orchestrator** | Coordinates the end-to-end feature-to-Jira workflow across all phases |
-| **Research Agent** | Researches the feature domain using web search and internal knowledge |
-| **Hardware Analyst** | Maps hardware architecture, interfaces, and existing SW/FW stack |
-| **Scoping Agent** | Breaks the feature into concrete SW/FW work items with complexity estimates |
-| **Feature Plan Builder** | Converts scope items into Jira Epics and Stories following the Story=Branch rule |
-| **Review Agent** | Presents the plan for human review and handles modifications |
-| **Vision Analyzer** | Extracts roadmap data from images, PowerPoint, and Excel |
-| **Jira Analyst** | Analyzes current Jira project state (releases, components, assignments) |
+| Agent | Role | LLM? |
+|-------|------|------|
+| **Feature Planning Orchestrator** | Coordinates the end-to-end feature-to-Jira workflow across all phases | Yes |
+| **Research Agent** | Researches the feature domain using web search and internal knowledge | Yes |
+| **Hardware Analyst** | Maps hardware architecture, interfaces, and existing SW/FW stack | Yes |
+| **Scoping Agent** | Breaks the feature into concrete SW/FW work items with complexity estimates | Yes |
+| **Feature Plan Builder** | Converts scope items into Jira Epics and Stories following the Story=Branch rule | Yes |
+| **Review Agent** | Presents the plan for human review and handles modifications | Yes |
+| **Vision Analyzer** | Extracts roadmap data from images, PowerPoint, and Excel | Yes |
+| **Jira Analyst** | Analyzes current Jira project state (releases, components, assignments) | Yes |
+| **Ticket Monitor** | Validates new tickets, auto-fills missing fields, learns from corrections | No |
+| **Release Tracker** | Snapshots releases, tracks velocity, predicts readiness | No |
 
 ### Programmatic Usage
 
@@ -874,6 +1024,8 @@ jira-utilities/
 ├── jira_utils.py                # Standalone Jira CLI (→ jira-utils)
 ├── excel_utils.py               # Standalone Excel CLI (→ excel-utils)
 ├── drawio_utilities.py          # Standalone Draw.io CLI (→ drawio-utils)
+├── ticket_monitor_cli.py        # Ticket Monitor CLI
+├── release_tracker_cli.py       # Release Tracker CLI
 ├── agents/                      # Agent definitions
 │   ├── base.py                  # BaseAgent abstract class
 │   ├── feature_planning_orchestrator.py
@@ -886,7 +1038,9 @@ jira-utilities/
 │   ├── orchestrator.py          # Release planning orchestrator
 │   ├── jira_analyst.py
 │   ├── planning_agent.py
-│   └── vision_analyzer.py
+│   ├── vision_analyzer.py
+│   ├── ticket_monitor.py        # Ticket Monitor Agent (no LLM)
+│   └── release_tracker.py       # Release Tracker Agent (no LLM)
 ├── tools/                       # Agent tools
 │   ├── base.py                  # @tool decorator & ToolResult
 │   ├── jira_tools.py
@@ -903,11 +1057,25 @@ jira-utilities/
 │   ├── cornelis_llm.py          # Internal LLM client
 │   ├── litellm_client.py        # External LLM client
 │   └── config.py                # LLM configuration
+├── notifications/               # Notification backends
+│   ├── base.py                  # NotificationBackend ABC
+│   └── jira_comments.py         # Jira comment notifier (ADF)
 ├── state/                       # State management
 │   ├── session.py               # Session state
-│   └── persistence.py           # Storage backends
+│   ├── persistence.py           # Storage backends
+│   ├── learning.py              # SQLite learning store (predictions, feedback)
+│   └── monitor_state.py         # Monitor checkpoint & processed tickets
+├── core/
+│   ├── monitoring.py            # Ticket validation rules engine
+│   ├── release_tracking.py      # Release snapshots, deltas, velocity
+│   ├── queries.py               # JQL builders, pagination
+│   ├── tickets.py               # issue_to_dict conversion
+│   ├── utils.py                 # Output, ADF, CSV utilities
+│   └── reporting.py             # Field validation reporting
 ├── config/                      # Configuration
 │   ├── settings.py              # App settings
+│   ├── ticket_monitor.yaml      # Ticket Monitor config
+│   ├── release_tracker.yaml     # Release Tracker config
 │   └── prompts/                 # Agent system prompts
 │       ├── feature_planning_orchestrator.md
 │       ├── feature_plan_builder.md
