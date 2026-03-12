@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.base import BaseAgent, AgentConfig, AgentResponse
+from llm.base import BaseLLM
 from core.monitoring import (
     MonitorConfig,
     ValidationResult,
@@ -98,7 +99,20 @@ class TicketMonitorAgent(BaseAgent):
             instruction='Programmatic agent — no LLM instruction required.',
         )
 
-        super().__init__(config=agent_config, llm=None, tools=None)
+        class _NoOpLLM(BaseLLM):
+            def __init__(self):
+                super().__init__(model='none')
+
+            def chat(self, messages, temperature=0.7, max_tokens=None, **kwargs):
+                raise NotImplementedError('Programmatic agent — no LLM calls')
+
+            def chat_with_vision(self, messages, images, temperature=0.7, max_tokens=None, **kwargs):
+                raise NotImplementedError('Programmatic agent — no LLM calls')
+
+            def supports_vision(self):
+                return False
+
+        super().__init__(config=agent_config, llm=_NoOpLLM(), tools=None)
 
     # ------------------------------------------------------------------
     # Lazy Jira connection helpers
@@ -120,6 +134,23 @@ class TicketMonitorAgent(BaseAgent):
     # ------------------------------------------------------------------
     # Field-update helper for Jira Cloud
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_date(date_str: str) -> Optional[str]:
+        for fmt in ('%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M',
+                    '%m-%d-%Y', '%m/%d/%Y', '%d-%m-%Y', '%d/%m/%Y'):
+            try:
+                dt = datetime.strptime(date_str.split('.')[0].split('+')[0], fmt)
+                return dt.strftime('%Y-%m-%d %H:%M')
+            except ValueError:
+                continue
+        if 'T' in date_str:
+            try:
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                return dt.strftime('%Y-%m-%d %H:%M')
+            except ValueError:
+                pass
+        return date_str
 
     @staticmethod
     def _build_update_fields(field: str, value: str) -> Dict[str, Any]:
@@ -194,6 +225,8 @@ class TicketMonitorAgent(BaseAgent):
             return AgentResponse.error_response(f'Jira connection failed: {exc}')
 
         last_checked = since_override or self.state.get_last_checked(project)
+        if last_checked:
+            last_checked = self._normalize_date(last_checked)
         if not last_checked:
             last_checked = (
                 datetime.now(timezone.utc) - timedelta(hours=24)
@@ -242,7 +275,6 @@ class TicketMonitorAgent(BaseAgent):
         self.state.set_last_checked(project)
 
         summary = self._build_summary(stats, project)
-        log.info(summary)
 
         return AgentResponse.success_response(
             content=summary,

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.base import BaseAgent, AgentConfig, AgentResponse
+from llm.base import BaseLLM
 from core.queries import build_release_tickets_jql, paginated_jql_search
 from core.release_tracking import (
     CycleTimeStats,
@@ -85,8 +86,20 @@ class ReleaseTrackerAgent(BaseAgent):
             instruction='Release Tracker Agent — programmatic, no LLM.',
         )
 
-        # Initialise BaseAgent without LLM or tools (purely programmatic).
-        super().__init__(config=agent_config, llm=None, tools=None)
+        class _NoOpLLM(BaseLLM):
+            def __init__(self):
+                super().__init__(model='none')
+
+            def chat(self, messages, temperature=0.7, max_tokens=None, **kwargs):
+                raise NotImplementedError('Programmatic agent — no LLM calls')
+
+            def chat_with_vision(self, messages, images, temperature=0.7, max_tokens=None, **kwargs):
+                raise NotImplementedError('Programmatic agent — no LLM calls')
+
+            def supports_vision(self):
+                return False
+
+        super().__init__(config=agent_config, llm=_NoOpLLM(), tools=None)
 
         # Output format: table (default), json, csv
         self._output_format: str = self.tracker_config.output.get('format', 'table')
