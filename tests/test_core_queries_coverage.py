@@ -139,14 +139,28 @@ def test_build_no_release_jql_with_issue_types_and_statuses():
 
 
 def test_paginated_jql_search_prefers_enhanced_search_when_available():
+    # enhanced_search_issues uses nextPageToken, not startAt.
+    # First call: no token → return page 1 with a nextPageToken.
+    # Second call: has token → return page 2 with no token (signals end).
     jira = SimpleNamespace()
     jira.enhanced_search_issues_calls = []
 
+    class _ResultPage(list):
+        """Simulate a ResultList that carries nextPageToken as an attribute."""
+        def __init__(self, items, next_token=None):
+            super().__init__(items)
+            self.nextPageToken = next_token
+
+    call_count = [0]
+
     def _enhanced(_jql, **kwargs):
         jira.enhanced_search_issues_calls.append(kwargs)
-        if kwargs['startAt'] == 0:
-            return ['STL-1', 'STL-2']
-        return ['STL-3']
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # First page — return 2 items with a nextPageToken
+            return _ResultPage(['STL-1', 'STL-2'], next_token='page2')
+        # Second page — return 1 item with no token (end)
+        return _ResultPage(['STL-3'], next_token=None)
 
     jira.enhanced_search_issues = _enhanced
     jira.search_issues_called = False
@@ -161,9 +175,10 @@ def test_paginated_jql_search_prefers_enhanced_search_when_available():
 
     assert issues == ['STL-1', 'STL-2', 'STL-3']
     assert jira.search_issues_called is False
+    # First call has no nextPageToken, second call has 'page2'
     assert jira.enhanced_search_issues_calls == [
-        {'startAt': 0, 'maxResults': 2},
-        {'startAt': 2, 'maxResults': 2},
+        {'maxResults': 2},
+        {'maxResults': 2, 'nextPageToken': 'page2'},
     ]
 
 
