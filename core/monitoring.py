@@ -58,6 +58,7 @@ class ValidationResult:
     missing_warned: list[str] = field(default_factory=list)
     predictions: dict[str, dict[str, Any]] = field(default_factory=dict)
     actions: list[dict[str, Any]] = field(default_factory=list)
+    ticket_data: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -261,6 +262,7 @@ def validate_ticket(ticket_dict: Mapping[str, Any], config: MonitorConfig) -> Va
         issue_type=issue_type,
         missing_required=missing_required,
         missing_warned=missing_warned,
+        ticket_data=dict(ticket_dict),
     )
 
 
@@ -305,24 +307,29 @@ def _predict_for_field(
                 return _coerce_prediction(learning_store.get(key))
         return None, 0.0
 
+    ticket_data = validation.ticket_data or {
+        'key': validation.ticket_key,
+        'issue_type': validation.issue_type,
+    }
+
     getter = getattr(learning_store, 'get_field_prediction', None)
     if callable(getter):
         for args in (
-            (field_name, validation),
+            (field_name, ticket_data),
             (field_name, {'ticket_key': validation.ticket_key, 'issue_type': validation.issue_type}),
             (field_name,),
         ):
             try:
                 return _coerce_prediction(getter(*args))
-            except TypeError:
+            except (TypeError, AttributeError):
                 continue
 
     fallback_getter = getattr(learning_store, 'get_prediction', None)
     if callable(fallback_getter):
-        for args in ((field_name, validation), (field_name,)):
+        for args in ((field_name, ticket_data), (field_name,)):
             try:
                 return _coerce_prediction(fallback_getter(*args))
-            except TypeError:
+            except (TypeError, AttributeError):
                 continue
 
     return None, 0.0
