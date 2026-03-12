@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Test & Coverage Report</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 2rem; }
+    .container { max-width: 900px; margin: 0 auto; }
+    h1 { color: #f0f6fc; margin-bottom: 0.5rem; font-size: 1.8rem; }
+    h2 { color: #f0f6fc; margin: 1.5rem 0 0.75rem; }
+    .subtitle { color: #8b949e; margin-bottom: 2rem; }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-bottom: 2rem; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; text-align: center; }
+    .card .value { font-size: 2.5rem; font-weight: 700; }
+    .card .label { color: #8b949e; font-size: 0.9rem; margin-top: 0.3rem; }
+    .pass { color: #3fb950; }
+    .fail { color: #f85149; }
+    .cov { color: #4caf50; }
+    table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; margin-bottom: 2rem; }
+    th { background: #21262d; color: #f0f6fc; padding: 0.75rem 1rem; text-align: left; font-weight: 600; }
+    td { padding: 0.75rem 1rem; border-top: 1px solid #30363d; }
+    .bar-bg { background: #21262d; border-radius: 4px; height: 8px; width: 100%; }
+    .bar { height: 8px; border-radius: 4px; }
+    .links { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 2rem; }
+    .links a { color: #58a6ff; text-decoration: none; padding: 0.6rem 1.2rem; border: 1px solid #30363d; border-radius: 6px; background: #161b22; font-weight: 500; }
+    .links a:hover { background: #21262d; border-color: #58a6ff; }
+    .meta { color: #484f58; font-size: 0.8rem; margin-top: 2rem; }
+    .meta a { color: #58a6ff; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>✅ Test & Coverage Report</h1>
+    <p class="subtitle">cornelis-jira-tools &mdash; <code>main</code> @ <code>2736a045</code></p>
+
+    <div class="cards">
+      <div class="card">
+        <div class="value pass">225</div>
+        <div class="label">Tests Passed</div>
+      </div>
+      <div class="card">
+        <div class="value pass">0</div>
+        <div class="label">Failed / Errors</div>
+      </div>
+      <div class="card">
+        <div class="value cov">82%</div>
+        <div class="label">Line Coverage</div>
+      </div>
+    </div>
+
+    <h2>Coverage by Module</h2>
+    <table>
+      <tr><th>Module</th><th>Coverage</th><th></th></tr>
+
+      <tr>
+        <td><code>/</code></td>
+        <td style="width:80px; text-align:right;">82%</td>
+        <td style="width:40%;">
+          <div class="bar-bg"><div class="bar" style="width:82.19999999999999%; background:#3fb950;"></div></div>
+        </td>
+      </tr>
+    </table>
+
+    <div class="links">
+      <a href="test-report.html">🧪 Detailed Test Report</a>
+      <a href="coverage/index.html">📊 Full Coverage Report</a>
+    </div>
+
+    <p class="meta">
+      Generated 2026-03-12 18:30:04 UTC &mdash; 4.53s
+      &mdash; <a href="https://github.com/jmac-cornelis/jira-utilities/actions/runs/23017678013">View workflow run</a>
+    </p>
+  </div>
+</body>
+</html>
