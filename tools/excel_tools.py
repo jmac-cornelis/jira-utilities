@@ -16,7 +16,7 @@ import sys
 
 log = logging.getLogger(os.path.basename(sys.argv[0]))
 
-from typing import List
+from typing import List, Optional
 
 from tools.base import tool, ToolResult, BaseTool
 
@@ -68,8 +68,8 @@ def _success_result(data):
 def build_excel_map(
     ticket_keys: List[str],
     hierarchy_depth: int = 1,
-    limit: int | None = None,
-    output_file: str | None = None,
+    limit: Optional[int] = None,
+    output_file: Optional[str] = None,
 ) -> ToolResult:
     if not _excel_utils_available:
         return ToolResult.failure('excel_utils is not available')
@@ -144,7 +144,7 @@ def concat_excel(
 )
 def excel_to_csv(
     input_file: str,
-    output_file: str | None = None,
+    output_file: Optional[str] = None,
 ) -> ToolResult:
     '''
     Convert an Excel file to CSV.
@@ -177,7 +177,7 @@ def excel_to_csv(
 )
 def csv_to_excel(
     input_file: str,
-    output_file: str | None = None,
+    output_file: Optional[str] = None,
 ) -> ToolResult:
     '''
     Convert a CSV file to Excel with header styling and auto-fit columns.
@@ -210,7 +210,7 @@ def csv_to_excel(
 )
 def diff_excel(
     input_files: List[str],
-    output_file: str | None = None,
+    output_file: Optional[str] = None,
 ) -> ToolResult:
     '''
     Compare two Excel files and produce a diff report.
@@ -247,7 +247,7 @@ class ExcelTools(BaseTool):
     @tool(description='Build a multi-sheet Excel map from one or more root tickets')
     def build_excel_map(
         self, ticket_keys: List[str], hierarchy_depth: int = 1,
-        limit: int | None = None, output_file: str | None = None
+        limit: Optional[int] = None, output_file: Optional[str] = None
     ) -> ToolResult:
         return build_excel_map(ticket_keys, hierarchy_depth, limit, output_file)
 
@@ -258,13 +258,13 @@ class ExcelTools(BaseTool):
         return concat_excel(input_files, output_file, method)
 
     @tool(description='Convert Excel to CSV')
-    def excel_to_csv(self, input_file: str, output_file: str | None = None) -> ToolResult:
+    def excel_to_csv(self, input_file: str, output_file: Optional[str] = None) -> ToolResult:
         return excel_to_csv(input_file, output_file)
 
     @tool(description='Convert CSV to Excel')
-    def csv_to_excel(self, input_file: str, output_file: str | None = None) -> ToolResult:
+    def csv_to_excel(self, input_file: str, output_file: Optional[str] = None) -> ToolResult:
         return csv_to_excel(input_file, output_file)
 
     @tool(description='Diff two Excel files')
-    def diff_excel(self, input_files: List[str], output_file: str | None = None) -> ToolResult:
+    def diff_excel(self, input_files: List[str], output_file: Optional[str] = None) -> ToolResult:
         return diff_excel(input_files, output_file)

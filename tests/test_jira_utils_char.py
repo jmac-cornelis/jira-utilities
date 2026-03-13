@@ -1,7 +1,7 @@
 import os
 import sys
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -9,7 +9,13 @@ import jira_utils
 
 
 class _Response:
-    def __init__(self, status_code: int = 200, payload: dict[str, Any] | None = None, text: str = '', headers: dict[str, str] | None = None):
+    def __init__(
+        self,
+        status_code: int = 200,
+        payload: Optional[dict[str, Any]] = None,
+        text: str = '',
+        headers: Optional[dict[str, str]] = None,
+    ):
         self.status_code = status_code
         self._payload = payload or {}
         self.text = text

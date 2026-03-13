@@ -26,7 +26,7 @@ import sys
 import os
 from collections import OrderedDict
 from datetime import date
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 from core.utils import output, validate_and_repair_csv
 
@@ -1101,8 +1101,12 @@ def _create_dashboard_sheet(wb, ws_data, headers, dashboard_columns=None):
 DEFAULT_JIRA_BASE_URL = 'https://cornelisnetworks.atlassian.net'
 
 
-def convert_from_csv(input_file, output_file=None, jira_base_url: str | None = DEFAULT_JIRA_BASE_URL,
-                     dashboard_columns=None):
+def convert_from_csv(
+    input_file,
+    output_file=None,
+    jira_base_url: Optional[str] = DEFAULT_JIRA_BASE_URL,
+    dashboard_columns=None,
+):
     '''
     Convert a comma-delimited CSV file to an Excel (.xlsx) file.
 

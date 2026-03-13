@@ -3,7 +3,7 @@ import json
 import sys
 from argparse import Namespace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import openpyxl
 import pytest
@@ -601,10 +601,10 @@ def test_main_dispatches_concat_modes(monkeypatch):
     merge_called: dict[str, Any] = {}
     add_called: dict[str, Any] = {}
 
-    def fake_merge(files: list[str], out_file: str | None):
+    def fake_merge(files: list[str], out_file: Optional[str]):
         merge_called['args'] = (files, out_file)
 
-    def fake_add(files: list[str], out_file: str | None):
+    def fake_add(files: list[str], out_file: Optional[str]):
         add_called['args'] = (files, out_file)
 
     monkeypatch.setattr(excel_utils, 'concat_merge_sheet', fake_merge)
@@ -632,10 +632,10 @@ def test_main_dispatches_convert_to_csv_and_diff(monkeypatch):
     convert_calls: dict[str, Any] = {}
     diff_calls: dict[str, Any] = {}
 
-    def fake_convert(input_file: str, output_file: str | None):
+    def fake_convert(input_file: str, output_file: Optional[str]):
         convert_calls['args'] = (input_file, output_file)
 
-    def fake_diff(files: list[str], output_file: str | None):
+    def fake_diff(files: list[str], output_file: Optional[str]):
         diff_calls['args'] = (files, output_file)
 
     monkeypatch.setattr(excel_utils, 'convert_to_csv', fake_convert)
@@ -664,9 +664,9 @@ def test_main_convert_from_csv_normalizes_none_jira_url(monkeypatch):
 
     def fake_convert_from_csv(
         input_file: str,
-        output_file: str | None,
-        jira_base_url: str | None = excel_utils.DEFAULT_JIRA_BASE_URL,
-        dashboard_columns: list[str] | None = None,
+        output_file: Optional[str],
+        jira_base_url: Optional[str] = excel_utils.DEFAULT_JIRA_BASE_URL,
+        dashboard_columns: Optional[list[str]] = None,
     ):
         captured['input_file'] = input_file
         captured['output_file'] = output_file
@@ -698,7 +698,7 @@ def test_main_dispatches_to_plan_json(monkeypatch):
 
     def fake_to_plan_json(
         input_file: str,
-        output_file: str | None = None,
+        output_file: Optional[str] = None,
         project_key: str = '',
         product_family: str = '',
         feature_name: str = '',
@@ -734,7 +734,7 @@ def test_main_dispatches_to_plan_json(monkeypatch):
 
 
 def test_main_exits_with_code_1_on_excel_file_error(monkeypatch):
-    def raise_excel_error(_input_file: str, _output_file: str | None):
+    def raise_excel_error(_input_file: str, _output_file: Optional[str]):
         raise excel_utils.ExcelFileError('bad excel input')
 
     monkeypatch.setattr(excel_utils, 'convert_to_csv', raise_excel_error)
@@ -752,7 +752,7 @@ def test_main_exits_with_code_1_on_excel_file_error(monkeypatch):
 
 
 def test_main_exits_with_code_1_on_unexpected_error(monkeypatch):
-    def raise_runtime_error(_input_file: str, _output_file: str | None):
+    def raise_runtime_error(_input_file: str, _output_file: Optional[str]):
         raise RuntimeError('unexpected boom')
 
     monkeypatch.setattr(excel_utils, 'convert_to_csv', raise_runtime_error)

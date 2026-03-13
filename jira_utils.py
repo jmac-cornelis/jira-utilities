@@ -27,6 +27,7 @@ import csv
 from datetime import date, datetime
 import re
 import requests
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -560,7 +561,7 @@ class UserResolver:
             return False
         return bool(self._ACCOUNT_ID_PATTERN.match(value.strip()))
 
-    def resolve(self, assignee: str, project_key: str = '') -> 'str | None':
+    def resolve(self, assignee: str, project_key: str = '') -> Optional[str]:
         '''Resolve a single assignee string to an accountId.
 
         Args:
@@ -874,7 +875,7 @@ class UserResolver:
 
 
 # Module-level singleton for the UserResolver
-_user_resolver: 'UserResolver | None' = None
+_user_resolver: Optional['UserResolver'] = None
 
 
 def get_user_resolver() -> UserResolver:
