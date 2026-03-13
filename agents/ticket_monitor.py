@@ -813,7 +813,7 @@ class TicketMonitorAgent(BaseAgent):
             except (ValueError, TypeError):
                 pass
 
-        resolved_str = ticket.get('resolution_date') or ticket.get('resolutiondate', '')
+        resolved_str = ticket.get('resolved') or ticket.get('resolved_ts', '')
         resolve_days = None
         if resolved_str and created_str:
             try:
@@ -828,9 +828,16 @@ class TicketMonitorAgent(BaseAgent):
             except (ValueError, TypeError):
                 pass
 
+        url = ticket.get('url', '')
+        if not url:
+            key = ticket.get('key', '')
+            jira_url = os.environ.get('JIRA_URL', 'https://cornelisnetworks.atlassian.net')
+            url = f'{jira_url.rstrip("/")}/browse/{key}' if key else ''
+
         return {
             'key': ticket.get('key', '?'),
             'summary': ticket.get('summary', ''),
+            'url': url,
             'status': ticket.get('status', ''),
             'priority': ticket.get('priority', ''),
             'assignee': ticket.get('assignee', 'Unassigned'),
@@ -897,6 +904,11 @@ class TicketMonitorAgent(BaseAgent):
                         f'{e["components"][:comp_w]:<{comp_w}} '
                         f'{TicketMonitorAgent._missing_str(e)}'
                     )
+                    summary = e.get('summary', '')[:72]
+                    url = e.get('url', '')
+                    lines.append(f'          {summary}')
+                    if url:
+                        lines.append(f'          {url}')
                 lines.append('')
         else:
             lines.append('    (none)')
@@ -923,6 +935,11 @@ class TicketMonitorAgent(BaseAgent):
                         f'{(e["assignee"] or "Unassigned")[:assignee_w]:<{assignee_w}} '
                         f'{e["components"][:comp_w]:<{comp_w}} {resolve_str}'
                     )
+                    summary = e.get('summary', '')[:72]
+                    url = e.get('url', '')
+                    lines.append(f'          {summary}')
+                    if url:
+                        lines.append(f'          {url}')
                 lines.append('')
         else:
             lines.append('    (none)')
@@ -952,6 +969,11 @@ class TicketMonitorAgent(BaseAgent):
                         f'{e["components"][:comp_w]:<{comp_w}} '
                         f'{age_str:<6} {TicketMonitorAgent._missing_str(e)}'
                     )
+                    summary = e.get('summary', '')[:72]
+                    url = e.get('url', '')
+                    lines.append(f'          {summary}')
+                    if url:
+                        lines.append(f'          {url}')
                 lines.append('')
         else:
             lines.append('    (none)')
