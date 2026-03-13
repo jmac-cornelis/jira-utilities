@@ -721,6 +721,252 @@ class TicketMonitorAgent(BaseAgent):
             },
         )
 
+    def generate_daily_report(self, project: Optional[str] = None) -> AgentResponse:
+        project = project or self.monitor_config.project
+        if not project:
+            return AgentResponse.error_response('No project configured.')
+
+        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        today_display = datetime.now(timezone.utc).strftime('%A %B %d, %Y')
+
+        try:
+            jira = self._get_jira()
+        except Exception as exc:
+            return AgentResponse.error_response(f'Jira connection failed: {exc}')
+
+        log.info('Generating daily bug report — project=%s date=%s', project, today)
+
+        opened_bugs: list = []
+        closed_bugs: list = []
+        open_p0_p1: list = []
+
+        try:
+            opened_jql = (
+                f'project = {project} AND issuetype = Bug '
+                f'AND created >= "{today}" ORDER BY priority ASC, created ASC'
+            )
+            for raw in paginated_jql_search(jira, opened_jql, max_results=None):
+                ticket = issue_to_dict(raw)
+                validation = validate_ticket(ticket, self.monitor_config)
+                opened_bugs.append(self._daily_entry(ticket, validation))
+        except Exception as exc:
+            log.error('Failed querying opened bugs: %s', exc)
+
+        try:
+            closed_jql = (
+                f'project = {project} AND issuetype = Bug '
+                f'AND status changed to (Closed, Done, Resolved) AFTER startOfDay() '
+                f'ORDER BY priority ASC, resolutiondate ASC'
+            )
+            for raw in paginated_jql_search(jira, closed_jql, max_results=None):
+                ticket = issue_to_dict(raw)
+                closed_bugs.append(self._daily_entry(ticket, None))
+        except Exception as exc:
+            log.error('Failed querying closed bugs: %s', exc)
+
+        try:
+            open_jql = (
+                f'project = {project} AND issuetype = Bug '
+                f'AND status not in (Closed, Done, Resolved) '
+                f'AND priority in ("P0-Stopper", "P1-Critical") '
+                f'ORDER BY priority ASC, created ASC'
+            )
+            for raw in paginated_jql_search(jira, open_jql, max_results=None):
+                ticket = issue_to_dict(raw)
+                validation = validate_ticket(ticket, self.monitor_config)
+                open_p0_p1.append(self._daily_entry(ticket, validation))
+        except Exception as exc:
+            log.error('Failed querying open P0/P1 bugs: %s', exc)
+
+        log.info(
+            'Daily: %d opened, %d closed, %d open P0/P1',
+            len(opened_bugs), len(closed_bugs), len(open_p0_p1),
+        )
+
+        report = self._format_daily_report(
+            opened_bugs, closed_bugs, open_p0_p1, project, today_display,
+        )
+
+        return AgentResponse.success_response(
+            content=report,
+            metadata={
+                'project': project,
+                'date': today,
+                'opened': len(opened_bugs),
+                'closed': len(closed_bugs),
+                'open_p0_p1': len(open_p0_p1),
+            },
+        )
+
+    @staticmethod
+    def _daily_entry(ticket: dict, validation: Optional['ValidationResult']) -> dict:
+        created_str = ticket.get('created', '')
+        age_days = None
+        if created_str:
+            try:
+                created_dt = datetime.fromisoformat(
+                    created_str.replace('Z', '+00:00').split('.')[0]
+                )
+                age_days = (datetime.now(timezone.utc) - created_dt.replace(
+                    tzinfo=timezone.utc if created_dt.tzinfo is None else created_dt.tzinfo
+                )).days
+            except (ValueError, TypeError):
+                pass
+
+        resolved_str = ticket.get('resolution_date') or ticket.get('resolutiondate', '')
+        resolve_days = None
+        if resolved_str and created_str:
+            try:
+                created_dt = datetime.fromisoformat(
+                    created_str.replace('Z', '+00:00').split('.')[0]
+                )
+                resolved_dt = datetime.fromisoformat(
+                    resolved_str.replace('Z', '+00:00').split('.')[0]
+                )
+                delta = resolved_dt - created_dt
+                resolve_days = round(delta.total_seconds() / 86400, 1)
+            except (ValueError, TypeError):
+                pass
+
+        return {
+            'key': ticket.get('key', '?'),
+            'summary': ticket.get('summary', ''),
+            'status': ticket.get('status', ''),
+            'priority': ticket.get('priority', ''),
+            'assignee': ticket.get('assignee', 'Unassigned'),
+            'components': ', '.join(ticket.get('components', [])) or '—',
+            'missing_required': validation.missing_required if validation else [],
+            'missing_warned': validation.missing_warned if validation else [],
+            'flagged': bool(validation and validation.missing_required),
+            'age_days': age_days,
+            'resolve_days': resolve_days,
+        }
+
+    @staticmethod
+    def _format_daily_report(
+        opened: list,
+        closed: list,
+        open_p0_p1: list,
+        project: str,
+        date_display: str,
+    ) -> str:
+        lines: list = []
+        priority_order = ['P0-Stopper', 'P1-Critical', 'P2-High', 'P3-Medium', 'P4-Low']
+
+        def _sort_key(p: str) -> int:
+            return priority_order.index(p) if p in priority_order else 999
+
+        def _group_by_priority(entries: list) -> Dict[str, list]:
+            groups: Dict[str, list] = {}
+            for e in entries:
+                groups.setdefault(e['priority'], []).append(e)
+            return dict(sorted(groups.items(), key=lambda kv: _sort_key(kv[0])))
+
+        net = len(opened) - len(closed)
+        net_str = f'+{net}' if net > 0 else str(net)
+        p0_count = sum(1 for e in open_p0_p1 if e['priority'] == 'P0-Stopper')
+        p1_count = sum(1 for e in open_p0_p1 if e['priority'] == 'P1-Critical')
+
+        lines.append(f'Bug Daily Report — {project} ({date_display})')
+        lines.append('=' * 80)
+
+        key_w, status_w, assignee_w, comp_w = 14, 14, 18, 20
+
+        lines.append('')
+        opened_flagged = sum(1 for e in opened if e['flagged'])
+        lines.append(f'  OPENED TODAY ({len(opened)} bugs, {opened_flagged} flagged)')
+        lines.append(f'  {"-" * 76}')
+        if opened:
+            for pri, entries in _group_by_priority(opened).items():
+                flagged_ct = sum(1 for e in entries if e['flagged'])
+                lines.append(f'    {pri} ({len(entries)} bugs, {flagged_ct} flagged)')
+                lines.append(f'    {"·" * 72}')
+                lines.append(
+                    f'    {"Key":<{key_w}} {"Status":<{status_w}} '
+                    f'{"Assignee":<{assignee_w}} {"Components":<{comp_w}} Missing'
+                )
+                lines.append(
+                    f'    {"—" * key_w} {"—" * status_w} '
+                    f'{"—" * assignee_w} {"—" * comp_w} {"—" * 16}'
+                )
+                for e in entries:
+                    flag = '⚠️ ' if e['flagged'] else '   '
+                    lines.append(
+                        f' {flag}{e["key"]:<{key_w}} {e["status"][:status_w]:<{status_w}} '
+                        f'{(e["assignee"] or "Unassigned")[:assignee_w]:<{assignee_w}} '
+                        f'{e["components"][:comp_w]:<{comp_w}} '
+                        f'{TicketMonitorAgent._missing_str(e)}'
+                    )
+                lines.append('')
+        else:
+            lines.append('    (none)')
+            lines.append('')
+
+        lines.append(f'  CLOSED TODAY ({len(closed)} bugs)')
+        lines.append(f'  {"-" * 76}')
+        if closed:
+            for pri, entries in _group_by_priority(closed).items():
+                lines.append(f'    {pri} ({len(entries)} bugs)')
+                lines.append(f'    {"·" * 72}')
+                lines.append(
+                    f'    {"Key":<{key_w}} {"Status":<{status_w}} '
+                    f'{"Assignee":<{assignee_w}} {"Components":<{comp_w}} Resolved In'
+                )
+                lines.append(
+                    f'    {"—" * key_w} {"—" * status_w} '
+                    f'{"—" * assignee_w} {"—" * comp_w} {"—" * 16}'
+                )
+                for e in entries:
+                    resolve_str = f'{e["resolve_days"]}d' if e['resolve_days'] is not None else '—'
+                    lines.append(
+                        f'   {e["key"]:<{key_w}} {e["status"][:status_w]:<{status_w}} '
+                        f'{(e["assignee"] or "Unassigned")[:assignee_w]:<{assignee_w}} '
+                        f'{e["components"][:comp_w]:<{comp_w}} {resolve_str}'
+                    )
+                lines.append('')
+        else:
+            lines.append('    (none)')
+            lines.append('')
+
+        lines.append(f'  STILL OPEN P0/P1 ({len(open_p0_p1)} bugs)')
+        lines.append(f'  {"-" * 76}')
+        if open_p0_p1:
+            for pri, entries in _group_by_priority(open_p0_p1).items():
+                flagged_ct = sum(1 for e in entries if e['flagged'])
+                lines.append(f'    {pri} ({len(entries)} bugs, {flagged_ct} flagged)')
+                lines.append(f'    {"·" * 72}')
+                lines.append(
+                    f'    {"Key":<{key_w}} {"Status":<{status_w}} '
+                    f'{"Assignee":<{assignee_w}} {"Components":<{comp_w}} Age    Missing'
+                )
+                lines.append(
+                    f'    {"—" * key_w} {"—" * status_w} '
+                    f'{"—" * assignee_w} {"—" * comp_w} {"—" * 6} {"—" * 16}'
+                )
+                for e in entries:
+                    flag = '⚠️ ' if e['flagged'] else '   '
+                    age_str = f'{e["age_days"]}d' if e['age_days'] is not None else '—'
+                    lines.append(
+                        f' {flag}{e["key"]:<{key_w}} {e["status"][:status_w]:<{status_w}} '
+                        f'{(e["assignee"] or "Unassigned")[:assignee_w]:<{assignee_w}} '
+                        f'{e["components"][:comp_w]:<{comp_w}} '
+                        f'{age_str:<6} {TicketMonitorAgent._missing_str(e)}'
+                    )
+                lines.append('')
+        else:
+            lines.append('    (none)')
+            lines.append('')
+
+        lines.append('=' * 80)
+        lines.append(
+            f'  Summary: +{len(opened)} opened, -{len(closed)} closed, '
+            f'net {net_str} | {len(open_p0_p1)} open P0/P1 '
+            f'({p0_count} P0, {p1_count} P1)'
+        )
+        lines.append('=' * 80)
+
+        return '\n'.join(lines)
+
     @staticmethod
     def _format_report(
         tickets_by_type: Dict[str, list],

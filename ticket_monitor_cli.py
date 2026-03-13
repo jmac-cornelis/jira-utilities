@@ -105,6 +105,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help='Generate a categorized ticket report with missing-field flags',
     )
+    parser.add_argument(
+        '--daily',
+        action='store_true',
+        default=False,
+        help='Generate daily bug report: opened today, closed today, open P0/P1',
+    )
 
     return parser
 
@@ -129,12 +135,14 @@ def main() -> int:
             log.info('Current status:\n%s', json.dumps(status, indent=2, default=str))
             return 0
 
+        if args.daily:
+            response = agent.generate_daily_report(project=args.project)
+            print(response.content)
+            return 0 if response.success else 1
+
         if args.report:
-            overrides_r: dict = {}
-            if args.project:
-                overrides_r['project'] = args.project
             response = agent.generate_report(
-                project=overrides_r.get('project'),
+                project=args.project,
                 since=args.since,
             )
             print(response.content)
