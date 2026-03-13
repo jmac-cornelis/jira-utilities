@@ -77,6 +77,7 @@ class MonitorConfig:
     keyword_extraction: bool = True
     reporter_profiling: bool = True
     notifications: dict[str, Any] = field(default_factory=dict)
+    valid_affects_versions: list[str] = field(default_factory=list)
 
     @classmethod
     def from_yaml(cls, yaml_input: str | Mapping[str, Any]) -> 'MonitorConfig':
@@ -131,6 +132,9 @@ class MonitorConfig:
         if not isinstance(notifications, Mapping):
             notifications = {}
 
+        raw_versions = learning_cfg.get('valid_affects_versions') or []
+        valid_affects_versions = [str(v) for v in raw_versions] if isinstance(raw_versions, list) else []
+
         return cls(
             project=str(payload.get('project', '') or ''),
             poll_interval_minutes=int(payload.get('poll_interval_minutes', 5) or 5),
@@ -142,6 +146,7 @@ class MonitorConfig:
             keyword_extraction=bool(learning_cfg.get('keyword_extraction', True)),
             reporter_profiling=bool(learning_cfg.get('reporter_profiling', True)),
             notifications=dict(notifications),
+            valid_affects_versions=valid_affects_versions,
         )
 
 
@@ -346,12 +351,20 @@ def determine_actions(
     predictions: dict[str, dict[str, Any]] = dict(validation.predictions)
     actions: list[dict[str, Any]] = list(validation.actions)
 
+    valid_av = set(config.valid_affects_versions) if config.valid_affects_versions else set()
+
     def decide_action(field_name: str, severity: str) -> None:
         predicted_value: Optional[Any] = None
         confidence = 0.0
 
         if config.learning_enabled:
             predicted_value, confidence = _predict_for_field(learning_store, field_name, validation)
+
+        canonical = _canonical_field_name(field_name)
+        if predicted_value is not None and canonical in ('affects_versions', 'affected_version'):
+            if valid_av and str(predicted_value) not in valid_av:
+                predicted_value = None
+                confidence = 0.0
 
         action = 'flag' if severity == 'required' else 'warn'
         if predicted_value is not None and confidence >= auto_threshold:
