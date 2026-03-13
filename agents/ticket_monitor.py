@@ -748,35 +748,10 @@ class TicketMonitorAgent(BaseAgent):
             lines.append(f'  {issue_type} ({len(entries)} tickets, {flagged_count} flagged)')
             lines.append(f'  {"-" * 76}')
 
-            key_w, type_w, status_w, pri_w, assignee_w = 14, 12, 14, 14, 18
-            lines.append(
-                f'  {"Key":<{key_w}} {"Type":<{type_w}} {"Status":<{status_w}} '
-                f'{"Priority":<{pri_w}} {"Assignee":<{assignee_w}} Missing'
-            )
-            lines.append(
-                f'  {"—" * key_w} {"—" * type_w} {"—" * status_w} '
-                f'{"—" * pri_w} {"—" * assignee_w} {"—" * 16}'
-            )
-
-            for entry in entries:
-                flag = '⚠️ ' if entry['flagged'] else '   '
-                missing_parts = []
-                if entry['missing_required']:
-                    missing_parts.append(', '.join(entry['missing_required']))
-                if entry['missing_warned']:
-                    missing_parts.append(f"(warn: {', '.join(entry['missing_warned'])})")
-                missing_str = ' '.join(missing_parts) if missing_parts else '✓'
-
-                key_str = entry['key'][:key_w]
-                type_str = entry.get('issue_type', issue_type)[:type_w]
-                status_str = entry['status'][:status_w]
-                pri_str = entry['priority'][:pri_w]
-                assignee_str = (entry['assignee'] or 'Unassigned')[:assignee_w]
-
-                lines.append(
-                    f'{flag}{key_str:<{key_w}} {type_str:<{type_w}} {status_str:<{status_w}} '
-                    f'{pri_str:<{pri_w}} {assignee_str:<{assignee_w}} {missing_str}'
-                )
+            if issue_type == 'Bug':
+                TicketMonitorAgent._format_bug_section(entries, lines)
+            else:
+                TicketMonitorAgent._format_ticket_table(entries, issue_type, lines)
 
             lines.append('')
 
@@ -788,13 +763,85 @@ class TicketMonitorAgent(BaseAgent):
         lines.append('=' * 80)
         return '\n'.join(lines)
 
-    # ------------------------------------------------------------------
-    # Summary builder
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _format_ticket_table(entries: list, issue_type: str, lines: list) -> None:
+        key_w, type_w, status_w, pri_w, assignee_w = 14, 12, 14, 14, 18
+        lines.append(
+            f'  {"Key":<{key_w}} {"Type":<{type_w}} {"Status":<{status_w}} '
+            f'{"Priority":<{pri_w}} {"Assignee":<{assignee_w}} Missing'
+        )
+        lines.append(
+            f'  {"—" * key_w} {"—" * type_w} {"—" * status_w} '
+            f'{"—" * pri_w} {"—" * assignee_w} {"—" * 16}'
+        )
+
+        for entry in entries:
+            flag = '⚠️ ' if entry['flagged'] else '   '
+            missing_str = TicketMonitorAgent._missing_str(entry)
+            key_str = entry['key'][:key_w]
+            type_str = entry.get('issue_type', issue_type)[:type_w]
+            status_str = entry['status'][:status_w]
+            pri_str = entry['priority'][:pri_w]
+            assignee_str = (entry['assignee'] or 'Unassigned')[:assignee_w]
+
+            lines.append(
+                f'{flag}{key_str:<{key_w}} {type_str:<{type_w}} {status_str:<{status_w}} '
+                f'{pri_str:<{pri_w}} {assignee_str:<{assignee_w}} {missing_str}'
+            )
+
+    @staticmethod
+    def _format_bug_section(entries: list, lines: list) -> None:
+        priority_order = ['P0-Stopper', 'P1-Critical', 'P2-High', 'P3-Medium', 'P4-Low']
+        bugs_by_priority: Dict[str, list] = {}
+        for entry in entries:
+            pri = entry.get('priority', 'Unknown')
+            bugs_by_priority.setdefault(pri, []).append(entry)
+
+        sorted_priorities = sorted(
+            bugs_by_priority.keys(),
+            key=lambda p: priority_order.index(p) if p in priority_order else 999,
+        )
+
+        key_w, status_w, assignee_w, comp_w = 14, 14, 18, 20
+        for priority in sorted_priorities:
+            pri_entries = bugs_by_priority[priority]
+            flagged_count = sum(1 for e in pri_entries if e['flagged'])
+            lines.append('')
+            lines.append(f'    {priority} ({len(pri_entries)} bugs, {flagged_count} flagged)')
+            lines.append(f'    {"·" * 72}')
+            lines.append(
+                f'    {"Key":<{key_w}} {"Status":<{status_w}} '
+                f'{"Assignee":<{assignee_w}} {"Components":<{comp_w}} Missing'
+            )
+            lines.append(
+                f'    {"—" * key_w} {"—" * status_w} '
+                f'{"—" * assignee_w} {"—" * comp_w} {"—" * 16}'
+            )
+
+            for entry in pri_entries:
+                flag = '⚠️ ' if entry['flagged'] else '   '
+                missing_str = TicketMonitorAgent._missing_str(entry)
+                key_str = entry['key'][:key_w]
+                status_str = entry['status'][:status_w]
+                assignee_str = (entry['assignee'] or 'Unassigned')[:assignee_w]
+                comp_str = entry.get('components', '—')[:comp_w]
+
+                lines.append(
+                    f' {flag}{key_str:<{key_w}} {status_str:<{status_w}} '
+                    f'{assignee_str:<{assignee_w}} {comp_str:<{comp_w}} {missing_str}'
+                )
+
+    @staticmethod
+    def _missing_str(entry: dict) -> str:
+        parts: list = []
+        if entry['missing_required']:
+            parts.append(', '.join(entry['missing_required']))
+        if entry['missing_warned']:
+            parts.append(f"(warn: {', '.join(entry['missing_warned'])})")
+        return ' '.join(parts) if parts else '✓'
 
     @staticmethod
     def _build_summary(stats: Dict[str, int], project: str) -> str:
-        '''Build a human-readable summary string from run stats.'''
         lines = [
             f'Ticket Monitor run complete for project {project}:',
             f'  Tickets queried:  {stats["tickets_queried"]}',
@@ -808,12 +855,7 @@ class TicketMonitorAgent(BaseAgent):
         ]
         return '\n'.join(lines)
 
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-
     def close(self) -> None:
-        '''Close database connections.'''
         try:
             self.state.close()
         except Exception:
