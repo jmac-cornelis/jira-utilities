@@ -55,8 +55,8 @@
         </aside>
         <h2>
             <span class="text">921 statements &nbsp;</span>
-            <button type="button" class="run button_toggle_run" value="run" data-shortcut="r" title="Toggle lines run">865<span class="text"> run</span></button>
-            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">56<span class="text"> missing</span></button>
+            <button type="button" class="run button_toggle_run" value="run" data-shortcut="r" title="Toggle lines run">867<span class="text"> run</span></button>
+            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">54<span class="text"> missing</span></button>
             <button type="button" class="exc show_exc button_toggle_exc" value="exc" data-shortcut="x" title="Toggle lines excluded">0<span class="text"> excluded</span></button>
         </h2>
         <p class="text">
@@ -65,7 +65,7 @@
             <a id="nextFileLink" class="nav" href="jira_utils_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.13.4">coverage.py v7.13.4</a>,
-            created at 2026-03-13 20:03 +0000
+            created at 2026-03-13 20:11 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -1237,12 +1237,12 @@
     <p class="run"><span class="n"><a id="t1155" href="#t1155">1155</a></span><span class="t">    <span class="key">try</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t1156" href="#t1156">1156</a></span><span class="t">        <span class="nam">repaired</span><span class="op">,</span> <span class="nam">repair_stats</span> <span class="op">=</span> <span class="nam">_validate_and_repair_csv</span><span class="op">(</span><span class="nam">input_file</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t1157" href="#t1157">1157</a></span><span class="t">        <span class="key">if</span> <span class="nam">repaired</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t1158" href="#t1158">1158</a></span><span class="t">            <span class="nam">log</span><span class="op">.</span><span class="nam">info</span><span class="op">(</span><span class="str">f'CSV repair applied: {repair_stats}'</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t1159" href="#t1159">1159</a></span><span class="t">            <span class="nam">output</span><span class="op">(</span><span class="str">f'  CSV repair: fixed {repair_stats["repaired_rows"]} row(s) with '</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis mis2 show_mis"><span class="n"><a id="t1160" href="#t1160">1160</a></span><span class="t">                   <span class="str">f'extra columns, padded {repair_stats["padded_rows"]} row(s) with '</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis mis2 show_mis"><span class="n"><a id="t1161" href="#t1161">1161</a></span><span class="t">                   <span class="str">f'missing columns'</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis mis2 show_mis"><span class="n"><a id="t1162" href="#t1162">1162</a></span><span class="t">                   <span class="op">+</span> <span class="op">(</span><span class="str">f', {repair_stats["unfixable_rows"]} row(s) could not be repaired'</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis mis2 show_mis"><span class="n"><a id="t1163" href="#t1163">1163</a></span><span class="t">                      <span class="key">if</span> <span class="nam">repair_stats</span><span class="op">[</span><span class="str">'unfixable_rows'</span><span class="op">]</span> <span class="key">else</span> <span class="str">''</span><span class="op">)</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t1158" href="#t1158">1158</a></span><span class="t">            <span class="nam">log</span><span class="op">.</span><span class="nam">info</span><span class="op">(</span><span class="str">f'CSV repair applied: {repair_stats}'</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t1159" href="#t1159">1159</a></span><span class="t">            <span class="nam">output</span><span class="op">(</span><span class="str">f'  CSV repair: fixed {repair_stats["repaired_rows"]} row(s) with '</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t1160" href="#t1160">1160</a></span><span class="t">                   <span class="str">f'extra columns, padded {repair_stats["padded_rows"]} row(s) with '</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t1161" href="#t1161">1161</a></span><span class="t">                   <span class="str">f'missing columns'</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t1162" href="#t1162">1162</a></span><span class="t">                   <span class="op">+</span> <span class="op">(</span><span class="str">f', {repair_stats["unfixable_rows"]} row(s) could not be repaired'</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t1163" href="#t1163">1163</a></span><span class="t">                      <span class="key">if</span> <span class="nam">repair_stats</span><span class="op">[</span><span class="str">'unfixable_rows'</span><span class="op">]</span> <span class="key">else</span> <span class="str">''</span><span class="op">)</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
     <p class="run"><span class="n"><a id="t1164" href="#t1164">1164</a></span><span class="t">    <span class="key">except</span> <span class="nam">Exception</span> <span class="key">as</span> <span class="nam">repair_err</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t1165" href="#t1165">1165</a></span><span class="t">        <span class="com"># Repair is best-effort &#8212; log the error but continue with the</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t1166" href="#t1166">1166</a></span><span class="t">        <span class="com"># original CSV so the pipeline is not blocked.</span>&nbsp;</span><span class="r"></span></p>
@@ -2052,7 +2052,7 @@
             <a class="nav" href="jira_utils_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.13.4">coverage.py v7.13.4</a>,
-            created at 2026-03-13 20:03 +0000
+            created at 2026-03-13 20:11 +0000
         </p>
     </div>
 </footer>
