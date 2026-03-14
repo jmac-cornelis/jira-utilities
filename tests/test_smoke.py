@@ -6,6 +6,11 @@ def test_import_jira_utils():
     assert mod is not None
 
 
+def test_import_confluence_utils():
+    mod = importlib.import_module("confluence_utils")
+    assert mod is not None
+
+
 def test_import_excel_utils():
     mod = importlib.import_module("excel_utils")
     assert mod is not None
@@ -19,6 +24,12 @@ def test_import_jira_tools_class():
     from tools.jira_tools import JiraTools
 
     assert JiraTools is not None
+
+
+def test_import_confluence_tools_class():
+    from tools.confluence_tools import ConfluenceTools
+
+    assert ConfluenceTools is not None
 
 
 def test_import_excel_tools_class():

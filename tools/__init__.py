@@ -36,6 +36,16 @@ from tools.jira_tools import (
     bulk_update_tickets,
     JiraTools,
 )
+from tools.confluence_tools import (
+    search_confluence_pages,
+    get_confluence_page,
+    create_confluence_page,
+    update_confluence_page,
+    append_to_confluence_page,
+    update_confluence_section,
+    list_confluence_children,
+    ConfluenceTools,
+)
 from tools.drawio_tools import (
     parse_org_chart,
     get_responsibilities,
@@ -99,6 +109,15 @@ __all__ = [
     'create_dashboard',
     'bulk_update_tickets',
     'JiraTools',
+    # Confluence
+    'search_confluence_pages',
+    'get_confluence_page',
+    'create_confluence_page',
+    'update_confluence_page',
+    'append_to_confluence_page',
+    'update_confluence_section',
+    'list_confluence_children',
+    'ConfluenceTools',
     # Draw.io
     'parse_org_chart',
     'get_responsibilities',

@@ -64,15 +64,18 @@ except ImportError:
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# jira_utils — suppress stdout output so it doesn't corrupt the MCP channel.
-# The output() function in jira_utils checks _quiet_mode before printing.
+# jira_utils / confluence_utils — suppress stdout output so it doesn't corrupt
+# the MCP channel. The output() function in each module checks _quiet_mode
+# before printing.
 # ---------------------------------------------------------------------------
 import jira_utils
+import confluence_utils
 
 # CRITICAL: Suppress all stdout output from jira_utils.  The MCP protocol
 # uses stdout exclusively for JSON-RPC 2.0 messages; any stray print()
 # would corrupt the transport.
 jira_utils._quiet_mode = True
+confluence_utils._quiet_mode = True
 
 # ---------------------------------------------------------------------------
 # MCP Server instance
@@ -183,6 +186,34 @@ def _extract_description(desc: Any) -> str:
     return '\n'.join(parts) if parts else str(desc)
 
 
+def _page_to_dict(page: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a Confluence page payload to a small serialisable dict."""
+    result = {
+        'id': page.get('id') or page.get('page_id') or '',
+        'page_id': page.get('page_id') or page.get('id') or '',
+        'title': page.get('title', ''),
+        'link': page.get('link') or page.get('url') or '',
+        'url': page.get('url') or page.get('link') or '',
+        'space_id': page.get('space_id', ''),
+        'space_key': page.get('space_key', ''),
+        'version': page.get('version'),
+        'status': page.get('status', ''),
+    }
+    if 'body_markdown' in page:
+        result['body_markdown'] = page.get('body_markdown')
+    if 'body_storage' in page:
+        result['body_storage'] = page.get('body_storage')
+    if 'labels' in page:
+        result['labels'] = page.get('labels')
+    if 'attachments' in page:
+        result['attachments'] = page.get('attachments')
+    if 'depth' in page:
+        result['depth'] = page.get('depth')
+    if 'parent_id' in page:
+        result['parent_id'] = page.get('parent_id')
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Tool 1: search_tickets — Run a JQL query
 # ---------------------------------------------------------------------------
@@ -225,6 +256,211 @@ async def get_ticket(ticket_key: str) -> list[Any]:
         return _json_result(_issue_to_dict(issues[0]))
     except Exception as e:
         log.error(f'get_ticket failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Confluence tools
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def search_confluence_pages(
+    pattern: str,
+    limit: int = 25,
+    space: Optional[str] = None,
+) -> list[Any]:
+    """Search Confluence pages by title pattern.
+
+    Args:
+        pattern: Title search pattern.
+        limit: Maximum number of results to return.
+        space: Optional Confluence space key or numeric ID.
+    """
+    try:
+        confluence = confluence_utils.get_connection()
+        pages = confluence_utils.search_pages(
+            confluence,
+            pattern=pattern,
+            limit=limit,
+            space=space,
+        )
+        return _json_result([_page_to_dict(page) for page in pages])
+    except Exception as e:
+        log.error(f'search_confluence_pages failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def get_confluence_page(
+    page_id_or_title: str,
+    space: Optional[str] = None,
+    include_body: bool = False,
+) -> list[Any]:
+    """Get a Confluence page by page ID or exact title.
+
+    Args:
+        page_id_or_title: Existing page ID or exact page title.
+        space: Optional Confluence space key or numeric ID.
+        include_body: Whether to include the page body in the response.
+    """
+    try:
+        confluence = confluence_utils.get_connection()
+        page = confluence_utils.get_page(
+            confluence,
+            page_id_or_title=page_id_or_title,
+            space=space,
+            include_body=include_body,
+        )
+        return _json_result(_page_to_dict(page))
+    except Exception as e:
+        log.error(f'get_confluence_page failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def create_confluence_page(
+    title: str,
+    input_file: str,
+    space: Optional[str] = None,
+    parent_id: Optional[str] = None,
+) -> list[Any]:
+    """Create a Confluence page from a Markdown file.
+
+    Args:
+        title: Title for the new page.
+        input_file: Markdown file to publish.
+        space: Optional Confluence space key or numeric ID.
+        parent_id: Optional parent page ID.
+    """
+    try:
+        confluence = confluence_utils.get_connection()
+        page = confluence_utils.create_page(
+            confluence,
+            title=title,
+            input_file=input_file,
+            space=space,
+            parent_id=parent_id,
+        )
+        result = _page_to_dict(page)
+        result['message'] = 'Page created successfully'
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'create_confluence_page failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def update_confluence_page(
+    page_id_or_title: str,
+    input_file: str,
+    space: Optional[str] = None,
+    version_message: Optional[str] = None,
+) -> list[Any]:
+    """Update a Confluence page from a Markdown file.
+
+    Args:
+        page_id_or_title: Existing page ID or exact page title.
+        input_file: Markdown file to publish.
+        space: Optional Confluence space key or numeric ID for title disambiguation.
+        version_message: Optional Confluence version history message.
+    """
+    try:
+        confluence = confluence_utils.get_connection()
+        page = confluence_utils.update_page(
+            confluence,
+            page_id_or_title=page_id_or_title,
+            input_file=input_file,
+            space=space,
+            version_message=version_message,
+        )
+        result = _page_to_dict(page)
+        result['message'] = 'Page updated successfully'
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'update_confluence_page failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def append_to_confluence_page(
+    page_id_or_title: str,
+    input_file: str,
+    space: Optional[str] = None,
+    version_message: Optional[str] = None,
+) -> list[Any]:
+    """Append Markdown content to an existing Confluence page."""
+    try:
+        confluence = confluence_utils.get_connection()
+        page = confluence_utils.append_page(
+            confluence,
+            page_id_or_title=page_id_or_title,
+            input_file=input_file,
+            space=space,
+            version_message=version_message,
+        )
+        result = _page_to_dict(page)
+        result['message'] = 'Page appended successfully'
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'append_to_confluence_page failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def update_confluence_section(
+    page_id_or_title: str,
+    heading: str,
+    input_file: str,
+    space: Optional[str] = None,
+    version_message: Optional[str] = None,
+) -> list[Any]:
+    """Replace a section under a heading in an existing Confluence page."""
+    try:
+        confluence = confluence_utils.get_connection()
+        page = confluence_utils.update_page_section(
+            confluence,
+            page_id_or_title=page_id_or_title,
+            heading=heading,
+            input_file=input_file,
+            space=space,
+            version_message=version_message,
+        )
+        result = _page_to_dict(page)
+        result['message'] = 'Page section updated successfully'
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'update_confluence_section failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def list_confluence_children(
+    page_id_or_title: str,
+    space: Optional[str] = None,
+    recursive: bool = False,
+    max_depth: Optional[int] = None,
+) -> list[Any]:
+    """List child pages for a Confluence page."""
+    try:
+        confluence = confluence_utils.get_connection()
+        rows = (
+            confluence_utils.build_page_tree(
+                confluence,
+                page_id_or_title=page_id_or_title,
+                space=space,
+                max_depth=max_depth,
+            )
+            if recursive else
+            confluence_utils.list_page_children(
+                confluence,
+                page_id_or_title=page_id_or_title,
+                space=space,
+                recursive=False,
+            )
+        )
+        return _json_result([_page_to_dict(row) for row in rows])
+    except Exception as e:
+        log.error(f'list_confluence_children failed: {e}')
         return _error_result(str(e))
 
 
