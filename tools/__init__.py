@@ -52,6 +52,12 @@ from tools.confluence_tools import (
     export_confluence_page,
     ConfluenceTools,
 )
+from tools.gantt_tools import (
+    create_gantt_snapshot,
+    get_gantt_snapshot,
+    list_gantt_snapshots,
+    GanttTools,
+)
 from tools.drawio_tools import (
     parse_org_chart,
     get_responsibilities,
@@ -152,6 +158,11 @@ __all__ = [
     'list_confluence_children',
     'export_confluence_page',
     'ConfluenceTools',
+    # Gantt
+    'create_gantt_snapshot',
+    'get_gantt_snapshot',
+    'list_gantt_snapshots',
+    'GanttTools',
     # Draw.io
     'parse_org_chart',
     'get_responsibilities',

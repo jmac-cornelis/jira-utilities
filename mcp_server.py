@@ -70,6 +70,9 @@ except ImportError:
 # ---------------------------------------------------------------------------
 import jira_utils
 import confluence_utils
+from agents.gantt_agent import GanttProjectPlannerAgent
+from agents.gantt_models import PlanningRequest
+from state.gantt_snapshot_store import GanttSnapshotStore
 
 # CRITICAL: Suppress all stdout output from jira_utils.  The MCP protocol
 # uses stdout exclusively for JSON-RPC 2.0 messages; any stray print()
@@ -332,6 +335,15 @@ def _page_to_dict(page: dict[str, Any]) -> dict[str, Any]:
     if 'output_file' in page:
         result['output_file'] = page.get('output_file')
     return result
+
+
+def _snapshot_record_to_dict(record: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a stored Gantt snapshot record for MCP responses."""
+    return {
+        'snapshot': record.get('snapshot'),
+        'summary': record.get('summary'),
+        'summary_markdown': record.get('summary_markdown', ''),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +748,76 @@ async def export_confluence_page(
         return _json_result(result)
     except Exception as e:
         log.error(f'export_confluence_page failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Gantt planning tools
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def create_gantt_snapshot(
+    project_key: str,
+    planning_horizon_days: int = 90,
+    limit: int = 200,
+    include_done: bool = False,
+    backlog_jql: Optional[str] = None,
+    policy_profile: str = 'default',
+    persist: bool = True,
+) -> list[Any]:
+    """Create a Gantt planning snapshot from Jira backlog state."""
+    try:
+        agent = GanttProjectPlannerAgent(project_key=project_key)
+        request = PlanningRequest(
+            project_key=project_key,
+            planning_horizon_days=planning_horizon_days,
+            limit=limit,
+            include_done=include_done,
+            backlog_jql=backlog_jql,
+            policy_profile=policy_profile,
+        )
+        snapshot = agent.create_snapshot(request)
+        result = {
+            'snapshot': snapshot.to_dict(),
+        }
+        if persist:
+            result['stored'] = GanttSnapshotStore().save_snapshot(
+                snapshot,
+                summary_markdown=snapshot.summary_markdown,
+            )
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'create_gantt_snapshot failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def get_gantt_snapshot(
+    snapshot_id: str,
+    project_key: Optional[str] = None,
+) -> list[Any]:
+    """Get a persisted Gantt planning snapshot by snapshot ID."""
+    try:
+        record = GanttSnapshotStore().get_snapshot(snapshot_id, project_key=project_key)
+        if not record:
+            return _error_result(f'Gantt snapshot {snapshot_id} not found')
+        return _json_result(_snapshot_record_to_dict(record))
+    except Exception as e:
+        log.error(f'get_gantt_snapshot failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def list_gantt_snapshots(
+    project_key: Optional[str] = None,
+    limit: int = 20,
+) -> list[Any]:
+    """List persisted Gantt planning snapshots."""
+    try:
+        rows = GanttSnapshotStore().list_snapshots(project_key=project_key, limit=limit)
+        return _json_result(rows)
+    except Exception as e:
+        log.error(f'list_gantt_snapshots failed: {e}')
         return _error_result(str(e))
 
 

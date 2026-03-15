@@ -32,6 +32,12 @@ def test_import_confluence_tools_class():
     assert ConfluenceTools is not None
 
 
+def test_import_gantt_tools_class():
+    from tools.gantt_tools import GanttTools
+
+    assert GanttTools is not None
+
+
 def test_import_excel_tools_class():
     from tools.excel_tools import ExcelTools
 
@@ -92,17 +98,21 @@ def test_import_gantt_snapshot_store():
 
 def test_import_tools_package_exports():
     from tools import (
+        GanttTools,
         KnowledgeTools,
         WebSearchTools,
         MCPTools,
+        create_gantt_snapshot,
         search_knowledge,
         web_search,
         mcp_discover_tools,
     )
 
+    assert GanttTools is not None
     assert KnowledgeTools is not None
     assert WebSearchTools is not None
     assert MCPTools is not None
+    assert callable(create_gantt_snapshot)
     assert callable(search_knowledge)
     assert callable(web_search)
     assert callable(mcp_discover_tools)
