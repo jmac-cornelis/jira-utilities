@@ -10,6 +10,7 @@
 ##########################################################################################
 
 from agents.base import BaseAgent, AgentConfig, AgentResponse
+from agents.gantt_agent import GanttProjectPlannerAgent
 from agents.orchestrator import ReleasePlanningOrchestrator
 from agents.jira_analyst import JiraAnalystAgent
 from agents.planning_agent import PlanningAgent
@@ -20,6 +21,7 @@ __all__ = [
     'BaseAgent',
     'AgentConfig',
     'AgentResponse',
+    'GanttProjectPlannerAgent',
     'ReleasePlanningOrchestrator',
     'JiraAnalystAgent',
     'PlanningAgent',

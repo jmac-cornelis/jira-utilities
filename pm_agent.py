@@ -17,6 +17,7 @@
 ##########################################################################################
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -807,6 +808,7 @@ def cmd_workflow(args):
     WORKFLOWS = {
         'bug-report': _workflow_bug_report,
         'feature-plan': _workflow_feature_plan,
+        'gantt-snapshot': _workflow_gantt_snapshot,
     }
 
     handler = WORKFLOWS.get(args.workflow_name)
@@ -1424,6 +1426,77 @@ def _workflow_feature_plan(args):
         return 1
 
 
+def _workflow_gantt_snapshot(args):
+    '''
+    Gantt workflow: Jira backlog -> planning snapshot JSON + Markdown summary.
+    '''
+    log.debug(
+        f'Entering _workflow_gantt_snapshot(project={args.project}, '
+        f'planning_horizon={args.planning_horizon}, limit={args.limit}, '
+        f'include_done={args.include_done})'
+    )
+
+    from agents.gantt_agent import GanttProjectPlannerAgent
+
+    output('')
+    output('=' * 60)
+    output('WORKFLOW: gantt-snapshot')
+    output('=' * 60)
+    output('')
+    output(f'Project: {args.project}')
+    output(f'Planning horizon: {args.planning_horizon} days')
+    output(f'Include done issues: {"yes" if args.include_done else "no"}')
+    output('')
+    output('Step 1/3: Building planning snapshot...')
+
+    agent = GanttProjectPlannerAgent(project_key=args.project)
+    result = agent.run({
+        'project_key': args.project,
+        'planning_horizon_days': args.planning_horizon,
+        'limit': args.limit or 200,
+        'include_done': args.include_done,
+    })
+
+    if not result.success:
+        output(f'ERROR: {result.error}')
+        return 1
+
+    snapshot = result.metadata.get('planning_snapshot')
+    if not snapshot:
+        output('ERROR: Gantt snapshot metadata missing from agent response')
+        return 1
+
+    output('Step 2/3: Writing planning snapshot files...')
+
+    output_base = args.output or f'{args.project.lower()}_planning_snapshot.json'
+    output_root, output_ext = os.path.splitext(output_base)
+    if output_ext.lower() == '.md':
+        output_root = output_root or f'{args.project.lower()}_planning_snapshot'
+    elif output_ext.lower() != '.json':
+        output_root = output_base
+
+    json_path = output_root + '.json'
+    md_path = output_root + '.md'
+
+    os.makedirs(os.path.dirname(json_path) or '.', exist_ok=True)
+
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(snapshot, f, indent=2, default=str)
+
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(result.content or '')
+
+    output(f'  Saved: {json_path}')
+    output(f'  Saved: {md_path}')
+
+    output('Step 3/3: Reporting summary...')
+    _print_workflow_summary('gantt-snapshot', [
+        (json_path, 'planning snapshot JSON'),
+        (md_path, 'planning snapshot Markdown'),
+    ])
+    return 0
+
+
 def cmd_resume(args):
     '''
     Resume a saved session.
@@ -1505,6 +1578,8 @@ Examples:
   %(prog)s --plan --project PROJ --roadmap slides.pptx
   %(prog)s --analyze --project PROJ --quick
   %(prog)s --vision roadmap.png roadmap2.xlsx
+  %(prog)s --workflow gantt-snapshot --project STL
+  %(prog)s --workflow gantt-snapshot --project STL --planning-horizon 120 --output stl_snapshot.json
   %(prog)s --build-excel-map STL-74071
   %(prog)s --build-excel-map STL-74071 STL-76297 --hierarchy 2 --output my_map.xlsx
   %(prog)s --invoke-llm prompt.md
@@ -1638,6 +1713,13 @@ Examples:
                             'plans/<PROJECT>-<slug>/ subdir is created '
                             'inside it. Default root: current directory. '
                             'Used by --workflow feature-plan.')
+    parser.add_argument('--planning-horizon', type=int, default=90, metavar='DAYS',
+                       dest='planning_horizon',
+                       help='Planning horizon in days for --workflow gantt-snapshot '
+                            '(default: 90).')
+    parser.add_argument('--include-done', action='store_true',
+                       dest='include_done',
+                       help='Include done/closed issues in --workflow gantt-snapshot.')
     
     # ---- Options for --plan ----------------------------------------------------
     parser.add_argument('--project', '-p', default=None,
@@ -1785,6 +1867,9 @@ Examples:
                 # Validate that the prompt file exists when specified
                 if args.feature_prompt and not os.path.isfile(args.feature_prompt):
                     parser.error(f'--feature-prompt file not found: {args.feature_prompt}')
+        elif args.workflow_name == 'gantt-snapshot':
+            if not args.project:
+                parser.error('--workflow gantt-snapshot requires --project PROJECT_KEY')
     
     # ---- Map ticket_keys for build-excel-map compatibility ---------------------
     # cmd_build_excel_map expects args.ticket_keys
@@ -1872,6 +1957,12 @@ Examples:
             if args.output_dir:
                 log.info(f'+  Output dir: {args.output_dir}')
             elif args.output:
+                log.info(f'+  Output: {args.output}')
+        elif args.workflow_name == 'gantt-snapshot':
+            log.info(f'+  Project: {args.project}')
+            log.info(f'+  Planning horizon: {args.planning_horizon} days')
+            log.info(f'+  Include done: {"yes" if args.include_done else "no"}')
+            if args.output:
                 log.info(f'+  Output: {args.output}')
         if args.workflow_filter:
             log.info(f'+  Filter: {args.workflow_filter}')

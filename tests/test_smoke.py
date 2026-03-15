@@ -62,6 +62,12 @@ def test_import_mcp_tools_class():
     assert MCPTools is not None
 
 
+def test_import_gantt_agent_class():
+    from agents.gantt_agent import GanttProjectPlannerAgent
+
+    assert GanttProjectPlannerAgent is not None
+
+
 def test_import_tools_package_exports():
     from tools import (
         KnowledgeTools,
