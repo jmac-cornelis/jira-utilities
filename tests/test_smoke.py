@@ -68,6 +68,12 @@ def test_import_gantt_agent_class():
     assert GanttProjectPlannerAgent is not None
 
 
+def test_import_gantt_snapshot_store():
+    from state.gantt_snapshot_store import GanttSnapshotStore
+
+    assert GanttSnapshotStore is not None
+
+
 def test_import_tools_package_exports():
     from tools import (
         KnowledgeTools,

@@ -331,6 +331,26 @@ All output lands in `plans/<PROJECT>-<slug>/`:
 
 ---
 
+### Gantt Snapshot Workflow
+
+Build, persist, and review Jira-grounded planning snapshots for a project backlog.
+
+```bash
+# Create and persist a new planning snapshot
+pm_agent --workflow gantt-snapshot --project STL --planning-horizon 120
+
+# List stored snapshots, optionally scoped to one project
+pm_agent --workflow gantt-snapshot-list --project STL
+
+# Load a stored snapshot by ID and re-export it
+pm_agent --workflow gantt-snapshot-get --snapshot-id a1b2c3d4 --output stl_snapshot.json
+```
+
+Each `gantt-snapshot` run now stores a durable copy under `data/gantt_snapshots/<PROJECT>/<SNAPSHOT_ID>/`
+in addition to any ad hoc output path you provide with `--output`.
+
+---
+
 ### Bug Report Workflow
 
 Generate a cleaned, enriched bug report from a Jira filter.
@@ -401,7 +421,7 @@ These flags apply to all agentic workflows:
 
 | Flag | Description |
 |------|-------------|
-| `--workflow NAME` | Workflow to run (`bug-report`, `feature-plan`) |
+| `--workflow NAME` | Workflow to run (`bug-report`, `feature-plan`, `gantt-snapshot`, `gantt-snapshot-get`, `gantt-snapshot-list`) |
 | `--project KEY` | Jira project key |
 | `--model MODEL`, `-m` | LLM model name override (e.g. `developer-opus`, `gpt-4o`) |
 | `--timeout SECS` | LLM request timeout in seconds |

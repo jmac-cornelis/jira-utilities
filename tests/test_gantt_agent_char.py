@@ -168,14 +168,21 @@ def test_workflow_gantt_snapshot_writes_json_and_markdown(
                 content='# Gantt Snapshot\n\nSummary',
                 metadata={
                     'planning_snapshot': {
+                        'snapshot_id': 'snap-001',
                         'project_key': input_data['project_key'],
+                        'created_at': '2026-03-15T12:00:00+00:00',
+                        'planning_horizon_days': input_data['planning_horizon_days'],
                         'backlog_overview': {'total_issues': 2},
+                        'milestones': [],
+                        'risks': [],
+                        'dependency_graph': {'edge_count': 0},
                     }
                 },
             )
 
     monkeypatch.setattr(gantt_agent, 'GanttProjectPlannerAgent', _FakeGanttAgent)
     monkeypatch.setattr(pm_agent, 'output', lambda *args, **kwargs: None)
+    monkeypatch.setenv('GANTT_SNAPSHOT_DIR', str(tmp_path / 'store'))
 
     output_path = tmp_path / 'snapshot.json'
     args = SimpleNamespace(
@@ -195,3 +202,142 @@ def test_workflow_gantt_snapshot_writes_json_and_markdown(
     snapshot_data = json.loads(output_path.read_text(encoding='utf-8'))
     assert snapshot_data['project_key'] == 'STL'
     assert '# Gantt Snapshot' in (tmp_path / 'snapshot.md').read_text(encoding='utf-8')
+    assert (tmp_path / 'store' / 'STL' / 'snap-001' / 'snapshot.json').exists()
+    assert (tmp_path / 'store' / 'STL' / 'snap-001' / 'summary.md').exists()
+
+
+def test_gantt_snapshot_store_save_load_and_list(tmp_path):
+    from state.gantt_snapshot_store import GanttSnapshotStore
+
+    store = GanttSnapshotStore(storage_dir=str(tmp_path / 'snapshots'))
+
+    first_summary = store.save_snapshot(
+        {
+            'snapshot_id': 'snap-001',
+            'project_key': 'STL',
+            'created_at': '2026-03-14T12:00:00+00:00',
+            'planning_horizon_days': 90,
+            'backlog_overview': {
+                'total_issues': 5,
+                'blocked_issues': 2,
+                'stale_issues': 1,
+            },
+            'milestones': [{'name': '12.1.0'}],
+            'risks': [{'risk_type': 'blocked_work'}],
+            'dependency_graph': {'edge_count': 3},
+        },
+        summary_markdown='# Snapshot 1',
+    )
+    store.save_snapshot(
+        {
+            'snapshot_id': 'snap-002',
+            'project_key': 'STL',
+            'created_at': '2026-03-15T12:00:00+00:00',
+            'planning_horizon_days': 120,
+            'backlog_overview': {
+                'total_issues': 8,
+                'blocked_issues': 1,
+                'stale_issues': 0,
+            },
+            'milestones': [{'name': '12.2.0'}, {'name': 'Unscheduled Backlog'}],
+            'risks': [],
+            'dependency_graph': {'edge_count': 4},
+        },
+        summary_markdown='# Snapshot 2',
+    )
+    store.save_snapshot(
+        {
+            'snapshot_id': 'snap-003',
+            'project_key': 'ABC',
+            'created_at': '2026-03-13T12:00:00+00:00',
+            'planning_horizon_days': 60,
+            'backlog_overview': {'total_issues': 3},
+            'milestones': [],
+            'risks': [],
+            'dependency_graph': {'edge_count': 0},
+        },
+        summary_markdown='# Snapshot 3',
+    )
+
+    record = store.get_snapshot('snap-001')
+    assert record is not None
+    assert record['snapshot']['project_key'] == 'STL'
+    assert record['summary_markdown'] == '# Snapshot 1'
+    assert first_summary['storage_dir'].endswith('STL/snap-001')
+
+    listed = store.list_snapshots(project_key='STL')
+    assert [item['snapshot_id'] for item in listed] == ['snap-002', 'snap-001']
+    assert listed[0]['milestone_count'] == 2
+    assert listed[1]['risk_count'] == 1
+
+
+def test_workflow_gantt_snapshot_get_and_list(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    import pm_agent
+    from state.gantt_snapshot_store import GanttSnapshotStore
+
+    store = GanttSnapshotStore(storage_dir=str(tmp_path / 'store'))
+    store.save_snapshot(
+        {
+            'snapshot_id': 'snap-010',
+            'project_key': 'STL',
+            'created_at': '2026-03-15T12:00:00+00:00',
+            'planning_horizon_days': 90,
+            'backlog_overview': {
+                'total_issues': 6,
+                'blocked_issues': 2,
+                'stale_issues': 1,
+            },
+            'milestones': [{'name': '12.1.0'}],
+            'risks': [{'risk_type': 'blocked_work'}],
+            'dependency_graph': {'edge_count': 2},
+            'summary_markdown': '# Stored Snapshot\n\nBody',
+        },
+        summary_markdown='# Stored Snapshot\n\nBody',
+    )
+    store.save_snapshot(
+        {
+            'snapshot_id': 'snap-011',
+            'project_key': 'STL',
+            'created_at': '2026-03-14T12:00:00+00:00',
+            'planning_horizon_days': 60,
+            'backlog_overview': {'total_issues': 2},
+            'milestones': [],
+            'risks': [],
+            'dependency_graph': {'edge_count': 0},
+        },
+        summary_markdown='# Older Snapshot',
+    )
+
+    monkeypatch.setenv('GANTT_SNAPSHOT_DIR', str(tmp_path / 'store'))
+
+    get_messages = []
+    monkeypatch.setattr(pm_agent, 'output', lambda message='', **_kwargs: get_messages.append(str(message)))
+
+    export_path = tmp_path / 'exported_snapshot.json'
+    get_args = SimpleNamespace(
+        snapshot_id='snap-010',
+        project='STL',
+        output=str(export_path),
+    )
+
+    get_exit_code = pm_agent._workflow_gantt_snapshot_get(get_args)
+
+    assert get_exit_code == 0
+    assert export_path.exists()
+    assert (tmp_path / 'exported_snapshot.md').exists()
+    exported = json.loads(export_path.read_text(encoding='utf-8'))
+    assert exported['snapshot_id'] == 'snap-010'
+    assert any('Stored in:' in message for message in get_messages)
+
+    list_messages = []
+    monkeypatch.setattr(pm_agent, 'output', lambda message='', **_kwargs: list_messages.append(str(message)))
+
+    list_args = SimpleNamespace(project='STL', limit=10)
+    list_exit_code = pm_agent._workflow_gantt_snapshot_list(list_args)
+
+    assert list_exit_code == 0
+    assert any('snap-010' in message for message in list_messages)
+    assert any('snap-011' in message for message in list_messages)

@@ -809,6 +809,8 @@ def cmd_workflow(args):
         'bug-report': _workflow_bug_report,
         'feature-plan': _workflow_feature_plan,
         'gantt-snapshot': _workflow_gantt_snapshot,
+        'gantt-snapshot-get': _workflow_gantt_snapshot_get,
+        'gantt-snapshot-list': _workflow_gantt_snapshot_list,
     }
 
     handler = WORKFLOWS.get(args.workflow_name)
@@ -1437,6 +1439,7 @@ def _workflow_gantt_snapshot(args):
     )
 
     from agents.gantt_agent import GanttProjectPlannerAgent
+    from state.gantt_snapshot_store import GanttSnapshotStore
 
     output('')
     output('=' * 60)
@@ -1466,12 +1469,169 @@ def _workflow_gantt_snapshot(args):
         output('ERROR: Gantt snapshot metadata missing from agent response')
         return 1
 
-    output('Step 2/3: Writing planning snapshot files...')
+    output('Step 2/4: Persisting planning snapshot...')
+
+    store = GanttSnapshotStore()
+    stored_summary = store.save_snapshot(snapshot, summary_markdown=result.content or '')
+
+    output(f'  Stored snapshot ID: {stored_summary["snapshot_id"]}')
+    output(f'  Stored in: {stored_summary["storage_dir"]}')
+
+    output('Step 3/4: Writing planning snapshot files...')
 
     output_base = args.output or f'{args.project.lower()}_planning_snapshot.json'
+    json_path, md_path = _write_gantt_snapshot_files(
+        snapshot,
+        result.content or '',
+        output_base,
+    )
+
+    output(f'  Saved: {json_path}')
+    output(f'  Saved: {md_path}')
+
+    output('Step 4/4: Reporting summary...')
+    _print_workflow_summary('gantt-snapshot', [
+        (stored_summary['json_path'], 'stored snapshot JSON'),
+        (stored_summary['markdown_path'], 'stored snapshot Markdown'),
+        (json_path, 'planning snapshot JSON'),
+        (md_path, 'planning snapshot Markdown'),
+    ])
+    return 0
+
+
+def _workflow_gantt_snapshot_get(args):
+    '''
+    Gantt workflow: load a persisted planning snapshot and display/export it.
+    '''
+    log.debug(
+        f'Entering _workflow_gantt_snapshot_get(snapshot_id={args.snapshot_id}, '
+        f'project={args.project})'
+    )
+
+    from state.gantt_snapshot_store import GanttSnapshotStore
+
+    output('')
+    output('=' * 60)
+    output('WORKFLOW: gantt-snapshot-get')
+    output('=' * 60)
+    output('')
+    output(f'Snapshot ID: {args.snapshot_id}')
+    if args.project:
+        output(f'Project: {args.project}')
+    output('')
+    output('Step 1/2: Loading stored planning snapshot...')
+
+    store = GanttSnapshotStore()
+    record = store.get_snapshot(args.snapshot_id, project_key=args.project)
+    if not record:
+        output(f'ERROR: Stored Gantt snapshot not found: {args.snapshot_id}')
+        return 1
+
+    snapshot = record['snapshot']
+    summary = record['summary']
+    summary_markdown = record['summary_markdown'] or str(
+        snapshot.get('summary_markdown') or ''
+    )
+
+    output(f'  Project: {summary["project_key"]}')
+    output(f'  Created at: {summary["created_at"]}')
+    output(f'  Total issues: {summary["total_issues"]}')
+    output(f'  Milestones: {summary["milestone_count"]}')
+    output(f'  Risks: {summary["risk_count"]}')
+    output(f'  Stored in: {summary["storage_dir"]}')
+
+    created_files = []
+    if args.output:
+        output('Step 2/2: Writing exported snapshot files...')
+        json_path, md_path = _write_gantt_snapshot_files(
+            snapshot,
+            summary_markdown,
+            args.output,
+        )
+        output(f'  Saved: {json_path}')
+        output(f'  Saved: {md_path}')
+        created_files.extend([
+            (json_path, 'exported planning snapshot JSON'),
+            (md_path, 'exported planning snapshot Markdown'),
+        ])
+    else:
+        output('Step 2/2: Rendering stored snapshot summary...')
+        output('')
+        output(summary_markdown or '(No summary markdown stored for this snapshot.)')
+
+    if created_files:
+        _print_workflow_summary('gantt-snapshot-get', created_files)
+
+    return 0
+
+
+def _workflow_gantt_snapshot_list(args):
+    '''
+    Gantt workflow: list persisted planning snapshots.
+    '''
+    log.debug(
+        f'Entering _workflow_gantt_snapshot_list(project={args.project}, limit={args.limit})'
+    )
+
+    from state.gantt_snapshot_store import GanttSnapshotStore
+
+    output('')
+    output('=' * 60)
+    output('WORKFLOW: gantt-snapshot-list')
+    output('=' * 60)
+    output('')
+    if args.project:
+        output(f'Project filter: {args.project}')
+    if args.limit:
+        output(f'Limit: {args.limit}')
+    output('')
+    output('Loading stored planning snapshots...')
+
+    store = GanttSnapshotStore()
+    snapshots = store.list_snapshots(project_key=args.project, limit=args.limit)
+    if not snapshots:
+        if args.project:
+            output(f'No stored Gantt snapshots found for project {args.project}.')
+        else:
+            output('No stored Gantt snapshots found.')
+        return 0
+
+    output('')
+    output(
+        'SNAPSHOT  PROJECT  CREATED AT                  ISSUES  MILES  RISKS  BLOCKED'
+    )
+    output(
+        '--------  -------  --------------------------  ------  -----  -----  -------'
+    )
+    for item in snapshots:
+        output(
+            f'{item["snapshot_id"]:<8}  '
+            f'{item["project_key"]:<7}  '
+            f'{item["created_at"]:<26}  '
+            f'{item["total_issues"]:>6}  '
+            f'{item["milestone_count"]:>5}  '
+            f'{item["risk_count"]:>5}  '
+            f'{item["blocked_issues"]:>7}'
+        )
+
+    output('')
+    output(f'Total stored snapshots: {len(snapshots)}')
+    return 0
+
+
+def _write_gantt_snapshot_files(
+    snapshot: dict[str, Any],
+    summary_markdown: str,
+    output_base: str,
+):
+    '''
+    Write snapshot JSON + Markdown files and return their paths.
+    '''
     output_root, output_ext = os.path.splitext(output_base)
     if output_ext.lower() == '.md':
-        output_root = output_root or f'{args.project.lower()}_planning_snapshot'
+        output_root = output_root or str(
+            snapshot.get('project_key') or 'gantt_snapshot'
+        ).lower()
     elif output_ext.lower() != '.json':
         output_root = output_base
 
@@ -1484,17 +1644,9 @@ def _workflow_gantt_snapshot(args):
         json.dump(snapshot, f, indent=2, default=str)
 
     with open(md_path, 'w', encoding='utf-8') as f:
-        f.write(result.content or '')
+        f.write(summary_markdown or '')
 
-    output(f'  Saved: {json_path}')
-    output(f'  Saved: {md_path}')
-
-    output('Step 3/3: Reporting summary...')
-    _print_workflow_summary('gantt-snapshot', [
-        (json_path, 'planning snapshot JSON'),
-        (md_path, 'planning snapshot Markdown'),
-    ])
-    return 0
+    return json_path, md_path
 
 
 def cmd_resume(args):
@@ -1580,6 +1732,8 @@ Examples:
   %(prog)s --vision roadmap.png roadmap2.xlsx
   %(prog)s --workflow gantt-snapshot --project STL
   %(prog)s --workflow gantt-snapshot --project STL --planning-horizon 120 --output stl_snapshot.json
+  %(prog)s --workflow gantt-snapshot-list --project STL
+  %(prog)s --workflow gantt-snapshot-get --snapshot-id a1b2c3d4
   %(prog)s --build-excel-map STL-74071
   %(prog)s --build-excel-map STL-74071 STL-76297 --hierarchy 2 --output my_map.xlsx
   %(prog)s --invoke-llm prompt.md
@@ -1720,6 +1874,9 @@ Examples:
     parser.add_argument('--include-done', action='store_true',
                        dest='include_done',
                        help='Include done/closed issues in --workflow gantt-snapshot.')
+    parser.add_argument('--snapshot-id', default=None, metavar='ID',
+                       dest='snapshot_id',
+                       help='Stored snapshot ID for --workflow gantt-snapshot-get.')
     
     # ---- Options for --plan ----------------------------------------------------
     parser.add_argument('--project', '-p', default=None,
@@ -1748,9 +1905,10 @@ Examples:
     parser.add_argument('--hierarchy', type=int, default=1,
                        help='Depth for related issue traversal (default: 1, used by --build-excel-map)')
     parser.add_argument('--limit', type=int, default=None,
-                       help='Max tickets per step (used by --build-excel-map)')
+                       help='Max tickets per step (used by --build-excel-map) or '
+                            'max snapshots to show (used by --workflow gantt-snapshot-list).')
     parser.add_argument('--output', '-o', default=None,
-                       help='Output filename (used by --build-excel-map)')
+                       help='Output filename (used by --build-excel-map and Gantt snapshot workflows)')
     parser.add_argument('--keep-intermediates', action='store_true',
                        help='Keep temp files instead of cleaning up (used by --build-excel-map)')
     
@@ -1870,6 +2028,11 @@ Examples:
         elif args.workflow_name == 'gantt-snapshot':
             if not args.project:
                 parser.error('--workflow gantt-snapshot requires --project PROJECT_KEY')
+        elif args.workflow_name == 'gantt-snapshot-get':
+            if not args.snapshot_id:
+                parser.error('--workflow gantt-snapshot-get requires --snapshot-id ID')
+        elif args.workflow_name == 'gantt-snapshot-list':
+            pass
     
     # ---- Map ticket_keys for build-excel-map compatibility ---------------------
     # cmd_build_excel_map expects args.ticket_keys
@@ -1964,6 +2127,15 @@ Examples:
             log.info(f'+  Include done: {"yes" if args.include_done else "no"}')
             if args.output:
                 log.info(f'+  Output: {args.output}')
+        elif args.workflow_name == 'gantt-snapshot-get':
+            log.info(f'+  Snapshot ID: {args.snapshot_id}')
+            if args.project:
+                log.info(f'+  Project: {args.project}')
+            if args.output:
+                log.info(f'+  Output: {args.output}')
+        elif args.workflow_name == 'gantt-snapshot-list':
+            if args.project:
+                log.info(f'+  Project: {args.project}')
         if args.workflow_filter:
             log.info(f'+  Filter: {args.workflow_filter}')
         if args.workflow_prompt:
