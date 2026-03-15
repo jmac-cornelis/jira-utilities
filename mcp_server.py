@@ -72,6 +72,7 @@ import jira_utils
 import confluence_utils
 from agents.gantt_agent import GanttProjectPlannerAgent
 from agents.gantt_models import PlanningRequest
+from state.gantt_dependency_review_store import GanttDependencyReviewStore
 from state.gantt_snapshot_store import GanttSnapshotStore
 
 # CRITICAL: Suppress all stdout output from jira_utils.  The MCP protocol
@@ -818,6 +819,52 @@ async def list_gantt_snapshots(
         return _json_result(rows)
     except Exception as e:
         log.error(f'list_gantt_snapshots failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def review_gantt_dependency(
+    project_key: str,
+    source_key: str,
+    target_key: str,
+    relationship: str = 'blocks',
+    accepted: bool = True,
+    note: Optional[str] = None,
+    reviewer: Optional[str] = None,
+) -> list[Any]:
+    """Accept or reject an inferred Gantt dependency edge."""
+    try:
+        record = GanttDependencyReviewStore().record_review(
+            project_key=project_key,
+            source_key=source_key,
+            target_key=target_key,
+            relationship=relationship,
+            accepted=accepted,
+            note=note,
+            reviewer=reviewer,
+        )
+        return _json_result(record)
+    except Exception as e:
+        log.error(f'review_gantt_dependency failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def list_gantt_dependency_reviews(
+    project_key: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 20,
+) -> list[Any]:
+    """List stored Gantt dependency review decisions."""
+    try:
+        rows = GanttDependencyReviewStore().list_reviews(
+            project_key=project_key,
+            status=status,
+            limit=limit,
+        )
+        return _json_result(rows)
+    except Exception as e:
+        log.error(f'list_gantt_dependency_reviews failed: {e}')
         return _error_result(str(e))
 
 

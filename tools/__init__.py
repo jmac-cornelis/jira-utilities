@@ -56,6 +56,8 @@ from tools.gantt_tools import (
     create_gantt_snapshot,
     get_gantt_snapshot,
     list_gantt_snapshots,
+    review_gantt_dependency,
+    list_gantt_dependency_reviews,
     GanttTools,
 )
 from tools.drawio_tools import (
@@ -162,6 +164,8 @@ __all__ = [
     'create_gantt_snapshot',
     'get_gantt_snapshot',
     'list_gantt_snapshots',
+    'review_gantt_dependency',
+    'list_gantt_dependency_reviews',
     'GanttTools',
     # Draw.io
     'parse_org_chart',

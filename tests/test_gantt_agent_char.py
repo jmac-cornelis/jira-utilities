@@ -152,6 +152,107 @@ def test_gantt_agent_run_returns_snapshot_metadata(monkeypatch: pytest.MonkeyPat
     assert response.metadata['planning_snapshot']['project_key'] == 'STL'
 
 
+def test_gantt_agent_applies_dependency_review_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    fake_issue_resource_factory,
+):
+    from agents.gantt_agent import GanttProjectPlannerAgent
+    from agents import gantt_agent
+    from state.gantt_dependency_review_store import GanttDependencyReviewStore
+
+    monkeypatch.setattr(
+        GanttProjectPlannerAgent,
+        '_load_prompt_file',
+        staticmethod(lambda: 'gantt prompt'),
+    )
+    monkeypatch.setenv('GANTT_DEPENDENCY_REVIEW_DIR', str(tmp_path / 'reviews'))
+
+    review_store = GanttDependencyReviewStore(storage_dir=str(tmp_path / 'reviews'))
+    review_store.record_review(
+        project_key='STL',
+        source_key='STL-201',
+        target_key='STL-202',
+        relationship='blocks',
+        accepted=True,
+    )
+    review_store.record_review(
+        project_key='STL',
+        source_key='STL-202',
+        target_key='STL-203',
+        relationship='blocks',
+        accepted=False,
+    )
+
+    jira = MagicMock()
+    jira.search_issues.return_value = [
+        fake_issue_resource_factory(
+            key='STL-201',
+            summary='Foundation task',
+            description='',
+            issue_type='Story',
+            status='In Progress',
+            priority='High',
+            assignee='Jane Dev',
+            fix_versions=['12.1.0'],
+            updated='2026-03-01T10:00:00.000+0000',
+        ),
+        fake_issue_resource_factory(
+            key='STL-202',
+            summary='Integration task',
+            description='Blocked by STL-201. Blocks STL-203.',
+            issue_type='Story',
+            status='Open',
+            priority='High',
+            assignee='Jane Dev',
+            fix_versions=['12.1.0'],
+            updated='2026-03-05T10:00:00.000+0000',
+        ),
+        fake_issue_resource_factory(
+            key='STL-203',
+            summary='Validation task',
+            description='',
+            issue_type='Story',
+            status='Open',
+            priority='Medium',
+            assignee='Jane Dev',
+            fix_versions=['12.1.0'],
+            updated='2026-03-10T10:00:00.000+0000',
+        ),
+    ]
+
+    monkeypatch.setattr(gantt_agent, 'get_jira', lambda: jira)
+    monkeypatch.setattr(
+        gantt_agent,
+        'get_project_info',
+        lambda project_key: ToolResult.success({'key': project_key, 'name': 'Storage Team'}),
+    )
+    monkeypatch.setattr(
+        gantt_agent,
+        'get_releases',
+        lambda project_key, include_released=True, include_unreleased=True: ToolResult.success([
+            {'id': '1001', 'name': '12.1.0', 'released': False, 'releaseDate': '2026-04-01'}
+        ]),
+    )
+    monkeypatch.setattr(
+        GanttProjectPlannerAgent,
+        '_utc_now',
+        staticmethod(lambda: datetime(2026, 3, 15, tzinfo=timezone.utc)),
+    )
+
+    snapshot = GanttProjectPlannerAgent(project_key='STL').create_snapshot(
+        PlanningRequest(project_key='STL')
+    )
+
+    assert snapshot.dependency_graph.inferred_edge_count == 1
+    assert snapshot.dependency_graph.suppressed_edge_count == 1
+    assert snapshot.dependency_graph.review_summary == {
+        'accepted': 1,
+        'pending': 0,
+        'rejected': 1,
+    }
+
+
 def test_workflow_gantt_snapshot_writes_json_and_markdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

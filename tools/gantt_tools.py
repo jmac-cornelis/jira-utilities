@@ -153,6 +153,107 @@ def list_gantt_snapshots(
         return ToolResult.failure(f'Failed to list Gantt snapshots: {e}')
 
 
+@tool(
+    description='Accept or reject an inferred Gantt dependency edge'
+)
+def review_gantt_dependency(
+    project_key: str,
+    source_key: str,
+    target_key: str,
+    relationship: str = 'blocks',
+    accepted: bool = True,
+    note: Optional[str] = None,
+    reviewer: Optional[str] = None,
+) -> ToolResult:
+    '''
+    Accept or reject an inferred Gantt dependency edge.
+
+    Input:
+        project_key: Jira project key for the planning graph.
+        source_key: Upstream issue key.
+        target_key: Downstream issue key.
+        relationship: Dependency relationship, usually ``blocks``.
+        accepted: Whether the inferred dependency is accepted.
+        note: Optional review note.
+        reviewer: Optional reviewer identifier.
+
+    Output:
+        ToolResult with the stored review record.
+    '''
+    log.debug(
+        f'review_gantt_dependency(project_key={project_key}, '
+        f'source_key={source_key}, target_key={target_key}, '
+        f'relationship={relationship}, accepted={accepted}, reviewer={reviewer})'
+    )
+
+    try:
+        from state.gantt_dependency_review_store import GanttDependencyReviewStore
+
+        record = GanttDependencyReviewStore().record_review(
+            project_key=project_key,
+            source_key=source_key,
+            target_key=target_key,
+            relationship=relationship,
+            accepted=accepted,
+            note=note,
+            reviewer=reviewer,
+        )
+        return ToolResult.success(
+            record,
+            project_key=project_key,
+            source_key=source_key,
+            target_key=target_key,
+            relationship=relationship,
+            status=record['status'],
+        )
+    except Exception as e:
+        log.error(f'Failed to review Gantt dependency: {e}')
+        return ToolResult.failure(f'Failed to review Gantt dependency: {e}')
+
+
+@tool(
+    description='List stored Gantt dependency review decisions'
+)
+def list_gantt_dependency_reviews(
+    project_key: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 20,
+) -> ToolResult:
+    '''
+    List stored Gantt dependency review decisions.
+
+    Input:
+        project_key: Optional Jira project key filter.
+        status: Optional status filter (``accepted`` or ``rejected``).
+        limit: Maximum number of records to return.
+
+    Output:
+        ToolResult with dependency review rows.
+    '''
+    log.debug(
+        f'list_gantt_dependency_reviews(project_key={project_key}, '
+        f'status={status}, limit={limit})'
+    )
+
+    try:
+        from state.gantt_dependency_review_store import GanttDependencyReviewStore
+
+        rows = GanttDependencyReviewStore().list_reviews(
+            project_key=project_key,
+            status=status,
+            limit=limit,
+        )
+        return ToolResult.success(
+            rows,
+            count=len(rows),
+            project_key=project_key,
+            status=status,
+        )
+    except Exception as e:
+        log.error(f'Failed to list Gantt dependency reviews: {e}')
+        return ToolResult.failure(f'Failed to list Gantt dependency reviews: {e}')
+
+
 class GanttTools(BaseTool):
     '''
     Collection of Gantt planning tools for agent use.
@@ -194,3 +295,33 @@ class GanttTools(BaseTool):
         limit: int = 20,
     ) -> ToolResult:
         return list_gantt_snapshots(project_key, limit)
+
+    @tool(description='Accept or reject an inferred Gantt dependency edge')
+    def review_gantt_dependency(
+        self,
+        project_key: str,
+        source_key: str,
+        target_key: str,
+        relationship: str = 'blocks',
+        accepted: bool = True,
+        note: Optional[str] = None,
+        reviewer: Optional[str] = None,
+    ) -> ToolResult:
+        return review_gantt_dependency(
+            project_key,
+            source_key,
+            target_key,
+            relationship,
+            accepted,
+            note,
+            reviewer,
+        )
+
+    @tool(description='List stored Gantt dependency review decisions')
+    def list_gantt_dependency_reviews(
+        self,
+        project_key: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> ToolResult:
+        return list_gantt_dependency_reviews(project_key, status, limit)

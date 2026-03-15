@@ -96,6 +96,12 @@ def test_import_gantt_snapshot_store():
     assert GanttSnapshotStore is not None
 
 
+def test_import_gantt_dependency_review_store():
+    from state.gantt_dependency_review_store import GanttDependencyReviewStore
+
+    assert GanttDependencyReviewStore is not None
+
+
 def test_import_tools_package_exports():
     from tools import (
         GanttTools,
@@ -103,6 +109,8 @@ def test_import_tools_package_exports():
         WebSearchTools,
         MCPTools,
         create_gantt_snapshot,
+        review_gantt_dependency,
+        list_gantt_dependency_reviews,
         search_knowledge,
         web_search,
         mcp_discover_tools,
@@ -113,6 +121,8 @@ def test_import_tools_package_exports():
     assert WebSearchTools is not None
     assert MCPTools is not None
     assert callable(create_gantt_snapshot)
+    assert callable(review_gantt_dependency)
+    assert callable(list_gantt_dependency_reviews)
     assert callable(search_knowledge)
     assert callable(web_search)
     assert callable(mcp_discover_tools)

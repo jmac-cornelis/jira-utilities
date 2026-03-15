@@ -57,6 +57,10 @@ class DependencyEdge:
     relationship: str
     inferred: bool = False
     evidence: str = ''
+    confidence: str = 'high'
+    rule_id: str = ''
+    review_state: str = 'accepted'
+    rationale: str = ''
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -65,6 +69,10 @@ class DependencyEdge:
             'relationship': self.relationship,
             'inferred': self.inferred,
             'evidence': self.evidence,
+            'confidence': self.confidence,
+            'rule_id': self.rule_id,
+            'review_state': self.review_state,
+            'rationale': self.rationale,
         }
 
 
@@ -77,6 +85,12 @@ class DependencyGraph:
     edges: List[DependencyEdge] = field(default_factory=list)
     blocked_keys: List[str] = field(default_factory=list)
     unscheduled_keys: List[str] = field(default_factory=list)
+    cycle_paths: List[List[str]] = field(default_factory=list)
+    depth_by_key: Dict[str, int] = field(default_factory=dict)
+    blocker_chains: List[List[str]] = field(default_factory=list)
+    root_blockers: List[str] = field(default_factory=list)
+    review_summary: Dict[str, int] = field(default_factory=dict)
+    suppressed_edges: List[DependencyEdge] = field(default_factory=list)
 
     @property
     def node_count(self) -> int:
@@ -86,14 +100,35 @@ class DependencyGraph:
     def edge_count(self) -> int:
         return len(self.edges)
 
+    @property
+    def explicit_edge_count(self) -> int:
+        return sum(1 for edge in self.edges if not edge.inferred)
+
+    @property
+    def inferred_edge_count(self) -> int:
+        return sum(1 for edge in self.edges if edge.inferred)
+
+    @property
+    def suppressed_edge_count(self) -> int:
+        return len(self.suppressed_edges)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'node_count': self.node_count,
             'edge_count': self.edge_count,
+            'explicit_edge_count': self.explicit_edge_count,
+            'inferred_edge_count': self.inferred_edge_count,
+            'suppressed_edge_count': self.suppressed_edge_count,
             'blocked_keys': self.blocked_keys,
             'unscheduled_keys': self.unscheduled_keys,
+            'cycle_paths': self.cycle_paths,
+            'depth_by_key': self.depth_by_key,
+            'blocker_chains': self.blocker_chains,
+            'root_blockers': self.root_blockers,
+            'review_summary': self.review_summary,
             'nodes': self.nodes,
             'edges': [edge.to_dict() for edge in self.edges],
+            'suppressed_edges': [edge.to_dict() for edge in self.suppressed_edges],
         }
 
 

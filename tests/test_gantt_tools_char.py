@@ -1,7 +1,12 @@
 import pytest
 
 from agents.gantt_models import DependencyGraph, PlanningSnapshot
-from tools.gantt_tools import GanttTools, create_gantt_snapshot
+from tools.gantt_tools import (
+    GanttTools,
+    create_gantt_snapshot,
+    list_gantt_dependency_reviews,
+    review_gantt_dependency,
+)
 
 
 def test_create_gantt_snapshot_tool_persists_snapshot(
@@ -78,3 +83,36 @@ def test_gantt_tools_collection_registers_methods():
     assert tools.get_tool('create_gantt_snapshot') is not None
     assert tools.get_tool('get_gantt_snapshot') is not None
     assert tools.get_tool('list_gantt_snapshots') is not None
+    assert tools.get_tool('review_gantt_dependency') is not None
+    assert tools.get_tool('list_gantt_dependency_reviews') is not None
+
+
+def test_review_and_list_gantt_dependency_reviews_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    monkeypatch.setenv('GANTT_DEPENDENCY_REVIEW_DIR', str(tmp_path / 'reviews'))
+
+    record_result = review_gantt_dependency(
+        project_key='STL',
+        source_key='STL-401',
+        target_key='STL-402',
+        relationship='blocks',
+        accepted=False,
+        note='No longer a real blocker',
+        reviewer='codex',
+    )
+    list_result = list_gantt_dependency_reviews(
+        project_key='STL',
+        status='rejected',
+        limit=5,
+    )
+
+    assert record_result.is_success
+    assert record_result.data['status'] == 'rejected'
+    assert record_result.metadata['status'] == 'rejected'
+
+    assert list_result.is_success
+    assert list_result.metadata['count'] == 1
+    assert list_result.data[0]['edge_key'] == 'STL-401|blocks|STL-402'
+    assert list_result.data[0]['reviewer'] == 'codex'

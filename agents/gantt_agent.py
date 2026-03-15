@@ -34,6 +34,7 @@ from agents.gantt_models import (
     PlanningRiskRecord,
     PlanningSnapshot,
 )
+from state.gantt_dependency_review_store import GanttDependencyReviewStore
 from tools.jira_tools import JiraTools, get_jira, get_project_info, get_releases
 
 # Logging config - follows jira_utils.py pattern
@@ -76,7 +77,9 @@ class GanttProjectPlannerAgent(BaseAgent):
             now_provider=self._utc_now,
             stale_days=self.STALE_DAYS,
         )
-        self.dependency_mapper = DependencyMapper()
+        self.dependency_mapper = DependencyMapper(
+            review_store=GanttDependencyReviewStore()
+        )
         self.milestone_planner = MilestonePlanner()
         self.risk_projector = RiskProjector()
         self.planning_summarizer = PlanningSummarizer()
@@ -189,7 +192,10 @@ class GanttProjectPlannerAgent(BaseAgent):
         Query Jira directly so dependency-related fields remain available.
         '''
         issues = self.backlog_interpreter.load_backlog_issues(request)
-        return self.dependency_mapper.attach_dependency_edges(issues)
+        return self.dependency_mapper.attach_dependency_edges(
+            issues,
+            project_key=request.project_key,
+        )
 
     @staticmethod
     def _build_backlog_jql(request: PlanningRequest) -> str:
@@ -197,7 +203,10 @@ class GanttProjectPlannerAgent(BaseAgent):
 
     def _normalize_issue(self, issue: Any) -> Dict[str, Any]:
         normalized = self.backlog_interpreter.normalize_issue(issue)
-        return self.dependency_mapper.attach_dependency_edges([normalized])[0]
+        return self.dependency_mapper.attach_dependency_edges(
+            [normalized],
+            project_key=self.project_key,
+        )[0]
 
     def _extract_edges(
         self,
