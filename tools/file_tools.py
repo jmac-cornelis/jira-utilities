@@ -12,6 +12,7 @@
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,7 +33,11 @@ log = logging.getLogger(os.path.basename(sys.argv[0]))
 def read_file(
     file_path: str,
     encoding: str = 'utf-8',
-    max_size_mb: float = 10.0
+    max_size_mb: float = 10.0,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    tail_lines: Optional[int] = None,
+    max_chars: Optional[int] = None,
 ) -> ToolResult:
     '''
     Read the contents of a file.
@@ -41,11 +46,18 @@ def read_file(
         file_path: Path to the file to read.
         encoding: File encoding (default: utf-8).
         max_size_mb: Maximum file size to read in MB.
+        start_line: Optional 1-based start line for partial reads.
+        end_line: Optional 1-based end line for partial reads.
+        tail_lines: Optional number of lines to read from the end of the file.
+        max_chars: Optional maximum number of characters to return.
     
     Output:
         ToolResult with file contents and metadata.
     '''
-    log.debug(f'read_file(file_path={file_path})')
+    log.debug(
+        f'read_file(file_path={file_path}, start_line={start_line}, '
+        f'end_line={end_line}, tail_lines={tail_lines}, max_chars={max_chars})'
+    )
     
     try:
         path = Path(file_path)
@@ -74,17 +86,62 @@ def read_file(
                 f'Binary file type not supported for text reading: {suffix}'
             )
         
+        if start_line is not None and start_line < 1:
+            return ToolResult.failure('start_line must be >= 1')
+
+        if end_line is not None and end_line < 1:
+            return ToolResult.failure('end_line must be >= 1')
+
+        if tail_lines is not None and tail_lines < 1:
+            return ToolResult.failure('tail_lines must be >= 1')
+
+        if start_line is not None and end_line is not None and end_line < start_line:
+            return ToolResult.failure('end_line must be >= start_line')
+
         # Read the file
         with open(path, 'r', encoding=encoding) as f:
             content = f.read()
+
+        total_lines = content.count('\n') + 1 if content else 0
+        selected_content = content
+        selected_start_line = 1 if total_lines else 0
+        selected_end_line = total_lines
+
+        if any(value is not None for value in (start_line, end_line, tail_lines)):
+            lines = content.splitlines()
+            if content.endswith('\n'):
+                lines.append('')
+
+            if tail_lines is not None:
+                selected_lines = lines[-tail_lines:]
+                selected_start_line = max(len(lines) - len(selected_lines) + 1, 1)
+                selected_end_line = len(lines)
+            else:
+                start_idx = (start_line - 1) if start_line is not None else 0
+                end_idx = end_line if end_line is not None else len(lines)
+                selected_lines = lines[start_idx:end_idx]
+                selected_start_line = start_idx + 1 if selected_lines else 0
+                selected_end_line = start_idx + len(selected_lines)
+
+            selected_content = '\n'.join(selected_lines)
+            if selected_lines and lines and content.endswith('\n') and selected_end_line == len(lines):
+                selected_content += '\n'
+
+        truncated = False
+        if max_chars is not None and max_chars >= 0 and len(selected_content) > max_chars:
+            selected_content = selected_content[:max_chars]
+            truncated = True
         
         result = {
-            'content': content,
+            'content': selected_content,
             'path': str(path.absolute()),
             'filename': path.name,
             'size_bytes': size_bytes,
-            'lines': content.count('\n') + 1,
-            'encoding': encoding
+            'lines': total_lines,
+            'encoding': encoding,
+            'selected_start_line': selected_start_line,
+            'selected_end_line': selected_end_line,
+            'truncated': truncated,
         }
         
         return ToolResult.success(result)
@@ -158,6 +215,95 @@ def write_file(
     except Exception as e:
         log.error(f'Failed to write file: {e}')
         return ToolResult.failure(f'Failed to write file: {e}')
+
+
+@tool(
+    description='Find a text pattern in files under a directory'
+)
+def find_in_files(
+    pattern: str,
+    root: str = '.',
+    glob: Optional[str] = None,
+    case_sensitive: bool = False,
+    limit: int = 100,
+    include_hidden: bool = False,
+) -> ToolResult:
+    '''
+    Search for a text pattern in files under a directory.
+
+    Input:
+        pattern: Text or regular expression pattern to search for.
+        root: Root directory to search.
+        glob: Optional glob pattern to filter files (for example, '*.py').
+        case_sensitive: Whether the pattern match should be case-sensitive.
+        limit: Maximum number of matches to return.
+        include_hidden: Include hidden files and directories.
+
+    Output:
+        ToolResult with matching file paths, line numbers, and line text.
+    '''
+    log.debug(
+        f'find_in_files(pattern={pattern}, root={root}, glob={glob}, '
+        f'case_sensitive={case_sensitive}, limit={limit})'
+    )
+
+    try:
+        if limit < 1:
+            return ToolResult.failure('limit must be >= 1')
+
+        root_path = Path(root)
+        if not root_path.exists():
+            return ToolResult.failure(f'Root path not found: {root}')
+        if not root_path.is_dir():
+            return ToolResult.failure(f'Root path is not a directory: {root}')
+
+        flags = 0 if case_sensitive else re.IGNORECASE
+        regex = re.compile(pattern, flags)
+        file_iter = root_path.rglob(glob or '*')
+
+        matches = []
+        searched_files = 0
+        for path in file_iter:
+            if not path.is_file():
+                continue
+            if not include_hidden and any(part.startswith('.') for part in path.relative_to(root_path).parts):
+                continue
+            if path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.pdf', '.zip', '.tar', '.gz'}:
+                continue
+
+            searched_files += 1
+            try:
+                with open(path, 'r', encoding='utf-8') as handle:
+                    for line_number, line in enumerate(handle, 1):
+                        if regex.search(line):
+                            matches.append({
+                                'path': str(path.relative_to(root_path)),
+                                'absolute_path': str(path.absolute()),
+                                'line_number': line_number,
+                                'line': line.rstrip('\n'),
+                            })
+                            if len(matches) >= limit:
+                                return ToolResult.success(
+                                    {
+                                        'root': str(root_path.absolute()),
+                                        'matches': matches,
+                                        'searched_files': searched_files,
+                                    }
+                                )
+            except (UnicodeDecodeError, OSError):
+                continue
+
+        return ToolResult.success({
+            'root': str(root_path.absolute()),
+            'matches': matches,
+            'searched_files': searched_files,
+        })
+    except re.error as e:
+        log.error(f'Invalid search pattern: {e}')
+        return ToolResult.failure(f'Invalid search pattern: {e}')
+    except Exception as e:
+        log.error(f'Failed to search files: {e}')
+        return ToolResult.failure(f'Failed to search files: {e}')
 
 
 @tool(
@@ -363,8 +509,17 @@ class FileTools(BaseTool):
     '''
     
     @tool(description='Read a file')
-    def read_file(self, file_path: str) -> ToolResult:
-        return read_file(file_path)
+    def read_file(
+        self,
+        file_path: str,
+        encoding: str = 'utf-8',
+        max_size_mb: float = 10.0,
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+        tail_lines: Optional[int] = None,
+        max_chars: Optional[int] = None,
+    ) -> ToolResult:
+        return read_file(file_path, encoding, max_size_mb, start_line, end_line, tail_lines, max_chars)
     
     @tool(description='Write to a file')
     def write_file(
@@ -379,9 +534,23 @@ class FileTools(BaseTool):
     def list_directory(
         self,
         dir_path: str = '.',
-        pattern: Optional[str] = None
+        pattern: Optional[str] = None,
+        recursive: bool = False,
+        include_hidden: bool = False,
     ) -> ToolResult:
-        return list_directory(dir_path, pattern)
+        return list_directory(dir_path, pattern, recursive, include_hidden)
+
+    @tool(description='Find a text pattern in files')
+    def find_in_files(
+        self,
+        pattern: str,
+        root: str = '.',
+        glob: Optional[str] = None,
+        case_sensitive: bool = False,
+        limit: int = 100,
+        include_hidden: bool = False,
+    ) -> ToolResult:
+        return find_in_files(pattern, root, glob, case_sensitive, limit, include_hidden)
     
     @tool(description='Read a JSON file')
     def read_json(self, file_path: str) -> ToolResult:

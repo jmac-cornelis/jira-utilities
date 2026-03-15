@@ -37,6 +37,7 @@ try:
         update_page_section as _cu_update_page_section,
         list_page_children as _cu_list_page_children,
         build_page_tree as _cu_build_page_tree,
+        export_page_to_markdown as _cu_export_page_to_markdown,
     )
 
     CONFLUENCE_UTILS_AVAILABLE = True
@@ -130,6 +131,8 @@ def create_confluence_page(
     input_file: str,
     space: Optional[str] = None,
     parent_id: Optional[str] = None,
+    version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> ToolResult:
     '''
     Create a Confluence page from a Markdown file.
@@ -139,13 +142,16 @@ def create_confluence_page(
         input_file: Path to the Markdown file to publish.
         space: Optional Confluence space key or numeric ID.
         parent_id: Optional parent page ID.
+        version_message: Optional Confluence version history message.
+        dry_run: Return a publish preview without creating the page.
 
     Output:
         ToolResult with created page metadata.
     '''
     log.debug(
         f'create_confluence_page(title={title}, input_file={input_file}, '
-        f'space={space}, parent_id={parent_id})'
+        f'space={space}, parent_id={parent_id}, version_message={version_message}, '
+        f'dry_run={dry_run})'
     )
 
     try:
@@ -156,6 +162,8 @@ def create_confluence_page(
             input_file=input_file,
             space=space,
             parent_id=parent_id,
+            version_message=version_message,
+            dry_run=dry_run,
         )
         return ToolResult.success(page)
     except Exception as e:
@@ -171,6 +179,7 @@ def update_confluence_page(
     input_file: str,
     space: Optional[str] = None,
     version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> ToolResult:
     '''
     Update a Confluence page by page ID or exact title.
@@ -186,7 +195,8 @@ def update_confluence_page(
     '''
     log.debug(
         f'update_confluence_page(page_id_or_title={page_id_or_title}, '
-        f'input_file={input_file}, space={space}, version_message={version_message})'
+        f'input_file={input_file}, space={space}, version_message={version_message}, '
+        f'dry_run={dry_run})'
     )
 
     try:
@@ -197,6 +207,7 @@ def update_confluence_page(
             input_file=input_file,
             space=space,
             version_message=version_message,
+            dry_run=dry_run,
         )
         return ToolResult.success(page)
     except Exception as e:
@@ -212,13 +223,15 @@ def append_to_confluence_page(
     input_file: str,
     space: Optional[str] = None,
     version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> ToolResult:
     '''
     Append Markdown content to an existing Confluence page.
     '''
     log.debug(
         f'append_to_confluence_page(page_id_or_title={page_id_or_title}, '
-        f'input_file={input_file}, space={space}, version_message={version_message})'
+        f'input_file={input_file}, space={space}, version_message={version_message}, '
+        f'dry_run={dry_run})'
     )
 
     try:
@@ -229,6 +242,7 @@ def append_to_confluence_page(
             input_file=input_file,
             space=space,
             version_message=version_message,
+            dry_run=dry_run,
         )
         return ToolResult.success(page)
     except Exception as e:
@@ -245,6 +259,7 @@ def update_confluence_section(
     input_file: str,
     space: Optional[str] = None,
     version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> ToolResult:
     '''
     Replace a section under a heading in a Confluence page.
@@ -252,7 +267,7 @@ def update_confluence_section(
     log.debug(
         f'update_confluence_section(page_id_or_title={page_id_or_title}, '
         f'heading={heading}, input_file={input_file}, space={space}, '
-        f'version_message={version_message})'
+        f'version_message={version_message}, dry_run={dry_run})'
     )
 
     try:
@@ -264,6 +279,7 @@ def update_confluence_section(
             input_file=input_file,
             space=space,
             version_message=version_message,
+            dry_run=dry_run,
         )
         return ToolResult.success(page)
     except Exception as e:
@@ -311,6 +327,36 @@ def list_confluence_children(
         return ToolResult.failure(f'Confluence children lookup failed: {e}')
 
 
+@tool(
+    description='Export a Confluence page to a Markdown file with front matter'
+)
+def export_confluence_page(
+    page_id_or_title: str,
+    output_file: str,
+    space: Optional[str] = None,
+) -> ToolResult:
+    '''
+    Export a Confluence page to Markdown.
+    '''
+    log.debug(
+        f'export_confluence_page(page_id_or_title={page_id_or_title}, '
+        f'output_file={output_file}, space={space})'
+    )
+
+    try:
+        confluence = get_confluence()
+        page = _cu_export_page_to_markdown(
+            confluence,
+            page_id_or_title=page_id_or_title,
+            output_file=output_file,
+            space=space,
+        )
+        return ToolResult.success(page)
+    except Exception as e:
+        log.error(f'Failed to export Confluence page: {e}')
+        return ToolResult.failure(f'Confluence export failed: {e}')
+
+
 class ConfluenceTools(BaseTool):
     '''
     Collection of Confluence tools for agent use.
@@ -341,8 +387,10 @@ class ConfluenceTools(BaseTool):
         input_file: str,
         space: Optional[str] = None,
         parent_id: Optional[str] = None,
+        version_message: Optional[str] = None,
+        dry_run: bool = False,
     ) -> ToolResult:
-        return create_confluence_page(title, input_file, space, parent_id)
+        return create_confluence_page(title, input_file, space, parent_id, version_message, dry_run)
 
     @tool(description='Update a Confluence page from a Markdown file')
     def update_confluence_page(
@@ -351,8 +399,9 @@ class ConfluenceTools(BaseTool):
         input_file: str,
         space: Optional[str] = None,
         version_message: Optional[str] = None,
+        dry_run: bool = False,
     ) -> ToolResult:
-        return update_confluence_page(page_id_or_title, input_file, space, version_message)
+        return update_confluence_page(page_id_or_title, input_file, space, version_message, dry_run)
 
     @tool(description='Append Markdown content to an existing Confluence page')
     def append_to_confluence_page(
@@ -361,8 +410,9 @@ class ConfluenceTools(BaseTool):
         input_file: str,
         space: Optional[str] = None,
         version_message: Optional[str] = None,
+        dry_run: bool = False,
     ) -> ToolResult:
-        return append_to_confluence_page(page_id_or_title, input_file, space, version_message)
+        return append_to_confluence_page(page_id_or_title, input_file, space, version_message, dry_run)
 
     @tool(description='Replace a section under a heading in a Confluence page')
     def update_confluence_section(
@@ -372,8 +422,9 @@ class ConfluenceTools(BaseTool):
         input_file: str,
         space: Optional[str] = None,
         version_message: Optional[str] = None,
+        dry_run: bool = False,
     ) -> ToolResult:
-        return update_confluence_section(page_id_or_title, heading, input_file, space, version_message)
+        return update_confluence_section(page_id_or_title, heading, input_file, space, version_message, dry_run)
 
     @tool(description='List child pages for a Confluence page')
     def list_confluence_children(
@@ -384,3 +435,12 @@ class ConfluenceTools(BaseTool):
         max_depth: Optional[int] = None,
     ) -> ToolResult:
         return list_confluence_children(page_id_or_title, space, recursive, max_depth)
+
+    @tool(description='Export a Confluence page to Markdown')
+    def export_confluence_page(
+        self,
+        page_id_or_title: str,
+        output_file: str,
+        space: Optional[str] = None,
+    ) -> ToolResult:
+        return export_confluence_page(page_id_or_title, output_file, space)

@@ -186,6 +186,122 @@ def _extract_description(desc: Any) -> str:
     return '\n'.join(parts) if parts else str(desc)
 
 
+def _normalize_transition(transition: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a Jira transition payload for MCP responses."""
+    transition_fields = transition.get('fields', {}) or {}
+    normalized_fields = []
+    for field_key, field_info in sorted(
+        transition_fields.items(),
+        key=lambda item: (not item[1].get('required', False), item[1].get('name', item[0])),
+    ):
+        normalized_fields.append({
+            'key': field_key,
+            'name': field_info.get('name', field_key),
+            'required': bool(field_info.get('required', False)),
+            'type': field_info.get('schema', {}).get('type', 'unknown'),
+        })
+
+    return {
+        'id': str(transition.get('id', '') or ''),
+        'name': transition.get('name', ''),
+        'to': (transition.get('to') or {}).get('name', ''),
+        'fields': normalized_fields,
+    }
+
+
+def _match_transition(transitions: list[dict[str, Any]], target_status: str) -> Optional[dict[str, Any]]:
+    """Match a transition by name or destination status."""
+    target = target_status.casefold()
+    for transition in transitions:
+        if str(transition.get('name', '')).casefold() == target:
+            return transition
+        if str((transition.get('to') or {}).get('name', '')).casefold() == target:
+            return transition
+    return None
+
+
+def _normalize_comment(comment: Any) -> dict[str, Any]:
+    """Normalize Jira comment objects or raw comment payloads."""
+    if isinstance(comment, dict):
+        author = comment.get('author') or {}
+        return {
+            'id': str(comment.get('id', '') or ''),
+            'author': author.get('displayName', ''),
+            'author_id': author.get('accountId', ''),
+            'created': comment.get('created', ''),
+            'updated': comment.get('updated', ''),
+            'body': _extract_description(comment.get('body')),
+        }
+
+    author = getattr(comment, 'author', None)
+    return {
+        'id': str(getattr(comment, 'id', '') or ''),
+        'author': getattr(author, 'displayName', '') if author else '',
+        'author_id': getattr(author, 'accountId', '') if author else '',
+        'created': getattr(comment, 'created', '') or '',
+        'updated': getattr(comment, 'updated', '') or '',
+        'body': _extract_description(getattr(comment, 'body', None)),
+    }
+
+
+def _normalize_changelog(issue: Any) -> list[dict[str, Any]]:
+    """Normalize Jira changelog histories."""
+    raw = getattr(issue, 'raw', {}) if hasattr(issue, 'raw') else {}
+    changelog = raw.get('changelog', {}) if isinstance(raw, dict) else {}
+    histories = changelog.get('histories', []) if isinstance(changelog, dict) else []
+    normalized = []
+    for history in histories:
+        author = history.get('author') or {}
+        normalized.append({
+            'id': str(history.get('id', '') or ''),
+            'author': author.get('displayName', ''),
+            'author_id': author.get('accountId', ''),
+            'created': history.get('created', ''),
+            'items': [
+                {
+                    'field': item.get('field', ''),
+                    'from': item.get('fromString', ''),
+                    'to': item.get('toString', ''),
+                }
+                for item in (history.get('items') or [])
+            ],
+        })
+    return normalized
+
+
+def _get_ticket_payload(
+    jira: Any,
+    ticket_key: str,
+    include_comments: bool = False,
+    include_changelog: bool = False,
+    include_transitions: bool = False,
+) -> dict[str, Any]:
+    """Fetch a Jira issue and expand optional details."""
+    issue = jira.issue(
+        ticket_key,
+        fields='*all',
+        expand='changelog' if include_changelog else None,
+    )
+    payload = _issue_to_dict(issue)
+
+    raw = getattr(issue, 'raw', {}) if hasattr(issue, 'raw') else {}
+    fields = raw.get('fields', {}) if isinstance(raw, dict) else {}
+
+    if include_comments:
+        comment_block = fields.get('comment', {})
+        comments = comment_block.get('comments', []) if isinstance(comment_block, dict) else []
+        payload['comments'] = [_normalize_comment(comment) for comment in comments]
+
+    if include_changelog:
+        payload['changelog'] = _normalize_changelog(issue)
+
+    if include_transitions:
+        transitions = jira.transitions(ticket_key, expand='transitions.fields')
+        payload['transitions'] = [_normalize_transition(transition) for transition in transitions]
+
+    return payload
+
+
 def _page_to_dict(page: dict[str, Any]) -> dict[str, Any]:
     """Normalize a Confluence page payload to a small serialisable dict."""
     result = {
@@ -211,6 +327,10 @@ def _page_to_dict(page: dict[str, Any]) -> dict[str, Any]:
         result['depth'] = page.get('depth')
     if 'parent_id' in page:
         result['parent_id'] = page.get('parent_id')
+    if 'dry_run' in page:
+        result['dry_run'] = page.get('dry_run')
+    if 'output_file' in page:
+        result['output_file'] = page.get('output_file')
     return result
 
 
@@ -241,21 +361,131 @@ async def search_tickets(jql: str, limit: int = 50) -> list[Any]:
 # ---------------------------------------------------------------------------
 
 @_tool_decorator()
-async def get_ticket(ticket_key: str) -> list[Any]:
+async def get_ticket(
+    ticket_key: str,
+    include_comments: bool = False,
+    include_changelog: bool = False,
+    include_transitions: bool = False,
+) -> list[Any]:
     """Get detailed information for a single Jira ticket.
 
     Args:
         ticket_key: The Jira issue key (e.g. 'STL-1234').
+        include_comments: Whether to include parsed comments.
+        include_changelog: Whether to include changelog history.
+        include_transitions: Whether to include current workflow transitions.
     """
     try:
         jira = jira_utils.get_connection()
-        # Use JQL to fetch a single issue so we get the same dict format
-        issues = jira_utils.run_jql_query(jira, f'key = "{ticket_key}"', limit=1)
-        if not issues:
-            return _error_result(f'Ticket {ticket_key} not found')
-        return _json_result(_issue_to_dict(issues[0]))
+        return _json_result(
+            _get_ticket_payload(
+                jira,
+                ticket_key,
+                include_comments=include_comments,
+                include_changelog=include_changelog,
+                include_transitions=include_transitions,
+            )
+        )
     except Exception as e:
+        if any(token in str(e).lower() for token in ('not found', 'does not exist', '404')):
+            return _error_result(f'Ticket {ticket_key} not found')
         log.error(f'get_ticket failed: {e}')
+        return _error_result(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Jira capability sync tools
+# ---------------------------------------------------------------------------
+
+@_tool_decorator()
+async def get_project_fields(
+    project_key: str,
+    issue_types: Optional[list[str]] = None,
+) -> list[Any]:
+    """Get create, edit, and transition field metadata for Jira issue types.
+
+    Args:
+        project_key: Jira project key (e.g. 'STL').
+        issue_types: Optional list of issue types to inspect.
+    """
+    try:
+        jira = jira_utils.get_connection()
+        result = jira_utils.get_project_fields(jira, project_key, issue_type_names=issue_types)
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'get_project_fields failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def list_transitions(ticket_key: str) -> list[Any]:
+    """List currently available Jira workflow transitions for a ticket."""
+    try:
+        jira = jira_utils.get_connection()
+        transitions = jira.transitions(ticket_key, expand='transitions.fields')
+        return _json_result([_normalize_transition(transition) for transition in transitions])
+    except Exception as e:
+        log.error(f'list_transitions failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def transition_ticket(
+    ticket_key: str,
+    to_status: str,
+    comment: Optional[str] = None,
+    fields: Optional[dict[str, Any]] = None,
+) -> list[Any]:
+    """Transition a Jira ticket to a new status.
+
+    Args:
+        ticket_key: Jira issue key.
+        to_status: Transition name or destination status name.
+        comment: Optional comment to add after the transition.
+        fields: Optional transition field payload.
+    """
+    try:
+        jira = jira_utils.get_connection()
+        issue = jira.issue(ticket_key)
+        transitions = jira.transitions(issue, expand='transitions.fields')
+        target = _match_transition(transitions, to_status)
+        if target is None:
+            available = [transition.get('name', '') for transition in transitions]
+            return _error_result(
+                f'Cannot transition to "{to_status}". Available transitions: {available}'
+            )
+
+        transition_kwargs: dict[str, Any] = {}
+        if fields:
+            transition_kwargs['fields'] = fields
+        jira.transition_issue(issue, target['id'], **transition_kwargs)
+
+        if comment:
+            jira.add_comment(issue, comment)
+
+        result = _get_ticket_payload(jira, ticket_key)
+        result['transition'] = _normalize_transition(target)
+        if comment:
+            result['comment_added'] = True
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'transition_ticket failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def add_ticket_comment(ticket_key: str, body: str) -> list[Any]:
+    """Add a comment to a Jira ticket."""
+    try:
+        jira = jira_utils.get_connection()
+        issue = jira.issue(ticket_key)
+        comment = jira.add_comment(issue, body)
+        return _json_result({
+            'ticket_key': ticket_key,
+            'comment': _normalize_comment(comment),
+        })
+    except Exception as e:
+        log.error(f'add_ticket_comment failed: {e}')
         return _error_result(str(e))
 
 
@@ -323,6 +553,8 @@ async def create_confluence_page(
     input_file: str,
     space: Optional[str] = None,
     parent_id: Optional[str] = None,
+    version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> list[Any]:
     """Create a Confluence page from a Markdown file.
 
@@ -331,6 +563,8 @@ async def create_confluence_page(
         input_file: Markdown file to publish.
         space: Optional Confluence space key or numeric ID.
         parent_id: Optional parent page ID.
+        version_message: Optional Confluence version history message.
+        dry_run: Return a publish preview without creating the page.
     """
     try:
         confluence = confluence_utils.get_connection()
@@ -340,9 +574,11 @@ async def create_confluence_page(
             input_file=input_file,
             space=space,
             parent_id=parent_id,
+            version_message=version_message,
+            dry_run=dry_run,
         )
         result = _page_to_dict(page)
-        result['message'] = 'Page created successfully'
+        result['message'] = 'Page preview generated successfully' if dry_run else 'Page created successfully'
         return _json_result(result)
     except Exception as e:
         log.error(f'create_confluence_page failed: {e}')
@@ -355,6 +591,7 @@ async def update_confluence_page(
     input_file: str,
     space: Optional[str] = None,
     version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> list[Any]:
     """Update a Confluence page from a Markdown file.
 
@@ -363,6 +600,7 @@ async def update_confluence_page(
         input_file: Markdown file to publish.
         space: Optional Confluence space key or numeric ID for title disambiguation.
         version_message: Optional Confluence version history message.
+        dry_run: Return a publish preview without updating the page.
     """
     try:
         confluence = confluence_utils.get_connection()
@@ -372,9 +610,10 @@ async def update_confluence_page(
             input_file=input_file,
             space=space,
             version_message=version_message,
+            dry_run=dry_run,
         )
         result = _page_to_dict(page)
-        result['message'] = 'Page updated successfully'
+        result['message'] = 'Page preview generated successfully' if dry_run else 'Page updated successfully'
         return _json_result(result)
     except Exception as e:
         log.error(f'update_confluence_page failed: {e}')
@@ -387,6 +626,7 @@ async def append_to_confluence_page(
     input_file: str,
     space: Optional[str] = None,
     version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> list[Any]:
     """Append Markdown content to an existing Confluence page."""
     try:
@@ -397,9 +637,10 @@ async def append_to_confluence_page(
             input_file=input_file,
             space=space,
             version_message=version_message,
+            dry_run=dry_run,
         )
         result = _page_to_dict(page)
-        result['message'] = 'Page appended successfully'
+        result['message'] = 'Page preview generated successfully' if dry_run else 'Page appended successfully'
         return _json_result(result)
     except Exception as e:
         log.error(f'append_to_confluence_page failed: {e}')
@@ -413,6 +654,7 @@ async def update_confluence_section(
     input_file: str,
     space: Optional[str] = None,
     version_message: Optional[str] = None,
+    dry_run: bool = False,
 ) -> list[Any]:
     """Replace a section under a heading in an existing Confluence page."""
     try:
@@ -424,9 +666,12 @@ async def update_confluence_section(
             input_file=input_file,
             space=space,
             version_message=version_message,
+            dry_run=dry_run,
         )
         result = _page_to_dict(page)
-        result['message'] = 'Page section updated successfully'
+        result['message'] = (
+            'Page preview generated successfully' if dry_run else 'Page section updated successfully'
+        )
         return _json_result(result)
     except Exception as e:
         log.error(f'update_confluence_section failed: {e}')
@@ -461,6 +706,36 @@ async def list_confluence_children(
         return _json_result([_page_to_dict(row) for row in rows])
     except Exception as e:
         log.error(f'list_confluence_children failed: {e}')
+        return _error_result(str(e))
+
+
+@_tool_decorator()
+async def export_confluence_page(
+    page_id_or_title: str,
+    output_file: str,
+    space: Optional[str] = None,
+) -> list[Any]:
+    """Export a Confluence page to a Markdown file.
+
+    Args:
+        page_id_or_title: Existing page ID or exact page title.
+        output_file: Output Markdown file path.
+        space: Optional Confluence space key or numeric ID.
+    """
+    try:
+        confluence = confluence_utils.get_connection()
+        page = confluence_utils.export_page_to_markdown(
+            confluence,
+            page_id_or_title=page_id_or_title,
+            output_file=output_file,
+            space=space,
+        )
+        result = _page_to_dict(page)
+        result['output_file'] = page.get('output_file', output_file)
+        result['message'] = 'Page exported successfully'
+        return _json_result(result)
+    except Exception as e:
+        log.error(f'export_confluence_page failed: {e}')
         return _error_result(str(e))
 
 

@@ -204,24 +204,26 @@ async def test_search_tickets_error(import_mcp_server, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_ticket_success(import_mcp_server, monkeypatch):
-    jira = object()
-    issue = _issue(key='STL-701')
+    jira = MagicMock()
+    issue = MagicMock()
+    issue.key = 'STL-701'
+    issue.raw = _issue(key='STL-701')
 
     monkeypatch.setattr(import_mcp_server.jira_utils, 'get_connection', lambda: jira)
-    run_query = MagicMock(return_value=[issue])
-    monkeypatch.setattr(import_mcp_server.jira_utils, 'run_jql_query', run_query)
+    jira.issue.return_value = issue
 
     result = await import_mcp_server.get_ticket('STL-701')
     data = _payload(result)
 
-    run_query.assert_called_once_with(jira, 'key = "STL-701"', limit=1)
+    jira.issue.assert_called_once_with('STL-701', fields='*all', expand=None)
     assert data['key'] == 'STL-701'
 
 
 @pytest.mark.asyncio
 async def test_get_ticket_not_found(import_mcp_server, monkeypatch):
-    monkeypatch.setattr(import_mcp_server.jira_utils, 'get_connection', lambda: object())
-    monkeypatch.setattr(import_mcp_server.jira_utils, 'run_jql_query', lambda _jira, _jql, limit=1: [])
+    jira = MagicMock()
+    jira.issue.side_effect = Exception('Issue does not exist')
+    monkeypatch.setattr(import_mcp_server.jira_utils, 'get_connection', lambda: jira)
 
     result = await import_mcp_server.get_ticket('STL-999')
     data = _payload(result)

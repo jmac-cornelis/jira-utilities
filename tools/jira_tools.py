@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 from tools.base import BaseTool, ToolResult, tool
 from core.tickets import issue_to_dict
+from core.utils import extract_text_from_adf
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +46,7 @@ try:
         list_filters as _ju_list_filters,
         run_filter as _ju_run_filter,
         run_jql_query as _ju_run_jql_query,
+        get_project_fields as _ju_get_project_fields,
         get_children_hierarchy as _ju_get_children_hierarchy,
         get_project_versions as _ju_get_project_versions,
         get_ticket_totals as _ju_get_ticket_totals,
@@ -75,6 +77,134 @@ def get_jira():
         raise RuntimeError('jira_utils.py is required but not available')
 
     return jira_utils.get_connection()
+
+
+def _normalize_transition(transition: dict[str, Any]) -> dict[str, Any]:
+    '''
+    Normalize a Jira transition payload for agent-friendly output.
+    '''
+    transition_fields = transition.get('fields', {}) or {}
+    normalized_fields = []
+    for field_key, field_info in sorted(
+        transition_fields.items(),
+        key=lambda item: (not item[1].get('required', False), item[1].get('name', item[0])),
+    ):
+        normalized_fields.append({
+            'key': field_key,
+            'name': field_info.get('name', field_key),
+            'required': bool(field_info.get('required', False)),
+            'type': field_info.get('schema', {}).get('type', 'unknown'),
+        })
+
+    return {
+        'id': str(transition.get('id', '') or ''),
+        'name': transition.get('name', ''),
+        'to': (transition.get('to') or {}).get('name', ''),
+        'fields': normalized_fields,
+    }
+
+
+def _match_transition(transitions: list[dict[str, Any]], target_status: str) -> Optional[dict[str, Any]]:
+    '''
+    Match a transition by transition name or destination status name.
+    '''
+    target = target_status.casefold()
+    for transition in transitions:
+        if str(transition.get('name', '')).casefold() == target:
+            return transition
+        if str((transition.get('to') or {}).get('name', '')).casefold() == target:
+            return transition
+    return None
+
+
+def _normalize_comment(comment: Any) -> dict[str, Any]:
+    '''
+    Normalize Jira comment objects or raw REST payloads.
+    '''
+    if isinstance(comment, dict):
+        author = comment.get('author') or {}
+        return {
+            'id': str(comment.get('id', '') or ''),
+            'author': author.get('displayName', ''),
+            'author_id': author.get('accountId', ''),
+            'created': comment.get('created', ''),
+            'updated': comment.get('updated', ''),
+            'body': extract_text_from_adf(comment.get('body')),
+        }
+
+    author = getattr(comment, 'author', None)
+    return {
+        'id': str(getattr(comment, 'id', '') or ''),
+        'author': getattr(author, 'displayName', '') if author else '',
+        'author_id': getattr(author, 'accountId', '') if author else '',
+        'created': getattr(comment, 'created', '') or '',
+        'updated': getattr(comment, 'updated', '') or '',
+        'body': extract_text_from_adf(getattr(comment, 'body', None)),
+    }
+
+
+def _normalize_changelog(issue: Any) -> list[dict[str, Any]]:
+    '''
+    Normalize Jira changelog histories into a compact serialisable list.
+    '''
+    raw = getattr(issue, 'raw', {}) if hasattr(issue, 'raw') else {}
+    changelog = raw.get('changelog', {}) if isinstance(raw, dict) else {}
+    histories = changelog.get('histories', []) if isinstance(changelog, dict) else []
+    normalized = []
+    for history in histories:
+        author = history.get('author') or {}
+        normalized.append({
+            'id': str(history.get('id', '') or ''),
+            'author': author.get('displayName', ''),
+            'author_id': author.get('accountId', ''),
+            'created': history.get('created', ''),
+            'items': [
+                {
+                    'field': item.get('field', ''),
+                    'from': item.get('fromString', ''),
+                    'to': item.get('toString', ''),
+                }
+                for item in (history.get('items') or [])
+            ],
+        })
+    return normalized
+
+
+def _get_ticket_payload(
+    jira: Any,
+    ticket_key: str,
+    include_comments: bool = False,
+    include_changelog: bool = False,
+    include_transitions: bool = False,
+) -> dict[str, Any]:
+    '''
+    Fetch a single Jira ticket with optional comments, changelog, and transitions.
+    '''
+    issue = jira.issue(
+        ticket_key,
+        fields='*all',
+        expand='changelog' if include_changelog else None,
+    )
+    payload = issue_to_dict(issue)
+
+    raw = getattr(issue, 'raw', {}) if hasattr(issue, 'raw') else {}
+    fields = raw.get('fields', {}) if isinstance(raw, dict) else {}
+
+    if include_comments:
+        comments = []
+        comment_block = fields.get('comment', {})
+        if isinstance(comment_block, dict):
+            comments = [_normalize_comment(comment) for comment in (comment_block.get('comments') or [])]
+        payload['comments'] = comments
+
+    if include_changelog:
+        payload['changelog'] = _normalize_changelog(issue)
+
+    if include_transitions:
+        transitions = jira.transitions(ticket_key, expand='transitions.fields')
+        payload['transitions'] = [_normalize_transition(transition) for transition in transitions]
+
+    return payload
 
 
 # ****************************************************************************************
@@ -351,6 +481,172 @@ def search_tickets(
     except Exception as e:
         log.error(f'Failed to search tickets: {e}')
         return ToolResult.failure(f'JQL search failed: {e}')
+
+
+@tool(
+    description='Get a single Jira ticket with optional comments, changelog, and transitions'
+)
+def get_ticket(
+    ticket_key: str,
+    include_comments: bool = False,
+    include_changelog: bool = False,
+    include_transitions: bool = False,
+) -> ToolResult:
+    '''
+    Get a single Jira ticket by key.
+
+    Input:
+        ticket_key: Jira issue key (for example, STL-1234).
+        include_comments: Include parsed comments.
+        include_changelog: Include changelog history entries.
+        include_transitions: Include currently available workflow transitions.
+
+    Output:
+        ToolResult with the ticket details.
+    '''
+    log.debug(
+        f'get_ticket(ticket_key={ticket_key}, include_comments={include_comments}, '
+        f'include_changelog={include_changelog}, include_transitions={include_transitions})'
+    )
+
+    try:
+        jira = get_jira()
+        return ToolResult.success(
+            _get_ticket_payload(
+                jira,
+                ticket_key,
+                include_comments=include_comments,
+                include_changelog=include_changelog,
+                include_transitions=include_transitions,
+            )
+        )
+    except Exception as e:
+        if any(token in str(e).lower() for token in ('not found', 'does not exist', '404')):
+            return ToolResult.failure(f'Ticket {ticket_key} not found')
+        log.error(f'Failed to get ticket {ticket_key}: {e}')
+        return ToolResult.failure(f'Failed to get ticket {ticket_key}: {e}')
+
+
+@tool(
+    description='Get create, edit, and transition field metadata for Jira issue types in a project'
+)
+def get_project_fields(project_key: str, issue_types: Optional[List[str]] = None) -> ToolResult:
+    '''
+    Get create, edit, and transition field metadata for a Jira project.
+
+    Input:
+        project_key: Jira project key.
+        issue_types: Optional list of issue types to inspect.
+
+    Output:
+        ToolResult with create/edit/transition field metadata.
+    '''
+    log.debug(f'get_project_fields(project_key={project_key}, issue_types={issue_types})')
+
+    try:
+        jira = get_jira()
+        fields = _ju_get_project_fields(jira, project_key, issue_type_names=issue_types)
+        return ToolResult.success(fields)
+    except Exception as e:
+        log.error(f'Failed to get project fields: {e}')
+        return ToolResult.failure(f'Failed to get project fields for {project_key}: {e}')
+
+
+@tool(
+    description='List the currently available workflow transitions for a Jira ticket'
+)
+def list_transitions(ticket_key: str) -> ToolResult:
+    '''
+    List available workflow transitions for a Jira ticket.
+    '''
+    log.debug(f'list_transitions(ticket_key={ticket_key})')
+
+    try:
+        jira = get_jira()
+        transitions = jira.transitions(ticket_key, expand='transitions.fields')
+        rows = [_normalize_transition(transition) for transition in transitions]
+        return ToolResult.success(rows, count=len(rows), ticket_key=ticket_key)
+    except Exception as e:
+        log.error(f'Failed to list transitions: {e}')
+        return ToolResult.failure(f'Failed to list transitions for {ticket_key}: {e}')
+
+
+@tool(
+    description='Transition a Jira ticket to a new status with optional transition fields and comment'
+)
+def transition_ticket(
+    ticket_key: str,
+    to_status: str,
+    comment: Optional[str] = None,
+    fields: Optional[Dict[str, Any]] = None,
+) -> ToolResult:
+    '''
+    Transition a Jira ticket to a new status.
+
+    Input:
+        ticket_key: Jira issue key.
+        to_status: Transition name or destination status name.
+        comment: Optional comment to add after the transition.
+        fields: Optional transition field payload.
+
+    Output:
+        ToolResult with the updated ticket and applied transition metadata.
+    '''
+    log.debug(
+        f'transition_ticket(ticket_key={ticket_key}, to_status={to_status}, '
+        f'comment_provided={comment is not None})'
+    )
+
+    try:
+        jira = get_jira()
+        issue = jira.issue(ticket_key)
+        transitions = jira.transitions(issue, expand='transitions.fields')
+        target = _match_transition(transitions, to_status)
+        if target is None:
+            available = [transition.get('name', '') for transition in transitions]
+            return ToolResult.failure(
+                f'Cannot transition to "{to_status}". Available transitions: {available}'
+            )
+
+        transition_kwargs: dict[str, Any] = {}
+        if fields:
+            transition_kwargs['fields'] = fields
+        jira.transition_issue(issue, target['id'], **transition_kwargs)
+
+        if comment:
+            jira.add_comment(issue, comment)
+
+        updated = _get_ticket_payload(jira, ticket_key)
+        updated['transition'] = _normalize_transition(target)
+        if comment:
+            updated['comment_added'] = True
+        return ToolResult.success(updated)
+    except Exception as e:
+        log.error(f'Failed to transition ticket: {e}')
+        return ToolResult.failure(f'Failed to transition {ticket_key}: {e}')
+
+
+@tool(
+    description='Add a comment to a Jira ticket'
+)
+def add_ticket_comment(ticket_key: str, body: str) -> ToolResult:
+    '''
+    Add a comment to a Jira ticket.
+    '''
+    log.debug(f'add_ticket_comment(ticket_key={ticket_key})')
+
+    try:
+        jira = get_jira()
+        issue = jira.issue(ticket_key)
+        comment = jira.add_comment(issue, body)
+        result = {
+            'ticket_key': ticket_key,
+            'comment': _normalize_comment(comment),
+        }
+        return ToolResult.success(result)
+    except Exception as e:
+        log.error(f'Failed to add comment: {e}')
+        return ToolResult.failure(f'Failed to add comment to {ticket_key}: {e}')
 
 
 @tool(
@@ -1633,22 +1929,49 @@ class JiraTools(BaseTool):
     def get_releases(
         self,
         project_key: str,
-        pattern: Optional[str] = None
+        pattern: Optional[str] = None,
+        include_released: bool = True,
+        include_unreleased: bool = True,
     ) -> ToolResult:
-        return get_releases(project_key, pattern)
+        return get_releases(project_key, pattern, include_released, include_unreleased)
     
     @tool(description='Get tickets for a release')
     def get_release_tickets(
         self,
         project_key: str,
         release_name: str,
+        issue_types: Optional[List[str]] = None,
+        status: Optional[List[str]] = None,
         limit: int = 100
     ) -> ToolResult:
-        return get_release_tickets(project_key, release_name, limit=limit)
+        return get_release_tickets(project_key, release_name, issue_types, status, limit)
     
     @tool(description='Search tickets using JQL')
-    def search_tickets(self, jql: str, limit: int = 100) -> ToolResult:
-        return search_tickets(jql, limit)
+    def search_tickets(
+        self,
+        jql: str,
+        limit: int = 100,
+        fields: Optional[List[str]] = None,
+    ) -> ToolResult:
+        return search_tickets(jql, limit, fields)
+
+    @tool(description='Get a single Jira ticket')
+    def get_ticket(
+        self,
+        ticket_key: str,
+        include_comments: bool = False,
+        include_changelog: bool = False,
+        include_transitions: bool = False,
+    ) -> ToolResult:
+        return get_ticket(ticket_key, include_comments, include_changelog, include_transitions)
+
+    @tool(description='Get create, edit, and transition field metadata for a project')
+    def get_project_fields(
+        self,
+        project_key: str,
+        issue_types: Optional[List[str]] = None,
+    ) -> ToolResult:
+        return get_project_fields(project_key, issue_types)
     
     @tool(description='Create a new ticket')
     def create_ticket(
@@ -1656,18 +1979,53 @@ class JiraTools(BaseTool):
         project_key: str,
         summary: str,
         issue_type: str,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        assignee: Optional[str] = None,
+        components: Optional[List[str]] = None,
+        fix_versions: Optional[List[str]] = None,
+        labels: Optional[List[str]] = None,
+        parent_key: Optional[str] = None,
+        product_family: Optional[List[str]] = None,
+        custom_fields: Optional[Dict[str, Any]] = None,
     ) -> ToolResult:
-        return create_ticket(project_key, summary, issue_type, description)
+        return create_ticket(
+            project_key,
+            summary,
+            issue_type,
+            description,
+            assignee,
+            components,
+            fix_versions,
+            labels,
+            parent_key,
+            product_family,
+            custom_fields,
+        )
     
     @tool(description='Update an existing ticket')
     def update_ticket(
         self,
         ticket_key: str,
         summary: Optional[str] = None,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        assignee: Optional[str] = None,
+        status: Optional[str] = None,
+        fix_versions: Optional[List[str]] = None,
+        components: Optional[List[str]] = None,
+        labels: Optional[List[str]] = None,
+        custom_fields: Optional[Dict[str, Any]] = None,
     ) -> ToolResult:
-        return update_ticket(ticket_key, summary, description)
+        return update_ticket(
+            ticket_key,
+            summary,
+            description,
+            assignee,
+            status,
+            fix_versions,
+            components,
+            labels,
+            custom_fields,
+        )
     
     @tool(description='Create a new release')
     def create_release(
@@ -1694,14 +2052,33 @@ class JiraTools(BaseTool):
     @tool(description='Assign a ticket to a user')
     def assign_ticket(self, ticket_key: str, assignee: str) -> ToolResult:
         return assign_ticket(ticket_key, assignee)
+
+    @tool(description='List workflow transitions available for a ticket')
+    def list_transitions(self, ticket_key: str) -> ToolResult:
+        return list_transitions(ticket_key)
+
+    @tool(description='Transition a ticket to a new status')
+    def transition_ticket(
+        self,
+        ticket_key: str,
+        to_status: str,
+        comment: Optional[str] = None,
+        fields: Optional[Dict[str, Any]] = None,
+    ) -> ToolResult:
+        return transition_ticket(ticket_key, to_status, comment, fields)
+
+    @tool(description='Add a comment to a ticket')
+    def add_ticket_comment(self, ticket_key: str, body: str) -> ToolResult:
+        return add_ticket_comment(ticket_key, body)
     
     @tool(description='Get related tickets by traversing links')
     def get_related_tickets(
         self,
         ticket_key: str,
-        hierarchy_depth: int = 3
+        hierarchy_depth: int = 3,
+        limit: int = 100,
     ) -> ToolResult:
-        return get_related_tickets(ticket_key, hierarchy_depth)
+        return get_related_tickets(ticket_key, hierarchy_depth, limit)
     
     # --- New delegate methods for expanded tool coverage ---
 

@@ -15,12 +15,17 @@ from tools.jira_tools import (
     get_releases,
     get_release_tickets,
     search_tickets,
+    get_ticket,
+    get_project_fields,
     create_ticket,
     update_ticket,
     create_release,
     link_tickets,
     get_components,
     assign_ticket,
+    list_transitions,
+    transition_ticket,
+    add_ticket_comment,
     get_project_workflows,
     get_project_issue_types,
     # New tool wrappers
@@ -44,6 +49,7 @@ from tools.confluence_tools import (
     append_to_confluence_page,
     update_confluence_section,
     list_confluence_children,
+    export_confluence_page,
     ConfluenceTools,
 )
 from tools.drawio_tools import (
@@ -63,7 +69,29 @@ from tools.file_tools import (
     read_file,
     write_file,
     list_directory,
+    find_in_files,
+    read_json,
+    write_json,
+    read_yaml,
     FileTools,
+)
+from tools.knowledge_tools import (
+    search_knowledge,
+    list_knowledge_files,
+    read_knowledge_file,
+    read_document,
+    KnowledgeTools,
+)
+from tools.web_search_tools import (
+    web_search,
+    web_search_multi,
+    WebSearchTools,
+)
+from tools.mcp_tools import (
+    mcp_discover_tools,
+    mcp_call_tool,
+    mcp_search,
+    MCPTools,
 )
 from tools.excel_tools import (
     build_excel_map,
@@ -89,12 +117,17 @@ __all__ = [
     'get_releases',
     'get_release_tickets',
     'search_tickets',
+    'get_ticket',
+    'get_project_fields',
     'create_ticket',
     'update_ticket',
     'create_release',
     'link_tickets',
     'get_components',
     'assign_ticket',
+    'list_transitions',
+    'transition_ticket',
+    'add_ticket_comment',
     'get_project_workflows',
     'get_project_issue_types',
     # New Jira tools
@@ -117,6 +150,7 @@ __all__ = [
     'append_to_confluence_page',
     'update_confluence_section',
     'list_confluence_children',
+    'export_confluence_page',
     'ConfluenceTools',
     # Draw.io
     'parse_org_chart',
@@ -133,7 +167,26 @@ __all__ = [
     'read_file',
     'write_file',
     'list_directory',
+    'find_in_files',
+    'read_json',
+    'write_json',
+    'read_yaml',
     'FileTools',
+    # Knowledge
+    'search_knowledge',
+    'list_knowledge_files',
+    'read_knowledge_file',
+    'read_document',
+    'KnowledgeTools',
+    # Web Search
+    'web_search',
+    'web_search_multi',
+    'WebSearchTools',
+    # MCP Client
+    'mcp_discover_tools',
+    'mcp_call_tool',
+    'mcp_search',
+    'MCPTools',
     # Excel
     'build_excel_map',
     'concat_excel',

@@ -1,8 +1,10 @@
+import json
 import sys
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from unittest.mock import MagicMock
 
 
 def test_issue_to_dict_shape(import_mcp_server):
@@ -85,14 +87,50 @@ async def test_search_tickets_tool_returns_json_text(import_mcp_server, monkeypa
 
 @pytest.mark.asyncio
 async def test_get_ticket_not_found_shape(import_mcp_server, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(import_mcp_server.jira_utils, 'get_connection', lambda: object())
-    monkeypatch.setattr(import_mcp_server.jira_utils, 'run_jql_query', lambda _jira, _jql, limit=1: [])
+    jira = MagicMock()
+    jira.issue.side_effect = Exception('Issue does not exist')
+    monkeypatch.setattr(import_mcp_server.jira_utils, 'get_connection', lambda: jira)
 
     result = await import_mcp_server.get_ticket('STL-999999')
 
     assert isinstance(result, list)
     assert result[0].type == 'text'
     assert 'not found' in result[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_get_ticket_with_comments_and_transitions_shape(
+    import_mcp_server,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_issue_resource_factory,
+):
+    jira = MagicMock()
+    jira.issue.return_value = fake_issue_resource_factory(
+        key='STL-888',
+        comments=[
+            {
+                'id': '1',
+                'author': {'displayName': 'Reviewer', 'accountId': 'acct-reviewer'},
+                'created': '2026-03-15T10:00:00.000+0000',
+                'updated': '2026-03-15T10:00:00.000+0000',
+                'body': 'Ship it',
+            }
+        ],
+    )
+    jira.transitions.return_value = [
+        {'id': '31', 'name': 'Start Verify', 'to': {'name': 'Verify'}, 'fields': {}}
+    ]
+    monkeypatch.setattr(import_mcp_server.jira_utils, 'get_connection', lambda: jira)
+
+    result = await import_mcp_server.get_ticket(
+        'STL-888',
+        include_comments=True,
+        include_transitions=True,
+    )
+    data = json.loads(result[0].text)
+
+    assert data['comments'][0]['body'] == 'Ship it'
+    assert data['transitions'][0]['to'] == 'Verify'
 
 
 @pytest.mark.asyncio

@@ -36,3 +36,45 @@ def test_import_excel_tools_class():
     from tools.excel_tools import ExcelTools
 
     assert ExcelTools is not None
+
+
+def test_import_file_tools_class():
+    from tools.file_tools import FileTools
+
+    assert FileTools is not None
+
+
+def test_import_knowledge_tools_class():
+    from tools.knowledge_tools import KnowledgeTools
+
+    assert KnowledgeTools is not None
+
+
+def test_import_web_search_tools_class():
+    from tools.web_search_tools import WebSearchTools
+
+    assert WebSearchTools is not None
+
+
+def test_import_mcp_tools_class():
+    from tools.mcp_tools import MCPTools
+
+    assert MCPTools is not None
+
+
+def test_import_tools_package_exports():
+    from tools import (
+        KnowledgeTools,
+        WebSearchTools,
+        MCPTools,
+        search_knowledge,
+        web_search,
+        mcp_discover_tools,
+    )
+
+    assert KnowledgeTools is not None
+    assert WebSearchTools is not None
+    assert MCPTools is not None
+    assert callable(search_knowledge)
+    assert callable(web_search)
+    assert callable(mcp_discover_tools)
